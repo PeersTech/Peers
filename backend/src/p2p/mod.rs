@@ -10,7 +10,10 @@ use futures::StreamExt;
 use libp2p::gossipsub::{Sha256Hash, Topic};
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, RequestResponseEvent, RequestResponseMessage};
-use libp2p::{gossipsub, identify, kademlia, request_response, Multiaddr, PeerId, Swarm, SwarmBuilder, SwarmEvent};
+use libp2p::{
+    gossipsub, identify, kademlia, request_response, Multiaddr, PeerId, Swarm, SwarmBuilder,
+    SwarmEvent,
+};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{broadcast, mpsc};
 
@@ -25,7 +28,10 @@ pub enum NodeCommand {
     Subscribe(String),
     Unsubscribe(String),
     /// Publish a sealed envelope to a subscribed topic.
-    Publish { topic: String, data: Vec<u8> },
+    Publish {
+        topic: String,
+        data: Vec<u8>,
+    },
     /// Store a blob locally and advertise it on the DHT.
     ParkBlob(Vec<u8>),
     /// Look up DHT providers for a hash and request the blob from them.
@@ -38,15 +44,35 @@ pub enum NodeCommand {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum NodeEvent {
-    Listening { addr: String },
-    PeerConnected { peer_id: String },
-    PeerDisconnected { peer_id: String },
+    Listening {
+        addr: String,
+    },
+    PeerConnected {
+        peer_id: String,
+    },
+    PeerDisconnected {
+        peer_id: String,
+    },
     /// Raw sealed envelope received on a topic (app layer decrypts it).
-    Message { topic: String, from: String, data: Vec<u8> },
-    BlobParked { hash: String },
-    BlobFetched { hash: String, data: Vec<u8> },
-    BlobFetchFailed { hash: String, reason: String },
-    Error { message: String },
+    Message {
+        topic: String,
+        from: String,
+        data: Vec<u8>,
+    },
+    BlobParked {
+        hash: String,
+    },
+    BlobFetched {
+        hash: String,
+        data: Vec<u8>,
+    },
+    BlobFetchFailed {
+        hash: String,
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Handle to a running node. Cloneable; commands are queued and processed
@@ -91,10 +117,7 @@ pub fn spawn(identity: Identity) -> Result<NodeHandle> {
 
     tokio::spawn(Node::run(swarm, rx, events.clone()));
 
-    Ok(NodeHandle {
-        tx,
-        events,
-    })
+    Ok(NodeHandle { tx, events })
 }
 
 /// Hex-encodes a blob hash.
@@ -191,7 +214,10 @@ impl Node {
                     let mut ma = addr.clone();
                     match ma.pop() {
                         Some(Protocol::P2p(peer)) => {
-                            self.swarm.behaviour_mut().kademlia.add_address(&peer, ma.clone());
+                            self.swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer, ma.clone());
                             let _ = self.swarm.dial(ma);
                         }
                         _ => {
@@ -224,7 +250,12 @@ impl Node {
                     });
                     return;
                 };
-                match self.swarm.behaviour_mut().gossipsub.publish(topic.hash(), data) {
+                match self
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic.hash(), data)
+                {
                     Ok(_) => {}
                     Err(e) => self.emit(NodeEvent::Error {
                         message: format!("publish: {e}"),
@@ -234,17 +265,26 @@ impl Node {
             NodeCommand::ParkBlob(data) => {
                 let hash = self.blobs.put(&data);
                 if !self.announced.contains(&hash) {
-                    match self.swarm.behaviour_mut().kademlia.start_providing(kademlia::Key::new(hash)) {
+                    match self
+                        .swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .start_providing(kademlia::Key::new(hash))
+                    {
                         Ok(_) => {
                             self.announced.insert(hash);
-                            self.emit(NodeEvent::BlobParked { hash: hex_hash(&hash) });
+                            self.emit(NodeEvent::BlobParked {
+                                hash: hex_hash(&hash),
+                            });
                         }
                         Err(e) => self.emit(NodeEvent::Error {
                             message: format!("provide {hash:?}: {e}"),
                         }),
                     }
                 } else {
-                    self.emit(NodeEvent::BlobParked { hash: hex_hash(&hash) });
+                    self.emit(NodeEvent::BlobParked {
+                        hash: hex_hash(&hash),
+                    });
                 }
             }
             NodeCommand::FetchBlob(hash) => {
@@ -292,7 +332,10 @@ impl Node {
                 let peer = info.public_key.to_peer_id();
                 let addrs: Vec<Multiaddr> = info.listen_addrs.clone();
                 for addr in &addrs {
-                    self.swarm.behaviour_mut().kademlia.add_address(&peer, addr.clone());
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer, addr.clone());
                 }
                 self.peer_addresses.insert(peer, addrs);
             }
@@ -301,7 +344,9 @@ impl Node {
                 kademlia::Event::OutboundQueryProgressed { id, result, .. } => {
                     self.handle_query_progress(id, result);
                 }
-                kademlia::Event::RoutingUpdated { peer, addresses, .. } => {
+                kademlia::Event::RoutingUpdated {
+                    peer, addresses, ..
+                } => {
                     self.peer_addresses
                         .insert(peer, addresses.iter().cloned().collect());
                 }
@@ -321,7 +366,9 @@ impl Node {
             },
             behaviour::Event::RequestResponse(rrev) => match rrev {
                 RequestResponseEvent::Message { peer, message } => match message {
-                    RequestResponseMessage::Request { request, channel, .. } => {
+                    RequestResponseMessage::Request {
+                        request, channel, ..
+                    } => {
                         let mut hash = [0u8; 32];
                         if request.len() == 32 {
                             hash.copy_from_slice(&request);
@@ -333,7 +380,10 @@ impl Node {
                             .request_response
                             .send_response(channel, resp);
                     }
-                    RequestResponseMessage::Response { request_id, response } => {
+                    RequestResponseMessage::Response {
+                        request_id,
+                        response,
+                    } => {
                         if let Some(hash) = self.fetch_requests.remove(&request_id) {
                             self.in_flight.remove(&hash);
                             self.pending_fetches.retain(|_, h| *h != hash);

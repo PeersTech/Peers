@@ -177,14 +177,10 @@ impl SessionDir {
             if rest.len() < 32 + 4 + 8 + 16 {
                 return Err(PeersError::BadCipher);
             }
-            let rcpt: [u8; 32] = rest[..32]
-                .try_into()
-                .map_err(|_| PeersError::BadCipher)?;
-            let ct_len = u32::from_be_bytes(
-                rest[32..36]
-                    .try_into()
-                    .map_err(|_| PeersError::BadCipher)?,
-            ) as usize;
+            let rcpt: [u8; 32] = rest[..32].try_into().map_err(|_| PeersError::BadCipher)?;
+            let ct_len =
+                u32::from_be_bytes(rest[32..36].try_into().map_err(|_| PeersError::BadCipher)?)
+                    as usize;
             let copy_len = 32 + 4 + ct_len;
             if rest.len() < copy_len {
                 return Err(PeersError::BadCipher);

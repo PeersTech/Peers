@@ -69,7 +69,11 @@ fn init_identity(state: State<AppState>, password: String) -> Result<IdentityInf
 
 /// Unlock the keystore and start the node.
 #[tauri::command]
-async fn unlock(state: State<'_, AppState>, app: AppHandle, password: String) -> Result<IdentityInfo, String> {
+async fn unlock(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    password: String,
+) -> Result<IdentityInfo, String> {
     let id = state.keystore.load(&password)?;
     if state.identity.lock().unwrap().is_some() {
         return Err("already unlocked".into());
@@ -133,11 +137,7 @@ async fn unsubscribe(state: State<'_, AppState>, channel: String) -> Result<(), 
 /// card from the sender travels inside the envelope, so no out-of-band
 /// exchange is needed).
 #[tauri::command]
-async fn publish(
-    state: State<'_, AppState>,
-    channel: String,
-    text: String,
-) -> Result<(), String> {
+async fn publish(state: State<'_, AppState>, channel: String, text: String) -> Result<(), String> {
     let identity = state
         .identity
         .lock()

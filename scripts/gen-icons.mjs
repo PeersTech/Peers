@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUT = join(__dirname, '..', 'src-tauri', 'icons');
+const OUT = join(__dirname, '..', 'backend', 'icons');
 mkdirSync(OUT, { recursive: true });
 
 const SIZE = 1024;

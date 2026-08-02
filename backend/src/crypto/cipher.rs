@@ -41,11 +41,7 @@ pub fn open(session: &mut Session, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>>
     if sealed.len() < 8 + 16 {
         return Err(PeersError::BadCipher);
     }
-    let seq = u64::from_be_bytes(
-        sealed[..8]
-            .try_into()
-            .map_err(|_| PeersError::BadCipher)?,
-    );
+    let seq = u64::from_be_bytes(sealed[..8].try_into().map_err(|_| PeersError::BadCipher)?);
     let key = session.key_at(seq)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let nonce = Nonce::from_slice(&nonce_for(seq));
@@ -79,7 +75,12 @@ mod tests {
     fn pair() -> (StaticSecret, StaticSecret, [u8; 32], [u8; 32]) {
         let a = StaticSecret::random_from_rng(OsRng);
         let b = StaticSecret::random_from_rng(OsRng);
-        (a, b, XPublic::from(&a).to_bytes(), XPublic::from(&b).to_bytes())
+        (
+            a,
+            b,
+            XPublic::from(&a).to_bytes(),
+            XPublic::from(&b).to_bytes(),
+        )
     }
 
     #[test]

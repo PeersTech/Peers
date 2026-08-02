@@ -108,7 +108,14 @@ impl Identity {
             return Ok(plain);
         }
         let start: String = plain.chars().take(4).collect();
-        let end: String = plain.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        let end: String = plain
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         Ok(format!("{start}…{end}"))
     }
 

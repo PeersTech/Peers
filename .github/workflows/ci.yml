@@ -36,16 +36,16 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: backend
       - name: Format
         run: cargo fmt --check
-        working-directory: src-tauri
+        working-directory: backend
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-        working-directory: src-tauri
+        working-directory: backend
       - name: Test
         run: cargo test
-        working-directory: src-tauri
+        working-directory: backend
 
   check:
     name: check (${{ matrix.platform }})
@@ -59,7 +59,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: backend
       - name: Check
         run: cargo check --all-targets
-        working-directory: src-tauri
+        working-directory: backend

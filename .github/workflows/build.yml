@@ -1,24 +1,24 @@
-name: Release
+name: Build
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
   build:
-    permissions:
-      contents: write
+    name: build (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            args: --target universal-apple-darwin
           - platform: ubuntu-22.04
-            args: ""
+            artifact: linux
           - platform: windows-latest
-            args: ""
+            artifact: windows
+          - platform: macos-latest
+            artifact: macos
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -32,13 +32,7 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      - name: Install Rust (macos)
-        if: matrix.platform == 'macos-latest'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - name: Install Rust
-        if: matrix.platform != 'macos-latest'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux deps
@@ -53,14 +47,15 @@ jobs:
         with:
           workspaces: backend
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build app
+        uses: tauri-apps/tauri-action@v0
         with:
           appPath: backend
-          tagName: app-v__VERSION__
-          releaseName: "Peers v__VERSION__"
-          releaseBody: "See the assets to download and install this version."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: peers-${{ matrix.artifact }}
+          path: |
+            backend/target/release/bundle/**/*
+          if-no-files-found: error

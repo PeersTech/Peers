@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev --config ../backend/tauri.conf.json",
+    "tauri:build": "tauri build --config ../backend/tauri.conf.json"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -15,6 +18,7 @@
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",

@@ -18,12 +18,11 @@ pub async fn resolve_public_bootstrap() -> Vec<Multiaddr> {
         Err(_) => return Vec::new(),
     };
     let fqdn = format!("_dnsaddr.{BOOTSTRAP_DNSADDR_HOST}");
-    let lookup = match tokio::time::timeout(Duration::from_secs(10), resolver.txt_lookup(fqdn))
-        .await
-    {
-        Ok(Ok(lookup)) => lookup,
-        _ => return Vec::new(),
-    };
+    let lookup =
+        match tokio::time::timeout(Duration::from_secs(10), resolver.txt_lookup(fqdn)).await {
+            Ok(Ok(lookup)) => lookup,
+            _ => return Vec::new(),
+        };
 
     let mut out = Vec::new();
     for record in lookup.iter() {

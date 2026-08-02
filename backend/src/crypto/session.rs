@@ -173,7 +173,10 @@ mod tests {
         let mut env = seal(&mut sa, b"", b"do not touch").unwrap();
         let last = env.len() - 1;
         env[last] ^= 0xff;
-        assert!(matches!(open(&mut sb, b"", &env), Err(PeersError::BadCipher)));
+        assert!(matches!(
+            open(&mut sb, b"", &env),
+            Err(PeersError::BadCipher)
+        ));
         let env_ok = seal(&mut sa, b"", b"do not touch").unwrap();
         let pt = open(&mut sb, b"", &env_ok).unwrap();
         assert_eq!(pt, b"do not touch");
@@ -212,7 +215,10 @@ mod tests {
             opened: HashSet::new(),
             max_opened: 0,
         };
-        assert!(matches!(s.key_at(MAX_SESSION_GAP + 5), Err(PeersError::GapTooLarge)));
+        assert!(matches!(
+            s.key_at(MAX_SESSION_GAP + 5),
+            Err(PeersError::GapTooLarge)
+        ));
         assert_eq!(s.key_at(10).unwrap().len(), 32);
     }
 

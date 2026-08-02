@@ -134,8 +134,13 @@ impl Keystore {
         let nonce = base64_decode(&file.kdf.nonce)?;
         let sealed = base64_decode(&file.kdf.sealed)?;
 
-        let params = Params::new(file.kdf.memory, file.kdf.time, file.kdf.threads, Some(KDF_KEY_LEN))
-            .map_err(|e| PeersError::Keystore(format!("argon2 params: {e}")))?;
+        let params = Params::new(
+            file.kdf.memory,
+            file.kdf.time,
+            file.kdf.threads,
+            Some(KDF_KEY_LEN),
+        )
+        .map_err(|e| PeersError::Keystore(format!("argon2 params: {e}")))?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut key = [0u8; KDF_KEY_LEN];
         argon2
@@ -177,7 +182,10 @@ mod tests {
         let loaded = ks.load("correct horse battery staple").unwrap();
         assert_eq!(loaded.peer_id, id.peer_id);
 
-        assert!(matches!(ks.load("wrong password"), Err(PeersError::BadPassword)));
+        assert!(matches!(
+            ks.load("wrong password"),
+            Err(PeersError::BadPassword)
+        ));
 
         #[cfg(unix)]
         {
@@ -189,7 +197,10 @@ mod tests {
         // File must not leak identity plaintext.
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains(&id.peer_id.to_string()), "peer id leaked");
-        assert!(!raw.contains(&id.x25519_secret.to_bytes()[..]), "x25519 secret leaked");
+        assert!(
+            !raw.contains(&id.x25519_secret.to_bytes()[..]),
+            "x25519 secret leaked"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

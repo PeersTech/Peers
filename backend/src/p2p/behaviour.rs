@@ -39,11 +39,8 @@ impl Behaviour {
 
         let mut kad_config = kademlia::Config::new(kademlia::PROTOCOL_NAME);
         kad_config.set_query_timeout(Duration::from_secs(45));
-        let mut kademlia = kademlia::Behaviour::with_config(
-            peer_id,
-            MemoryStore::new(peer_id),
-            kad_config,
-        );
+        let mut kademlia =
+            kademlia::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), kad_config);
         // Act as a full DHT server even without a confirmed external
         // address, so parked blobs are findable behind NATs too.
         kademlia.set_mode(Some(kademlia::Mode::Server));

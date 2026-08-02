@@ -56,7 +56,10 @@ pub struct BlobCodec;
 fn read_frame<T: AsyncRead + Unpin + Send>(io: &mut T, limit: usize) -> io::Result<Vec<u8>> {
     let len = io.read_u32().await?;
     if len as usize > limit {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut buf = vec![0u8; len as usize];
     io.read_exact(&mut buf).await?;
