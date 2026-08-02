@@ -4,5 +4,11 @@ import tailwindcss from '@tailwindcss/vite'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()]
+  plugins: [react(), tailwindcss()],
+  // Tauri dev server protocol/port must match src-tauri/tauri.conf.json
+  clearScreen: false,
+  server: {
+    port: 1420,
+    strictPort: true,
+  },
 })

@@ -39,6 +39,9 @@ pub enum PeersError {
     #[error("p2p: {0}")]
     P2p(String),
 
+    #[error("envelope is not addressed to us")]
+    NotAddressed,
+
     #[error("blob not found in swarm")]
     BlobNotFound,
 

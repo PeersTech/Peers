@@ -34,6 +34,11 @@ impl Identity {
     }
 
     /// Raw Ed25519 public key bytes.
+    pub fn ed25519_public(&self) -> Result<[u8; 32]> {
+        self.ed25519_raw()
+    }
+
+    /// Raw Ed25519 public key bytes.
     fn ed25519_raw(&self) -> Result<[u8; 32]> {
         match self.keypair.public() {
             PublicKey::Ed25519(pk) => Ok(pk.to_bytes()),

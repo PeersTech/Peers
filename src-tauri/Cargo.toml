@@ -26,14 +26,12 @@ libp2p = { version = "0.56", features = [
     "tcp",
     "quic",
     "noise",
-    "tls",
     "yamux",
     "identify",
     "ping",
     "kad",
     "gossipsub",
     "request-response",
-    "relay",
     "macros",
 ] }
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
