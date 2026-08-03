@@ -23,6 +23,17 @@ const REPLAY_WINDOW: u64 = 4096;
 /// Deriving a key is a pure function of n (up to MAX_SESSION_GAP), which
 /// makes out-of-order delivery and retries cheap. Replay protection is
 /// enforced with a bounded set of opened sequence numbers. Memory-only.
+/// Plain-text serializable snapshot of a [`Session`]'s state, used to
+/// persist per-contact E2E state between restarts. `opened` is the replay
+/// window (kept bounded, like the in-memory set).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SessionState {
+    pub root: [u8; 32],
+    pub counter: u64,
+    pub opened: Vec<u64>,
+    pub max_opened: u64,
+}
+
 #[derive(Clone)]
 pub struct Session {
     root: [u8; 32],
@@ -30,6 +41,30 @@ pub struct Session {
     pub counter: u64,
     opened: HashSet<u64>,
     max_opened: u64,
+}
+
+impl Session {
+    /// Snapshots the session so it can be sealed to disk and restored.
+    pub fn export(&self) -> SessionState {
+        let mut opened: Vec<u64> = self.opened.iter().copied().collect();
+        opened.sort_unstable();
+        SessionState {
+            root: self.root,
+            counter: self.counter,
+            opened,
+            max_opened: self.max_opened,
+        }
+    }
+
+    /// Restores a session from a snapshot (see [`Session::export`]).
+    pub fn import(state: &SessionState) -> Self {
+        Self {
+            root: state.root,
+            counter: state.counter,
+            opened: state.opened.iter().copied().collect(),
+            max_opened: state.max_opened,
+        }
+    }
 }
 
 impl Session {

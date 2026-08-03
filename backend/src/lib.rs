@@ -1,26 +1,43 @@
 mod crypto;
 mod error;
 mod p2p;
+mod store;
 
 use crate::crypto::card::PeerCard;
 use crate::crypto::server::{
     channel_topic, new_server_id, server_topic, ChannelConfig, Invite, JoinNotice, Member, Role,
-    ServerDir, ServerRecord, ServerView, SignedList, SignedMessage,
+    ServerDir, ServerRecord, ServerView, SignedList, SignedMessage, Snapshot,
 };
 use crate::crypto::{Identity, Keystore, SessionDir};
 use crate::error::PeersError;
 use crate::p2p::{NodeCommand, NodeEvent, NodeHandle};
+use crate::store::{
+    state_apply, state_from, DmMessage, History, PersistedState, Store, StoreHandle,
+};
+use libp2p::multiaddr::Protocol;
+use libp2p::{Multiaddr, PeerId};
+use std::collections::HashSet;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Listener, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 
-/// Shared app state. `node`/`identity`/`dir`/`servers` exist only after a
-/// successful unlock; the keystore is always available.
+/// Shared app state. `node`/`identity`/`dir`/`servers`/`storage`/`history`
+/// exist only after a successful unlock; the keystore is always available.
 pub struct AppState {
     keystore: Keystore,
     identity: Mutex<Option<Identity>>,
     node: Mutex<Option<NodeHandle>>,
     dir: Mutex<Option<SessionDir>>,
     servers: Mutex<ServerDir>,
+    store: Store,
+    storage: Mutex<Option<StoreHandle>>,
+    history: Mutex<History>,
+    /// Peer ids with an open connection right now (presence).
+    presence: Mutex<HashSet<String>>,
+    /// Our own listen multiaddrs, learned from node `Listening` events.
+    /// Shared in invites so other peers can dial us directly.
+    addrs: Mutex<Vec<String>>,
 }
 
 impl Default for AppState {
@@ -31,6 +48,11 @@ impl Default for AppState {
             node: Mutex::new(None),
             dir: Mutex::new(None),
             servers: Mutex::new(ServerDir::new()),
+            store: Store::new(Store::default_path()),
+            storage: Mutex::new(None),
+            history: Mutex::new(History::default()),
+            presence: Mutex::new(HashSet::new()),
+            addrs: Mutex::new(Vec::new()),
         }
     }
 }
@@ -85,16 +107,55 @@ async fn unlock(
     if state.identity.lock().unwrap().is_some() {
         return Err("already unlocked".into());
     }
+
+    // Unlock the sealed state store and restore servers/contacts/history
+    // before the node comes up.
+    let store_handle = state.store.open(&password)?;
+    let persisted = store_handle.load()?;
+    let mut history = History::default();
+    {
+        let mut servers = state.servers.lock().unwrap();
+        let mut dir = state.dir.lock().unwrap();
+        *dir = Some(SessionDir::new());
+        state_apply(
+            dir.as_mut().unwrap(),
+            &mut servers,
+            &mut history,
+            &persisted,
+        )?;
+    }
+
     let handle = p2p::spawn(id.clone())?;
     *state.identity.lock().unwrap() = Some(id.clone());
-    *state.dir.lock().unwrap() = Some(SessionDir::new());
     *state.node.lock().unwrap() = Some(handle.clone());
+    *state.storage.lock().unwrap() = Some(store_handle);
+    *state.history.lock().unwrap() = history;
 
-    // Relay node events to the frontend.
+    // Relay node events to the frontend and track presence.
     let mut rx = handle.subscribe();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Ok(ev) = rx.recv().await {
+            match &ev {
+                NodeEvent::Listening { addr } => {
+                    let st = app2.state::<AppState>();
+                    let mut addrs = st.addrs.lock().unwrap();
+                    if !addrs.iter().any(|a| a == addr) {
+                        addrs.push(addr.clone());
+                    }
+                }
+                NodeEvent::PeerConnected { peer_id } => {
+                    let st = app2.state::<AppState>();
+                    st.presence.lock().unwrap().insert(peer_id.clone());
+                    let _ = app2.emit("presence://peer-connected", peer_id);
+                }
+                NodeEvent::PeerDisconnected { peer_id } => {
+                    let st = app2.state::<AppState>();
+                    st.presence.lock().unwrap().remove(peer_id);
+                    let _ = app2.emit("presence://peer-disconnected", peer_id);
+                }
+                _ => {}
+            }
             let _ = app2.emit("node://event", &ev);
         }
     });
@@ -108,6 +169,12 @@ async fn unlock(
             id.peer_id
         )))
         .await;
+    // Re-subscribe to every server control topic we know about.
+    for rec in state.servers.lock().unwrap().records() {
+        let _ = handle
+            .send(NodeCommand::Subscribe(server_topic(&rec.id)))
+            .await;
+    }
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let addrs = crate::p2p::bootstrap::resolve_public_bootstrap().await;
@@ -117,12 +184,38 @@ async fn unlock(
     Ok(info_for(&id)?)
 }
 
+/// Best-effort sealed persistence of everything we know.
+fn persist(state: &AppState) {
+    let Some(handle) = state.storage.lock().unwrap().clone() else {
+        return;
+    };
+    let persisted = {
+        let servers = state.servers.lock().unwrap();
+        let dir = state.dir.lock().unwrap();
+        let history = state.history.lock().unwrap();
+        let servers: Vec<_> = servers.records().iter().map(|r| r.to_persisted()).collect();
+        match dir.as_ref() {
+            Some(dir) => state_from(dir, &servers, &history),
+            None => PersistedState {
+                servers,
+                history: history.clone(),
+                ..PersistedState::default()
+            },
+        }
+    };
+    let _ = handle.save(&persisted);
+}
+
 #[tauri::command]
 fn lock(state: State<AppState>) -> Result<(), String> {
+    persist(&state);
     *state.node.lock().unwrap() = None;
     *state.dir.lock().unwrap() = None;
     *state.servers.lock().unwrap() = ServerDir::new();
+    *state.storage.lock().unwrap() = None;
     *state.identity.lock().unwrap() = None;
+    *state.history.lock().unwrap() = History::default();
+    *state.presence.lock().unwrap() = HashSet::new();
     Ok(())
 }
 
@@ -169,6 +262,7 @@ async fn mutate_server(
         f(rec)?;
     }
     publish_list(state, server_id).await?;
+    persist(state);
     state
         .servers
         .lock()
@@ -196,6 +290,7 @@ async fn create_server(state: State<'_, AppState>, name: String) -> Result<Serve
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Subscribe(server_topic(&id))).await?;
     publish_list(&state, &id).await?;
+    persist(&state);
     state
         .servers
         .lock()
@@ -217,9 +312,14 @@ async fn list_servers(state: State<'_, AppState>) -> Result<Vec<ServerView>, Str
 
 #[tauri::command]
 async fn create_invite(state: State<'_, AppState>, server_id: String) -> Result<String, String> {
-    let servers = state.servers.lock().unwrap();
-    let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
-    let invite = rec.invite()?;
+    let mut invite = {
+        let servers = state.servers.lock().unwrap();
+        let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
+        rec.invite()?
+    };
+    // Attach our current listen addresses so the joiner can dial us
+    // directly and get a working gossipsub mesh right away.
+    invite.addrs = state.addrs.lock().unwrap().clone();
     serde_json::to_string(&invite).map_err(|e| e.to_string())
 }
 
@@ -242,6 +342,19 @@ async fn join_server(
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     let topic = server_topic(&invite.payload.server_id);
     node.send(NodeCommand::Subscribe(topic)).await?;
+    // Dial the owner's advertised addresses so we get a direct connection
+    // and the gossipsub mesh forms without waiting on DHT discovery.
+    if let Ok(owner) = invite.payload.owner_peer.parse::<PeerId>() {
+        for addr in &invite.addrs {
+            if let Ok(mut ma) = addr.parse::<Multiaddr>() {
+                ma.push(Protocol::P2p(owner));
+                let _ = node.send(NodeCommand::Dial(ma)).await;
+            }
+        }
+    }
+    // Give the direct connection time to establish before we announce the
+    // join, so the owner is guaranteed to receive the notice via gossip.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     let card = PeerCard::sign(&me)?;
     let notice = JoinNotice::new(
         &invite.payload.server_id,
@@ -256,6 +369,7 @@ async fn join_server(
         data,
     })
     .await?;
+    persist(&state);
     Ok(ServerView::from_record(&rec, &me_str))
 }
 
@@ -381,7 +495,25 @@ async fn leave_server(state: State<'_, AppState>, server_id: String) -> Result<(
     state.servers.lock().unwrap().remove(&server_id);
     node.send(NodeCommand::Unsubscribe(server_topic(&server_id)))
         .await?;
+    persist(&state);
     Ok(())
+}
+
+#[tauri::command]
+async fn rename_server(
+    state: State<'_, AppState>,
+    server_id: String,
+    name: String,
+) -> Result<ServerView, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("server name is required".into());
+    }
+    mutate_server(&state, &server_id, move |rec| {
+        rec.name = name;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -441,7 +573,22 @@ async fn publish_channel(
         data,
     })
     .await?;
+    {
+        let mut history = state.history.lock().unwrap();
+        history.push_server(&format!("{server_id}/{channel}"), msg);
+    }
+    persist(&state);
     Ok(())
+}
+
+#[tauri::command]
+fn server_history(
+    state: State<'_, AppState>,
+    server_id: String,
+    channel: String,
+) -> Result<Vec<SignedMessage>, String> {
+    let key = format!("{server_id}/{channel}");
+    Ok(state.history.lock().unwrap().server_messages(&key).to_vec())
 }
 
 #[tauri::command]
@@ -484,7 +631,92 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         data: payload,
     })
     .await?;
+    {
+        let mut history = state.history.lock().unwrap();
+        history.push_dm(
+            &channel,
+            DmMessage {
+                peer: channel.clone(),
+                text: text.clone(),
+                ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                mine: true,
+            },
+        );
+    }
+    persist(&state);
     Ok(())
+}
+
+#[tauri::command]
+fn dm_history(state: State<'_, AppState>, peer: String) -> Result<Vec<DmMessage>, String> {
+    Ok(state.history.lock().unwrap().dm_messages(&peer).to_vec())
+}
+
+/// Peer ids with an open connection right now.
+#[tauri::command]
+fn online_peers(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state.presence.lock().unwrap().iter().cloned().collect())
+}
+
+/// Owner exports the server's full history as a signed snapshot JSON.
+#[tauri::command]
+async fn export_snapshot(state: State<'_, AppState>, server_id: String) -> Result<String, String> {
+    let me = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    let me_str = me.peer_id.to_string();
+    let snap = {
+        let servers = state.servers.lock().unwrap();
+        let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
+        if rec.owner_peer != me_str {
+            return Err(PeersError::NotOwner.into());
+        }
+        let messages = state.history.lock().unwrap().server_snapshot(&server_id);
+        Snapshot::sign(rec, messages)?
+    };
+    serde_json::to_string(&snap).map_err(|e| e.to_string())
+}
+
+/// Verifies a signed snapshot against our trusted server key and merges
+/// any messages we don't already have into local history.
+#[tauri::command]
+async fn import_snapshot(
+    state: State<'_, AppState>,
+    server_id: String,
+    snapshot_json: String,
+) -> Result<usize, String> {
+    let snap: Snapshot =
+        serde_json::from_str(&snapshot_json).map_err(|e| format!("bad snapshot: {e}"))?;
+    if snap.server_id != server_id {
+        return Err("snapshot is for a different server".into());
+    }
+    let imported = {
+        let servers = state.servers.lock().unwrap();
+        let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
+        snap.verify(rec)?;
+        let messages = snap.messages;
+        drop(servers);
+        let mut history = state.history.lock().unwrap();
+        let mut imported = 0;
+        for msg in messages {
+            let key = format!("{server_id}/{}", msg.channel);
+            let list = history.server.entry(key).or_default();
+            if list.iter().any(|m| m.ts == msg.ts && m.from == msg.from) {
+                continue;
+            }
+            list.push(msg);
+            imported += 1;
+        }
+        imported
+    };
+    persist(&state);
+    Ok(imported)
 }
 
 /// Parks bytes (sealed envelope or media chunk) and announces them on the
@@ -509,6 +741,14 @@ async fn fetch_blob(state: State<'_, AppState>, hash: String) -> Result<(), Stri
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        // Close-to-tray: hiding keeps the libp2p node alive so parked blobs
+        // keep seeding from the tray (M3 background seeding).
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             has_identity,
             is_unlocked,
@@ -530,11 +770,59 @@ pub fn run() {
             rotate_key,
             set_channel,
             leave_server,
+            rename_server,
             subscribe_channel,
             unsubscribe_channel,
             publish_channel,
+            server_history,
+            dm_history,
+            online_peers,
+            export_snapshot,
+            import_snapshot,
         ])
         .setup(|app| {
+            // Tray icon with Show/Quit — the window hides on close, so the
+            // app (and its DHT blob seeding) keeps running in the tray.
+            let show = MenuItem::with_id(app, "show", "Show Peers", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let tray = TrayIconBuilder::new();
+            let tray = if let Some(icon) = app.default_window_icon() {
+                tray.icon(icon.clone())
+            } else {
+                tray
+            };
+            let _tray = tray
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .tooltip("Peers — E2E encrypted messenger")
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             // Decrypt incoming envelopes as they arrive and forward them as
             // frontend-friendly events.
             let app_handle = app.handle().clone();
@@ -551,15 +839,16 @@ pub fn run() {
                         let server_id = server_id.to_string();
                         if let Ok(list) = serde_json::from_slice::<SignedList>(&data) {
                             let state = app_handle.state::<AppState>();
-                            let view = {
+                            let (cards, view) = {
                                 let me = state.identity.lock().unwrap().clone();
                                 let mut servers = state.servers.lock().unwrap();
-                                match servers.get_mut(&server_id) {
+                                let mut cards = Vec::new();
+                                let view = match servers.get_mut(&server_id) {
                                     Some(rec) => match rec.verify_list(&list) {
                                         Ok(()) => {
                                             // Every member card rides the signed list,
                                             // so a fresh list unlocks DMs with everyone.
-                                            let cards: Vec<(String, PeerCard)> = list
+                                            cards = list
                                                 .payload
                                                 .members
                                                 .iter()
@@ -567,12 +856,6 @@ pub fn run() {
                                                     m.card.clone().map(|c| (m.peer_id.clone(), c))
                                                 })
                                                 .collect();
-                                            if let Some(mut dir) = state.dir.lock().unwrap().clone()
-                                            {
-                                                for (peer, card) in cards {
-                                                    dir.remember_contact(&peer, &card);
-                                                }
-                                            }
                                             me.map(|id| {
                                                 ServerView::from_record(
                                                     rec,
@@ -592,8 +875,17 @@ pub fn run() {
                                         }
                                     },
                                     None => None,
-                                }
+                                };
+                                (cards, view)
                             };
+                            if let Some(dir) = state.dir.lock().unwrap().as_mut() {
+                                for (peer, card) in cards {
+                                    dir.remember_contact(&peer, &card);
+                                }
+                            }
+                            if view.is_some() {
+                                persist(&state);
+                            }
                             if let Some(v) = view {
                                 let _ = app_handle.emit("server://list", v);
                             }
@@ -601,9 +893,10 @@ pub fn run() {
                             let state = app_handle.state::<AppState>();
                             // Cache the joiner's card so anyone with the notice
                             // can DM them; only the owner acts on the request.
-                            if let Some(mut dir) = state.dir.lock().unwrap().clone() {
+                            if let Some(dir) = state.dir.lock().unwrap().as_mut() {
                                 dir.remember_contact(&notice.peer_id, &notice.card);
                             }
+                            persist(&state);
                             let is_owner = {
                                 let me = state.identity.lock().unwrap().clone();
                                 let servers = state.servers.lock().unwrap();
@@ -635,6 +928,15 @@ pub fn run() {
                                 }
                             };
                             if ok {
+                                {
+                                    let mut history =
+                                        app_handle.state::<AppState>().history.lock().unwrap();
+                                    history.push_server(
+                                        &format!("{server_id}/{}", msg.channel),
+                                        msg.clone(),
+                                    );
+                                }
+                                persist(&app_handle.state::<AppState>());
                                 let _ = app_handle.emit(
                                     "server://message",
                                     serde_json::json!({
@@ -649,16 +951,37 @@ pub fn run() {
                         }
                         return;
                     }
-                    let (identity, mut dir) = {
-                        let id = state.identity.lock().unwrap().clone();
-                        let d = state.dir.lock().unwrap().clone();
-                        (id, d)
-                    };
+                    let identity = state.identity.lock().unwrap().clone();
                     let Some(identity) = identity else { return };
-                    let Some(dir) = dir.as_mut() else { return };
-                    match dir.open(&identity, topic.as_bytes(), &data) {
+                    // Open against the live dir so contact caching and session
+                    // replay-tracking mutations are not lost.
+                    let opened = {
+                        let mut guard = state.dir.lock().unwrap();
+                        guard
+                            .as_mut()
+                            .map(|dir| dir.open(&identity, topic.as_bytes(), &data))
+                    };
+                    let Some(result) = opened else { return };
+                    match result {
                         Ok(plaintext) => {
                             let text = String::from_utf8_lossy(&plaintext).to_string();
+                            {
+                                let mut history =
+                                    app_handle.state::<AppState>().history.lock().unwrap();
+                                history.push_dm(
+                                    &from,
+                                    DmMessage {
+                                        peer: from.clone(),
+                                        text: text.clone(),
+                                        ts: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0),
+                                        mine: false,
+                                    },
+                                );
+                            }
+                            persist(&app_handle.state::<AppState>());
                             let _ = app_handle.emit(
                                 "node://message",
                                 serde_json::json!({

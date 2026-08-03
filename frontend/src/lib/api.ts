@@ -67,6 +67,24 @@ export interface JoinNotice {
     card: PeerCard;
 }
 
+export interface SignedMessageDto {
+    version: number;
+    serverId: string;
+    channel: string;
+    from: string;
+    pubkey: number[];
+    text: string;
+    ts: number;
+    sig: string;
+}
+
+export interface DmMessageDto {
+    peer: string;
+    text: string;
+    ts: number;
+    mine: boolean;
+}
+
 export interface UiMessage {
     id: string;
     author: string;
@@ -101,6 +119,22 @@ export const publishChannel = (serverId: string, channel: string, text: string) 
 export const subscribe = (channel: string) => invoke<void>("subscribe", {channel});
 export const publish = (channel: string, text: string) => invoke<void>("publish", {channel, text});
 
+export const serverHistory = (serverId: string, channel: string) =>
+    invoke<SignedMessageDto[]>("server_history", {serverId, channel});
+export const dmHistory = (peer: string) => invoke<DmMessageDto[]>("dm_history", {peer});
+export const onlinePeers = () => invoke<string[]>("online_peers");
+export const renameServer = (serverId: string, name: string) =>
+    invoke<ServerView>("rename_server", {serverId, name});
+export const removeMember = (serverId: string, peerId: string) =>
+    invoke<ServerView>("remove_member", {serverId, peerId});
+export const setRole = (serverId: string, peerId: string, role: Role) =>
+    invoke<ServerView>("set_role", {serverId, peerId, role});
+export const rotateKey = (serverId: string) =>
+    invoke<ServerView>("rotate_key", {serverId});
+export const exportSnapshot = (serverId: string) => invoke<string>("export_snapshot", {serverId});
+export const importSnapshot = (serverId: string, snapshotJson: string) =>
+    invoke<number>("import_snapshot", {serverId, snapshotJson});
+
 export const onServerList = (cb: (v: ServerView) => void) =>
     listen<ServerView>("server://list", (e) => cb(e.payload));
 export const onServerMessage = (cb: (m: ServerMessage) => void) =>
@@ -111,6 +145,10 @@ export const onNodeMessage = (cb: (m: NodeMessage) => void) =>
     listen<NodeMessage>("node://message", (e) => cb(e.payload));
 export const onJoinRequest = (cb: (n: JoinNotice) => void) =>
     listen<JoinNotice>("server://join-request", (e) => cb(e.payload));
+export const onPeerConnected = (cb: (peerId: string) => void) =>
+    listen<string>("presence://peer-connected", (e) => cb(e.payload));
+export const onPeerDisconnected = (cb: (peerId: string) => void) =>
+    listen<string>("presence://peer-disconnected", (e) => cb(e.payload));
 
 export const shortId = (id: string) => (id.length > 13 ? `${id.slice(0, 12)}…` : id);
 
@@ -118,7 +156,7 @@ export const peerName = (peerId: string, members: Member[]) =>
     members.find((m) => m.peerId === peerId)?.name ?? shortId(peerId);
 
 export const colorFor = (s: string) => {
-    const palette = ["#4ade80", "#60a5fa", "#f472b6", "#facc15", "#fb923c", "#a78bfa", "#2dd4bf", "#f87171"];
+    const palette = ["#5865f2", "#23a55a", "#eb459e", "#f0b232", "#faa61a", "#b18cff", "#1abc9c", "#f23f43", "#3ba55d", "#e91e63"];
     let h = 0;
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
     return palette[h % palette.length];

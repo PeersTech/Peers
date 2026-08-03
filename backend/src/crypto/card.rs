@@ -93,6 +93,47 @@ impl SessionDir {
         self.contacts.insert(peer_id.to_string(), card.x25519_pub);
     }
 
+    /// Snapshots the dir (per-contact sessions + contact x25519 keys) so it
+    /// can be sealed to disk and restored after a restart. The secrets ride
+    /// inside the state envelope, which is password-encrypted at rest.
+    pub fn export(
+        &self,
+    ) -> (
+        Vec<(Vec<u8>, crate::crypto::session::SessionState)>,
+        Vec<(String, Vec<u8>)>,
+    ) {
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|(k, s)| (k.to_vec(), s.export()))
+            .collect();
+        let contacts = self
+            .contacts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_vec()))
+            .collect();
+        (sessions, contacts)
+    }
+
+    /// Restores state written by [`SessionDir::export`] into an empty dir.
+    /// Existing contacts/sessions are kept; restored ones take precedence.
+    pub fn restore(
+        &mut self,
+        sessions: &[(Vec<u8>, crate::crypto::session::SessionState)],
+        contacts: &[(String, Vec<u8>)],
+    ) {
+        for (key, state) in sessions {
+            if let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) {
+                self.sessions.insert(key, Session::import(state));
+            }
+        }
+        for (peer, key) in contacts {
+            if let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) {
+                self.contacts.insert(peer.clone(), key);
+            }
+        }
+    }
+
     /// All X25519 keys we can currently encrypt to.
     pub fn recipient_keys(&self) -> Vec<[u8; 32]> {
         self.contacts.values().copied().collect()

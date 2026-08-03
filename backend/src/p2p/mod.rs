@@ -24,6 +24,8 @@ pub enum NodeCommand {
     Listen,
     /// Dial bootstrap multiaddrs, seed the DHT routing table, bootstrap.
     Bootstrap(Vec<Multiaddr>),
+    /// Dial a single peer directly (e.g. the owner behind an invite).
+    Dial(Multiaddr),
     /// Join a gossip topic ("peers/v1/ch/<channel>").
     Subscribe(String),
     Unsubscribe(String),
@@ -222,6 +224,9 @@ impl Node {
                     }
                 }
                 let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
+            }
+            NodeCommand::Dial(addr) => {
+                let _ = self.swarm.dial(addr);
             }
             NodeCommand::Subscribe(topic_name) => {
                 let topic = Sha256Topic::new(topic_name.clone());

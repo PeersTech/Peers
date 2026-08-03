@@ -24,11 +24,11 @@ export function MessagePane({channelName, subtitle, messages, onSend}: Props) {
     };
 
     return (
-        <div className="flex h-full flex-1 flex-col bg-[#26272c]">
-            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-[#1e1f22] px-4 shadow-sm">
-                <span className="text-lg leading-none text-[#8a8f98]">#</span>
-                <span className="font-semibold text-[#e8eaed]">{channelName}</span>
-                <span className="ml-auto text-xs text-[#5a5f66]">{subtitle}</span>
+        <div className="flex h-full flex-1 flex-col bg-[#313338]">
+            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-[#26272c] px-4 shadow-sm">
+                <span className="text-lg leading-none text-[#949ba4]">#</span>
+                <span className="font-semibold text-[#f2f3f5]">{channelName}</span>
+                <span className="ml-auto text-xs text-[#80848e]">{subtitle}</span>
             </div>
 
             <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
@@ -48,11 +48,11 @@ export function MessagePane({channelName, subtitle, messages, onSend}: Props) {
                                 {firstInBlock && (
                                     <div className="mb-0.5 flex items-baseline gap-2">
                                         <span className="text-sm font-semibold" style={{color: m.authorColor}}>{m.author}</span>
-                                        <span className="text-[10px] text-[#6d7278]">{m.time}</span>
+                                        <span className="text-[10px] text-[#80848e]">{m.time}</span>
                                     </div>
                                 )}
-                                <div className={`inline-block rounded-lg px-3 py-1.5 text-left text-sm text-[#e8eaed] ${
-                                    mine ? "bg-[#1f8b4c]/30" : "bg-[#31333a]"
+                                <div className={`inline-block rounded-lg px-3 py-1.5 text-left text-sm ${
+                                    mine ? "bg-[#5865f2] text-white" : "bg-[#383a40] text-[#f2f3f5]"
                                 }`}>
                                     {m.text}
                                 </div>
@@ -63,7 +63,7 @@ export function MessagePane({channelName, subtitle, messages, onSend}: Props) {
             </div>
 
             <div className="shrink-0 px-4 pb-4 pt-1">
-                <div className="flex items-center gap-2 rounded-lg bg-[#31333a] px-3 py-1.5 focus-within:ring-1 focus-within:ring-[#4ade80]/50">
+                <div className="flex items-center gap-2 rounded-lg bg-[#383a40] px-3 py-1.5 focus-within:ring-1 focus-within:ring-[#5865f2]/50">
                     <input
                         value={text}
                         onChange={(e) => setText(e.target.value)}
@@ -72,10 +72,10 @@ export function MessagePane({channelName, subtitle, messages, onSend}: Props) {
                             if (e.key === "Escape") setText("");
                         }}
                         placeholder={`Message #${channelName}`}
-                        className="flex-1 bg-transparent text-sm text-[#e8eaed] placeholder-[#6d7278] outline-none"
+                        className="flex-1 bg-transparent text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none"
                     />
-                    <span className="text-[10px] text-[#5a5f66]">ctrl+k</span>
-                    <button onClick={submit} className="rounded-md bg-[#4ade80] px-3 py-1 text-sm font-semibold text-black hover:bg-[#86efac]">
+                    <span className="text-[10px] text-[#80848e]">ctrl+k</span>
+                    <button onClick={submit} className="rounded-md bg-[#5865f2] px-3 py-1 text-sm font-semibold text-white hover:bg-[#4752c4]">
                         Send
                     </button>
                 </div>

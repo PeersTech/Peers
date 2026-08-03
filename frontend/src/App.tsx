@@ -1,10 +1,12 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, colorFor, createInvite, createServer, hasIdentity, initIdentity, isUnlocked,
-    joinServer, leaveServer, listServers, lock, onJoinRequest, onNodeMessage, onServerError,
-    onServerList, onServerMessage, peerName, publish, publishChannel, setChannel, shortId,
-    subscribe, subscribeChannel, timeFor, unlock,
+    addMember, colorFor, createInvite, createServer, dmHistory, exportSnapshot, hasIdentity,
+    importSnapshot, initIdentity, isUnlocked, joinServer, leaveServer, listServers, lock,
+    onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onServerError, onServerList,
+    onServerMessage, onlinePeers, peerName, publish, publishChannel, removeMember, renameServer,
+    rotateKey, serverHistory, setChannel, setRole, shortId, subscribe, subscribeChannel, timeFor,
+    unlock,
     type IdentityInfo, type JoinNotice, type ServerView, type UiMessage,
 } from './lib/api';
 import {ServerRail} from './components/ServerRail';
@@ -31,11 +33,14 @@ export default function App() {
     const [history, setHistory] = useState<Record<string, UiMessage[]>>({});
     const [unread, setUnread] = useState<Record<string, number>>({});
     const [error, setError] = useState<string | null>(null);
+    const [notice, setNotice] = useState<string | null>(null);
     const [joinRequests, setJoinRequests] = useState<JoinNotice[]>([]);
     const [password, setPassword] = useState('');
     const [password2, setPassword2] = useState('');
     const [busy, setBusy] = useState(false);
+    const [online, setOnline] = useState<Set<string>>(new Set());
     const booted = useRef(false);
+    const historyLoaded = useRef(new Set<string>());
 
     const live = useRef({me: null as IdentityInfo | null, servers: {} as Record<string, ServerView>});
     useEffect(() => {
@@ -53,12 +58,61 @@ export default function App() {
         return () => clearTimeout(t);
     }, [error]);
 
+    useEffect(() => {
+        if (!notice) return;
+        const t = setTimeout(() => setNotice(null), 4000);
+        return () => clearTimeout(t);
+    }, [notice]);
+
     const refreshServers = async () => {
         try {
             const list = await listServers();
             const map: Record<string, ServerView> = {};
             for (const v of list) map[v.id] = v;
             setServers((old) => ({...old, ...map}));
+        } catch (e) {
+            setError(String(e));
+        }
+    };
+
+    const loadServerHistory = async (serverId: string, channel: string) => {
+        const key = `${serverId}/${channel}`;
+        if (historyLoaded.current.has(key)) return;
+        historyLoaded.current.add(key);
+        try {
+            const msgs = await serverHistory(serverId, channel);
+            if (msgs.length === 0) return;
+            const members = live.current.servers[serverId]?.members ?? [];
+            const list: UiMessage[] = msgs.map((d, i) => ({
+                id: `${d.from}:${d.ts}:${i}`,
+                author: peerName(d.from, members),
+                authorColor: colorFor(d.from),
+                time: timeFor(d.ts),
+                text: d.text,
+                mine: d.from === live.current.me?.peerId,
+            }));
+            setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
+        } catch (e) {
+            setError(String(e));
+        }
+    };
+
+    const loadDmHistory = async (peer: string) => {
+        const key = `dm:${peer}`;
+        if (historyLoaded.current.has(key)) return;
+        historyLoaded.current.add(key);
+        try {
+            const msgs = await dmHistory(peer);
+            if (msgs.length === 0) return;
+            const list: UiMessage[] = msgs.map((d, i) => ({
+                id: `${d.peer}:${d.ts}:${i}`,
+                author: d.mine ? (me?.peerIdShort ?? 'you') : shortId(peer),
+                authorColor: d.mine ? '#23a55a' : colorFor(peer),
+                time: timeFor(d.ts),
+                text: d.text,
+                mine: d.mine,
+            }));
+            setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
         } catch (e) {
             setError(String(e));
         }
@@ -79,6 +133,11 @@ export default function App() {
                 }
                 setPhase('ready');
                 await refreshServers();
+                try {
+                    setOnline(new Set(await onlinePeers()));
+                } catch {
+                    // presence is best-effort
+                }
             } catch (e) {
                 setError(String(e));
                 setPhase('locked');
@@ -153,6 +212,26 @@ export default function App() {
                 ),
             ),
         );
+        track(
+            onPeerConnected((peerId) =>
+                setOnline((old) => {
+                    if (old.has(peerId)) return old;
+                    const next = new Set(old);
+                    next.add(peerId);
+                    return next;
+                }),
+            ),
+        );
+        track(
+            onPeerDisconnected((peerId) =>
+                setOnline((old) => {
+                    if (!old.has(peerId)) return old;
+                    const next = new Set(old);
+                    next.delete(peerId);
+                    return next;
+                }),
+            ),
+        );
         return () => {
             cancelled = true;
             offs.forEach((u) => u());
@@ -165,6 +244,7 @@ export default function App() {
         setDmOpen(false);
         setActiveChannel(channel);
         void subscribeChannel(serverId, channel).catch((e) => setError(String(e)));
+        void loadServerHistory(serverId, channel);
     };
 
     const selectServer = async (id: string) => {
@@ -192,7 +272,10 @@ export default function App() {
 
     const selectChannel = (name: string) => {
         setActiveChannel(name);
-        if (activeServer) void subscribeChannel(activeServer, name).catch((e) => setError(String(e)));
+        if (activeServer) {
+            void subscribeChannel(activeServer, name).catch((e) => setError(String(e)));
+            void loadServerHistory(activeServer, name);
+        }
     };
 
     useEffect(() => {
@@ -221,7 +304,7 @@ export default function App() {
         const msg: UiMessage = {
             id: crypto.randomUUID(),
             author: me?.peerIdShort ?? 'you',
-            authorColor: '#4ade80',
+            authorColor: '#23a55a',
             time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
             text: t,
             mine: true,
@@ -313,6 +396,61 @@ export default function App() {
         setJoinRequests((old) => old.filter((x) => x.peerId !== n.peerId || x.serverId !== n.serverId));
     };
 
+    const applyServerUpdate = async (p: Promise<ServerView>) => {
+        try {
+            const v = await p;
+            setServers((old) => ({...old, [v.id]: v}));
+            return v;
+        } catch (e) {
+            setError(String(e));
+            return null;
+        }
+    };
+
+    const renameSrv = async (serverId: string) => {
+        const name = prompt('New server name');
+        if (!name?.trim()) return;
+        await applyServerUpdate(renameServer(serverId, name.trim()));
+    };
+
+    const rotateKeyUi = async (serverId: string) => {
+        if (!confirm('Rotate the server signing key? The member list is re-signed immediately.')) return;
+        await applyServerUpdate(rotateKey(serverId));
+    };
+
+    const kickMember = async (serverId: string, peerId: string) => {
+        if (!confirm('Remove this member from the server?')) return;
+        await applyServerUpdate(removeMember(serverId, peerId));
+    };
+
+    const promoteMember = async (serverId: string, peerId: string, role: 'admin' | 'member') => {
+        await applyServerUpdate(setRole(serverId, peerId, role));
+    };
+
+    const exportSnapshotUi = async (serverId: string) => {
+        try {
+            const json = await exportSnapshot(serverId);
+            try {
+                await navigator.clipboard.writeText(json);
+            } catch {
+                window.prompt('Snapshot JSON (copy manually):', json);
+            }
+        } catch (e) {
+            setError(String(e));
+        }
+    };
+
+    const importSnapshotUi = async (serverId: string) => {
+        const json = prompt('Paste a signed snapshot JSON');
+        if (!json?.trim()) return;
+        try {
+            const n = await importSnapshot(serverId, json.trim());
+            setNotice(`${n} message(s) imported from snapshot`);
+        } catch (e) {
+            setError(String(e));
+        }
+    };
+
     const leave = async (serverId: string) => {
         if (!confirm('Leave this server?')) return;
         try {
@@ -339,6 +477,7 @@ export default function App() {
             setDmOpen(true);
             setActiveServer(null);
             setActiveDm(chan);
+            void loadDmHistory(chan);
         } catch (e) {
             setError(String(e));
         }
@@ -371,7 +510,13 @@ export default function App() {
         }
         setBusy(true);
         try {
-            const info = phase === 'onboarding' ? await initIdentity(password) : await unlock(password);
+            let info;
+            if (phase === 'onboarding') {
+                await initIdentity(password);
+                info = await unlock(password);
+            } else {
+                info = await unlock(password);
+            }
             setMe(info);
             setPassword('');
             setPassword2('');
@@ -385,16 +530,16 @@ export default function App() {
     };
 
     if (phase === 'boot') {
-        return <div className="flex h-full w-full items-center justify-center bg-[#0b0d10]"/>;
+        return <div className="flex h-full w-full items-center justify-center bg-[#1e1f22]"/>;
     }
 
     if (phase !== 'ready') {
         return (
-            <div className="flex h-full w-full items-center justify-center bg-[#0b0d10]">
-                <form onSubmit={submitAuth} className="w-80 rounded-2xl border border-[#2b2d31] bg-[#17181c] p-6">
-                    <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-[#4ade80] text-lg font-bold text-black">P</div>
-                    <h1 className="mt-3 text-xl font-bold text-[#e8eaed]">Peers</h1>
-                    <p className="mb-4 text-xs text-[#8a8f98]">
+            <div className="flex h-full w-full items-center justify-center bg-[#1e1f22]">
+                <form onSubmit={submitAuth} className="w-80 rounded-2xl border border-[#35373c] bg-[#1e1f22] p-6">
+                    <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-[#5865f2] text-lg font-bold text-white">P</div>
+                    <h1 className="mt-3 text-xl font-bold text-[#f2f3f5]">Peers</h1>
+                    <p className="mb-4 text-xs text-[#949ba4]">
                         {phase === 'onboarding' ? 'Create your encrypted identity — this password seals your keys locally.' : 'Enter your password to unlock your identity and start the swarm.'}
                     </p>
                     <input
@@ -404,7 +549,7 @@ export default function App() {
                         placeholder="Password"
                         minLength={phase === 'onboarding' ? 8 : undefined}
                         autoFocus
-                        className="mb-2 w-full rounded-lg bg-[#212226] px-3 py-2 text-sm text-[#e8eaed] placeholder-[#6d7278] outline-none focus:ring-1 focus:ring-[#4ade80]/50"
+                        className="mb-2 w-full rounded-lg bg-[#2b2d31] px-3 py-2 text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
                     />
                     {phase === 'onboarding' && (
                         <input
@@ -413,14 +558,14 @@ export default function App() {
                             onChange={(e) => setPassword2(e.target.value)}
                             placeholder="Confirm password"
                             minLength={8}
-                            className="mb-4 w-full rounded-lg bg-[#212226] px-3 py-2 text-sm text-[#e8eaed] placeholder-[#6d7278] outline-none focus:ring-1 focus:ring-[#4ade80]/50"
+                            className="mb-4 w-full rounded-lg bg-[#2b2d31] px-3 py-2 text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
                         />
                     )}
                     {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
                     <button
                         type="submit"
                         disabled={busy}
-                        className="w-full rounded-lg bg-[#4ade80] px-3 py-2 text-sm font-semibold text-black hover:bg-[#86efac] disabled:opacity-50"
+                        className="w-full rounded-lg bg-[#5865f2] px-3 py-2 text-sm font-semibold text-white hover:bg-[#4752c4] disabled:opacity-50"
                     >
                         {busy ? '…' : phase === 'onboarding' ? 'Create identity' : 'Unlock'}
                     </button>
@@ -437,9 +582,11 @@ export default function App() {
     const paneName = dm
         ? dm.name
         : server?.channels.find((c) => c.name === activeChannel)?.name ?? '';
+    const onlineCount = server ? server.members.filter((m) => online.has(m.peerId)).length : 0;
+    const dmOnline = dm ? online.has(dm.id) : false;
 
     return (
-        <div className="flex h-full w-full bg-[#0b0d10] text-[#e8eaed]">
+        <div className="flex h-full w-full bg-[#1e1f22] text-[#f2f3f5]">
             <ServerRail
                 servers={serverList}
                 dms={dms}
@@ -454,20 +601,20 @@ export default function App() {
                 you={me?.peerIdShort ?? 'y'}
             />
             {dmOpen ? (
-                <div className="flex h-full w-[248px] flex-col bg-[#212226]">
-                    <div className="flex h-12 shrink-0 items-center justify-between border-b border-[#17181c] px-4">
+                <div className="flex h-full w-[248px] flex-col bg-[#2b2d31]">
+                    <div className="flex h-12 shrink-0 items-center justify-between border-b border-[#1e1f22] px-4">
                         <span className="font-semibold">Direct messages</span>
                         <button
                             onClick={() => void addDm()}
                             title="Message a peer by ID"
-                            className="flex h-6 w-6 items-center justify-center rounded text-lg font-light text-[#4ade80] hover:bg-[#2b2d31]"
+                            className="flex h-6 w-6 items-center justify-center rounded text-lg font-light text-[#23a55a] hover:bg-[#35373c]"
                         >
                             +
                         </button>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2">
                         {dms.length === 0 && (
-                            <div className="px-2 py-4 text-xs text-[#8a8f98]">
+                            <div className="px-2 py-4 text-xs text-[#949ba4]">
                                 No DMs yet — add a peer ID to start an encrypted channel.
                             </div>
                         )}
@@ -478,9 +625,10 @@ export default function App() {
                                     setActiveDm(d.id);
                                     setUnread((u) => ({...u, [`dm:${d.id}`]: 0}));
                                     setDms((old) => old.map((x) => (x.id === d.id ? {...x, unread: 0} : x)));
+                                    void loadDmHistory(d.id);
                                 }}
-                                className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
-                                    d.id === activeDm ? 'bg-[#3a3d43] text-[#f2f3f5]' : 'text-[#a8adb5] hover:bg-[#2b2d31]'
+                                className={`relative flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
+                                    d.id === activeDm ? 'bg-[#404249] text-[#f2f3f5]' : 'text-[#b5bac1] hover:bg-[#35373c]'
                                 }`}
                             >
                                 <span
@@ -489,9 +637,12 @@ export default function App() {
                                 >
                                     {d.name[0].toUpperCase()}
                                 </span>
+                                {online.has(d.id) && (
+                                    <span className="absolute left-[22px] top-[22px] h-2.5 w-2.5 rounded-full border-2 border-[#2b2d31] bg-[#23a55a]"/>
+                                )}
                                 <span className="flex-1 truncate">{d.name}</span>
                                 {d.unread > 0 && (
-                                    <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#4ade80] px-1 text-[10px] font-bold text-black">
+                                    <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#f23f43] px-1 text-[10px] font-bold text-white">
                                         {d.unread}
                                     </span>
                                 )}
@@ -506,6 +657,7 @@ export default function App() {
                     unreadFor={(name) => unread[`${server.id}/${name}`] ?? 0}
                     me={me}
                     joinRequests={joinRequests}
+                    online={online}
                     onSelectChannel={selectChannel}
                     onInvite={() => void copyInvite(server.id)}
                     onAddChannel={() => void addChannel(server.id)}
@@ -513,21 +665,36 @@ export default function App() {
                     onAcceptJoin={(n) => void acceptJoin(n)}
                     onRejectJoin={rejectJoin}
                     onLeave={() => void leave(server.id)}
+                    onRename={() => void renameSrv(server.id)}
+                    onRotateKey={() => void rotateKeyUi(server.id)}
+                    onKickMember={(peerId) => void kickMember(server.id, peerId)}
+                    onPromoteMember={(peerId, role) => void promoteMember(server.id, peerId, role)}
+                    onExportSnapshot={() => void exportSnapshotUi(server.id)}
+                    onImportSnapshot={() => void importSnapshotUi(server.id)}
                 />
             ) : (
-                <div className="flex h-full w-[248px] items-center justify-center bg-[#212226] px-4 text-center text-xs text-[#8a8f98]">
+                <div className="flex h-full w-[248px] items-center justify-center bg-[#2b2d31] px-4 text-center text-xs text-[#949ba4]">
                     No server selected
                 </div>
             )}
             <MessagePane
                 channelName={paneName || '…'}
-                subtitle={dm ? 'E2E encrypted · direct' : server ? 'E2E encrypted · members ' + server.memberCount : ''}
+                subtitle={dm ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}` : server ? `E2E encrypted · ${onlineCount}/${server.memberCount} online` : ''}
                 messages={paneMessages}
                 onSend={send}
             />
+            {notice && (
+                <div
+                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-[#1e3d2a] bg-[#12231a] px-3 py-2 text-xs text-[#23a55a]"
+                    onClick={() => setNotice(null)}
+                    title="Dismiss"
+                >
+                    {notice}
+                </div>
+            )}
             {error && (
                 <div
-                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-[#3a1d1d] bg-[#241313] px-3 py-2 text-xs text-red-300"
+                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-[#4a2224] bg-[#2b1214] px-3 py-2 text-xs text-[#f23f43]"
                     onClick={() => setError(null)}
                     title="Dismiss"
                 >

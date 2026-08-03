@@ -93,6 +93,12 @@ pub struct InvitePayload {
 pub struct Invite {
     pub payload: InvitePayload,
     pub sig: String,
+    /// The owner's current listen multiaddrs, so the joiner can dial them
+    /// directly and form a gossipsub mesh (deterministic connectivity,
+    /// instead of relying on DHT discovery luck). Not part of the signed
+    /// payload — it's routing metadata only.
+    #[serde(default)]
+    pub addrs: Vec<String>,
 }
 
 impl Invite {
@@ -163,6 +169,48 @@ impl ServerKeys {
 impl Default for ServerKeys {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Serializable form of [`ServerKeys`]: the ed25519 keypairs as protobuf
+/// bytes (libp2p's own encoding) plus the rotation epoch. Never persisted
+/// in plaintext — the whole state envelope is sealed at rest.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PersistedKeys {
+    pub current: Vec<u8>,
+    pub prev: Option<Vec<u8>>,
+    pub epoch: u64,
+}
+
+impl ServerKeys {
+    /// Encodes the keypair chain for storage.
+    pub fn to_persisted(&self) -> PersistedKeys {
+        PersistedKeys {
+            current: self.current.to_protobuf_encoding().unwrap_or_default(),
+            prev: self
+                .prev
+                .as_ref()
+                .and_then(|k| k.to_protobuf_encoding().ok()),
+            epoch: self.epoch,
+        }
+    }
+
+    /// Restores a keypair chain from [`PersistedKeys`].
+    pub fn from_persisted(p: &PersistedKeys) -> Result<Self> {
+        let current = Keypair::from_protobuf_encoding(&p.current)
+            .map_err(|e| PeersError::Crypto(format!("restore server key: {e}")))?;
+        let prev = match &p.prev {
+            Some(bytes) => Some(
+                Keypair::from_protobuf_encoding(bytes)
+                    .map_err(|e| PeersError::Crypto(format!("restore server key: {e}")))?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            current,
+            prev,
+            epoch: p.epoch,
+        })
     }
 }
 
@@ -250,6 +298,7 @@ impl ServerRecord {
         Ok(Invite {
             payload,
             sig: B64.encode(sig),
+            addrs: Vec::new(),
         })
     }
 
@@ -278,6 +327,111 @@ fn ed25519_bytes(pk: &libp2p::identity::PublicKey) -> [u8; 32] {
         .try_into_ed25519()
         .expect("server keys are always ed25519")
         .to_bytes()
+}
+
+/// Serializable form of a [`ServerRecord`], stored inside the sealed state
+/// envelope so server membership, channels, rotation chain and (for the
+/// owner) signing keys survive restarts.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedServer {
+    pub id: String,
+    pub name: String,
+    pub owner_peer: String,
+    pub known_pub: Vec<u8>,
+    pub members: Vec<Member>,
+    pub channels: Vec<ChannelConfig>,
+    pub keys: Option<PersistedKeys>,
+}
+
+impl ServerRecord {
+    /// Flattens the record for storage.
+    pub fn to_persisted(&self) -> PersistedServer {
+        PersistedServer {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            owner_peer: self.owner_peer.clone(),
+            known_pub: self.known_pub.to_vec(),
+            members: self.members.clone(),
+            channels: self.channels.clone(),
+            keys: self.keys.as_ref().map(|k| k.to_persisted()),
+        }
+    }
+
+    /// Rebuilds a live record from [`PersistedServer`].
+    pub fn from_persisted(p: &PersistedServer) -> Result<Self> {
+        let known_pub = <[u8; 32]>::try_from(p.known_pub.as_slice())
+            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        Ok(Self {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            owner_peer: p.owner_peer.clone(),
+            known_pub,
+            members: p.members.clone(),
+            channels: p.channels.clone(),
+            keys: match &p.keys {
+                Some(k) => Some(ServerKeys::from_persisted(k)?),
+                None => None,
+            },
+        })
+    }
+}
+
+/// Owner-signed export of a server's full state (members, channels and
+/// message history). Anyone holding the server's verified member list can
+/// check the signature and import the history; the owner signs with the
+/// current chain key.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    pub version: u8,
+    pub server_id: String,
+    pub server_name: String,
+    pub exported_epoch: u64,
+    pub channels: Vec<ChannelConfig>,
+    pub members: Vec<Member>,
+    pub messages: Vec<SignedMessage>,
+    pub sig: String,
+}
+
+impl Snapshot {
+    /// Builds and signs a snapshot with the server's chain-linking key.
+    pub fn sign(rec: &ServerRecord, messages: Vec<SignedMessage>) -> Result<Self> {
+        let keys = rec.keys.as_ref().ok_or(PeersError::NotOwner)?;
+        let snap = Self {
+            version: 1,
+            server_id: rec.id.clone(),
+            server_name: rec.name.clone(),
+            exported_epoch: keys.epoch,
+            channels: rec.channels.clone(),
+            members: rec.members.clone(),
+            messages,
+            sig: String::new(),
+        };
+        let bytes = serde_json::to_vec(&snap).map_err(PeersError::Serde)?;
+        let sig = keys.sign(&bytes)?;
+        Ok(Self { sig, ..snap })
+    }
+
+    /// Verifies the snapshot against the chain key we already trust for
+    /// this server, and that it describes the same server id.
+    pub fn verify(&self, rec: &ServerRecord) -> Result<()> {
+        if self.server_id != rec.id {
+            return Err(PeersError::ServerNotFound);
+        }
+        let mut copy = self.clone();
+        let sig = B64
+            .decode(&copy.sig)
+            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        copy.sig.clear();
+        let bytes = serde_json::to_vec(&copy).map_err(PeersError::Serde)?;
+        let pk = ed25519::PublicKey::try_from_bytes(&rec.known_pub)
+            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        if !pk.verify(&bytes, &sig) {
+            return Err(PeersError::SnapshotCorrupt);
+        }
+        Ok(())
+    }
 }
 
 /// The server-wide gossip topic used for control messages.
@@ -396,6 +550,16 @@ impl ServerDir {
     pub fn view(&self, id: &str, me: &str) -> Option<ServerView> {
         self.servers.get(id).map(|s| ServerView::from_record(s, me))
     }
+
+    /// Clones every record (for persistence / re-subscription).
+    pub fn records(&self) -> Vec<ServerRecord> {
+        self.servers.values().cloned().collect()
+    }
+
+    /// Re-inserts a restored record (persistence reload).
+    pub fn restore(&mut self, rec: ServerRecord) {
+        self.servers.insert(rec.id.clone(), rec);
+    }
 }
 
 /// Frontend-friendly snapshot of a server.
@@ -473,6 +637,7 @@ impl JoinNotice {
 /// is embedded so any member can verify authenticity and bind it to the
 /// sender's peer ID. Channel messages are broadcast (not encrypted).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SignedMessage {
     pub version: u8,
     pub server_id: String,
@@ -656,5 +821,55 @@ mod tests {
             msg.verify(&stranger),
             Err(PeersError::NotInServer)
         ));
+    }
+
+    #[test]
+    fn persisted_record_round_trip() {
+        let mut owner = rec("persist");
+        owner.keys.as_mut().unwrap().rotate();
+        owner.channels.push(ChannelConfig {
+            name: "off-topic".to_string(),
+            topic: "off-topic".to_string(),
+            read_min: Role::Member,
+            write_min: Role::Member,
+        });
+        let p = owner.to_persisted();
+        let restored = ServerRecord::from_persisted(&p).unwrap();
+        assert_eq!(restored.id, owner.id);
+        assert_eq!(restored.name, owner.name);
+        assert_eq!(restored.owner_peer, owner.owner_peer);
+        assert_eq!(restored.known_pub, owner.known_pub);
+        assert_eq!(restored.members, owner.members);
+        assert_eq!(restored.channels, owner.channels);
+        assert_eq!(restored.keys.as_ref().unwrap().epoch, 1);
+        // A restored owner can still sign a verifiable list and invite.
+        let list = restored.signed_list().unwrap();
+        let mut joiner = ServerRecord::new_joined(&restored.invite().unwrap());
+        joiner.verify_list(&list).unwrap();
+        assert_eq!(joiner.known_pub, list.payload.next_pub);
+    }
+
+    #[test]
+    fn snapshot_sign_and_verify() {
+        let owner = rec("snap");
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = libp2p::PeerId::from(keypair.public());
+        let msg = SignedMessage::sign(&keypair, &owner.id, "general", "snapshot this").unwrap();
+        let snap = Snapshot::sign(&owner, vec![msg]).unwrap();
+        assert!(snap.verify(&owner).is_ok());
+
+        // Signature covers everything: tampered history is rejected.
+        let mut tampered = snap.clone();
+        tampered.messages[0].text = "rewritten".to_string();
+        assert!(matches!(
+            tampered.verify(&owner),
+            Err(PeersError::SnapshotCorrupt)
+        ));
+
+        // A member (non-owner) can verify an owner-made snapshot too.
+        let mut member = ServerRecord::new_joined(&owner.invite().unwrap());
+        let list = owner.signed_list().unwrap();
+        member.verify_list(&list).unwrap();
+        assert!(snap.verify(&member).is_ok());
     }
 }

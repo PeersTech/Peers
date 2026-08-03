@@ -3,12 +3,32 @@
 html, body, #root {
     height: 100%;
     margin: 0;
-    background: #0b0d10;
+    background: #1e1f22;
     overflow: hidden;
     user-select: none;
 }
 
+body {
+    font-family: 'gg sans', 'Nunito', 'Nunito Sans', 'Helvetica Neue', 'Noto Sans', system-ui, -apple-system, sans-serif;
+    color: #dbdee1;
+    -webkit-font-smoothing: antialiased;
+}
+
 * {
     scrollbar-width: thin;
-    scrollbar-color: #1e2228 transparent;
+    scrollbar-color: #4e5058 transparent;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #4e5058;
+    border-radius: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
 }
