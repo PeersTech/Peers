@@ -255,17 +255,6 @@ impl ServerRecord {
             .map(|m| m.role)
     }
 
-    /// Whether `peer_id` may read (and by extension write) the channel.
-    pub fn can_read(&self, peer_id: &str, channel: &str, role: Role) -> bool {
-        let Some(cfg) = self.channels.iter().find(|c| c.name == channel) else {
-            return false;
-        };
-        let Some(member) = self.role_of(peer_id) else {
-            return false;
-        };
-        member >= cfg.read_min && role >= cfg.read_min
-    }
-
     /// Whether `peer_id` may publish to the channel.
     pub fn can_write(&self, peer_id: &str, channel: &str) -> bool {
         let Some(cfg) = self.channels.iter().find(|c| c.name == channel) else {
@@ -367,10 +356,6 @@ impl ServerDir {
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut ServerRecord> {
         self.servers.get_mut(id)
-    }
-
-    pub fn insert(&mut self, rec: ServerRecord) {
-        self.servers.insert(rec.id.clone(), rec);
     }
 
     /// Verifies and applies a joined invite.

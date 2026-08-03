@@ -39,14 +39,6 @@ impl BlobStore {
     pub fn get(&self, hash: &BlobHash) -> Option<Vec<u8>> {
         self.inner.lock().unwrap().get(hash).cloned()
     }
-
-    pub fn has(&self, hash: &BlobHash) -> bool {
-        self.inner.lock().unwrap().contains_key(hash)
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
-    }
 }
 
 /// Frame: [u32 BE length][payload].
@@ -139,8 +131,6 @@ mod tests {
         let h1 = store.put(b"same content");
         let h2 = store.put(b"same content");
         assert_eq!(h1, h2);
-        assert_eq!(store.len(), 1);
-        assert!(store.has(&h1));
         assert_eq!(store.get(&h1).unwrap(), b"same content");
     }
 }

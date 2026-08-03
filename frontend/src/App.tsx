@@ -1,10 +1,10 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    colorFor, createInvite, createServer, hasIdentity, initIdentity, isUnlocked, joinServer,
-    leaveServer, listServers, lock, onJoinRequest, onNodeMessage, onServerError, onServerList,
-    onServerMessage, peerName, publish, publishChannel, setChannel, shortId, subscribe,
-    subscribeChannel, timeFor, unlock,
+    addMember, colorFor, createInvite, createServer, hasIdentity, initIdentity, isUnlocked,
+    joinServer, leaveServer, listServers, lock, onJoinRequest, onNodeMessage, onServerError,
+    onServerList, onServerMessage, peerName, publish, publishChannel, setChannel, shortId,
+    subscribe, subscribeChannel, timeFor, unlock,
     type IdentityInfo, type JoinNotice, type ServerView, type UiMessage,
 } from './lib/api';
 import {ServerRail} from './components/ServerRail';

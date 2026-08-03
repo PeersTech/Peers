@@ -59,15 +59,6 @@ impl PeerCard {
     }
 }
 
-/// A decrypted incoming message.
-pub struct OpenMessage {
-    pub plaintext: Vec<u8>,
-    /// Sender's X25519 public key (validated card).
-    pub sender_x25519: [u8; 32],
-    /// Sender's Ed25519 public key.
-    pub sender_ed: [u8; 32],
-}
-
 /// Per-contact E2E state: one session (hash-chain + replay window) per
 /// recipient X25519 key, plus the identity cards we have validated so far.
 /// Memory-only for now; persisted contacts come with M4.
@@ -92,9 +83,8 @@ impl SessionDir {
     }
 
     fn session_for(&mut self, identity: &Identity, their_pub: [u8; 32]) -> Result<&mut Session> {
-        if !self.sessions.contains_key(&their_pub) {
-            let session = Session::new(&identity.x25519_secret, their_pub)?;
-            self.sessions.insert(their_pub, session);
+        if let std::collections::hash_map::Entry::Vacant(e) = self.sessions.entry(their_pub) {
+            e.insert(Session::new(&identity.x25519_secret, their_pub)?);
         }
         Ok(self.sessions.get_mut(&their_pub).expect("just inserted"))
     }
@@ -155,8 +145,8 @@ impl SessionDir {
 
     /// Opens a `seal`-produced envelope addressed to us. Verifies the sender
     /// card, picks our copy, and decrypts with replay protection. On success
-    /// the sender's card is trusted and cached.
-    pub fn open(&mut self, identity: &Identity, aad: &[u8], payload: &[u8]) -> Result<OpenMessage> {
+    /// the sender's card is trusted and cached, and the plaintext returned.
+    pub fn open(&mut self, identity: &Identity, aad: &[u8], payload: &[u8]) -> Result<Vec<u8>> {
         let card = parse_card(payload)?;
         card.verify()?;
 
@@ -191,11 +181,7 @@ impl SessionDir {
                 let session = self.session_for(identity, card.x25519_pub)?;
                 let plaintext = open(session, aad, sealed)?;
                 self.remember_contact(&card_contact_key(&card), &card);
-                return Ok(OpenMessage {
-                    plaintext,
-                    sender_x25519: card.x25519_pub,
-                    sender_ed: card.ed_pub,
-                });
+                return Ok(plaintext);
             }
             rest = &rest[copy_len..];
         }
@@ -268,8 +254,7 @@ mod tests {
             .seal(&a, &[b_pub], b"channel/general", b"hello b")
             .unwrap();
         let got = db.open(&b, b"channel/general", &payload).unwrap();
-        assert_eq!(got.plaintext, b"hello b");
-        assert_eq!(got.sender_x25519, a.x25519_public());
+        assert_eq!(got, b"hello b");
         // b can now reply: a's key is cached under b's contacts.
         let a_pub = a.x25519_public();
         assert!(db.recipient_keys().contains(&a_pub));
@@ -326,8 +311,8 @@ mod tests {
         let payload = da
             .seal(&a, &[b.x25519_public(), c.x25519_public()], b"ch", b"both")
             .unwrap();
-        assert_eq!(db.open(&b, b"ch", &payload).unwrap().plaintext, b"both");
-        assert_eq!(dc.open(&c, b"ch", &payload).unwrap().plaintext, b"both");
+        assert_eq!(db.open(&b, b"ch", &payload).unwrap(), b"both");
+        assert_eq!(dc.open(&c, b"ch", &payload).unwrap(), b"both");
     }
 
     #[test]

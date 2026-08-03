@@ -13,7 +13,7 @@ use libp2p::request_response::{
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
 use libp2p::swarm::SwarmEvent;
-use libp2p::{gossipsub, identify, kad, Multiaddr, PeerId, Swarm, SwarmBuilder};
+use libp2p::{gossipsub, identify, kad, ping, Multiaddr, PeerId, Swarm, SwarmBuilder};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{broadcast, mpsc};
 
@@ -36,8 +36,6 @@ pub enum NodeCommand {
     ParkBlob(Vec<u8>),
     /// Look up DHT providers for a hash and request the blob from them.
     FetchBlob(BlobHash),
-    /// Stop the node.
-    Shutdown,
 }
 
 /// Events emitted by the node, relayed to the frontend as Tauri events.
@@ -179,12 +177,7 @@ impl Node {
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
                     None => break,
-                    Some(cmd) => {
-                        if let NodeCommand::Shutdown = cmd {
-                            break;
-                        }
-                        node.handle_command(cmd);
-                    }
+                    Some(cmd) => node.handle_command(cmd),
                 },
                 ev = node.swarm.next() => match ev {
                     None => break,
@@ -303,7 +296,6 @@ impl Node {
                     .get_providers(kad::RecordKey::new(&hash));
                 self.pending_fetches.insert(qid, hash);
             }
-            NodeCommand::Shutdown => {}
         }
     }
 
@@ -342,7 +334,14 @@ impl Node {
                 }
                 self.peer_addresses.insert(peer, addrs);
             }
-            behaviour::Event::Identify(_) | behaviour::Event::Ping(_) => {}
+            behaviour::Event::Identify(_) => {}
+            behaviour::Event::Ping(ping::Event { peer, result, .. }) => {
+                if let Err(e) = result {
+                    self.emit(NodeEvent::Error {
+                        message: format!("ping to {peer} failed: {e}"),
+                    });
+                }
+            }
             behaviour::Event::Kademlia(kev) => match kev {
                 kad::Event::OutboundQueryProgressed { id, result, .. } => {
                     self.handle_query_progress(id, result);
@@ -355,8 +354,8 @@ impl Node {
                 }
                 _ => {}
             },
-            behaviour::Event::Gossipsub(gev) => match gev {
-                gossipsub::Event::Message { message, .. } => {
+            behaviour::Event::Gossipsub(gev) => {
+                if let gossipsub::Event::Message { message, .. } = gev {
                     if let Some(from) = message.source {
                         self.emit(NodeEvent::Message {
                             topic: message.topic.to_string(),
@@ -365,9 +364,8 @@ impl Node {
                         });
                     }
                 }
-                _ => {}
-            },
-            behaviour::Event::RequestResponse(rrev) => match rrev {
+            }
+            behaviour::Event::RequestResponse(rrev) => match *rrev {
                 RequestResponseEvent::Message { message, .. } => match message {
                     RequestResponseMessage::Request {
                         request, channel, ..
@@ -461,12 +459,10 @@ impl Node {
                     }
                 }
             }
-            kad::QueryResult::StartProviding(res) => {
-                if let Err(e) = res {
-                    self.emit(NodeEvent::Error {
-                        message: format!("provider announcement failed: {e}"),
-                    });
-                }
+            kad::QueryResult::StartProviding(Err(e)) => {
+                self.emit(NodeEvent::Error {
+                    message: format!("provider announcement failed: {e}"),
+                });
             }
             _ => {}
         }

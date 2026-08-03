@@ -93,13 +93,8 @@ async fn unlock(
     let mut rx = handle.subscribe();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    let _ = app2.emit("node://event", &ev);
-                }
-                Err(_) => break,
-            }
+        while let Ok(ev) = rx.recv().await {
+            let _ = app2.emit("node://event", &ev);
         }
     });
 
@@ -609,8 +604,8 @@ pub fn run() {
                     let Some(identity) = identity else { return };
                     let Some(dir) = dir.as_mut() else { return };
                     match dir.open(&identity, topic.as_bytes(), &data) {
-                        Ok(open) => {
-                            let text = String::from_utf8_lossy(&open.plaintext).to_string();
+                        Ok(plaintext) => {
+                            let text = String::from_utf8_lossy(&plaintext).to_string();
                             let _ = app_handle.emit(
                                 "node://message",
                                 serde_json::json!({

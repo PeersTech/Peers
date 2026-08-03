@@ -68,12 +68,6 @@ impl Keystore {
         self.path.exists()
     }
 
-    /// Re-seals the identity with a new password.
-    pub fn change_password(&self, old: &str, new: &str) -> Result<()> {
-        let blob = self.open(old)?;
-        self.seal(&blob, new)
-    }
-
     fn seal(&self, blob: &[u8], password: &str) -> Result<()> {
         let mut salt = [0u8; SALT_LEN];
         OsRng.fill_bytes(&mut salt);
@@ -202,18 +196,6 @@ mod tests {
             "x25519 secret leaked"
         );
 
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn change_password() {
-        let dir = std::env::temp_dir().join(format!("peers-keystore-test2-{}", std::process::id()));
-        let path = dir.join("identity.json");
-        let ks = Keystore::new(path.clone());
-        let id = ks.create("old-pass").unwrap();
-        ks.change_password("old-pass", "new-pass").unwrap();
-        let loaded = ks.load("new-pass").unwrap();
-        assert_eq!(loaded.peer_id, id.peer_id);
         let _ = fs::remove_dir_all(&dir);
     }
 

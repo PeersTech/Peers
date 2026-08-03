@@ -100,24 +100,6 @@ impl Identity {
         Ok(out)
     }
 
-    /// Compact "XXXX…XXXX" form of the fingerprint.
-    pub fn fingerprint_short(&self) -> Result<String> {
-        let plain = self.fingerprint()?.replace(' ', "");
-        if plain.chars().count() <= 12 {
-            return Ok(plain);
-        }
-        let start: String = plain.chars().take(4).collect();
-        let end: String = plain
-            .chars()
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        Ok(format!("{start}…{end}"))
-    }
-
     /// Conventional short form of the peer ID.
     pub fn peer_id_short(&self) -> String {
         let s = self.peer_id.to_string();
@@ -154,7 +136,6 @@ mod tests {
         assert_eq!(plain.len(), 52, "SHA-256 → 52 base32 chars");
         let decoded = base32::decode(Alphabet::Rfc4648 { padding: false }, &plain).unwrap();
         assert_eq!(decoded.len(), 32);
-        assert_eq!(id.fingerprint_short().unwrap().chars().count(), 9);
     }
 
     #[test]
