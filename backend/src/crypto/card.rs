@@ -22,7 +22,7 @@ const MAX_RECIPIENTS: usize = 64;
 pub struct PeerCard {
     pub ed_pub: [u8; 32],
     pub x25519_pub: [u8; 32],
-    pub sig: [u8; 64],
+    pub sig: Vec<u8>,
 }
 
 fn sign_message(x25519_pub: &[u8; 32]) -> [u8; 32] {
@@ -40,9 +40,6 @@ impl PeerCard {
             .keypair
             .sign(&msg)
             .map_err(|e| PeersError::Crypto(format!("card sign: {e}")))?;
-        let sig: [u8; 64] = sig
-            .try_into()
-            .map_err(|_| PeersError::Crypto("ed25519 signature is not 64 bytes".into()))?;
         Ok(Self {
             ed_pub: identity.ed25519_public()?,
             x25519_pub,
@@ -212,9 +209,7 @@ fn parse_card(payload: &[u8]) -> Result<PeerCard> {
     let x25519_pub: [u8; 32] = payload[33..65]
         .try_into()
         .map_err(|_| PeersError::BadCipher)?;
-    let sig: [u8; 64] = payload[65..129]
-        .try_into()
-        .map_err(|_| PeersError::BadCipher)?;
+    let sig: Vec<u8> = payload[65..129].to_vec();
     Ok(PeerCard {
         ed_pub,
         x25519_pub,

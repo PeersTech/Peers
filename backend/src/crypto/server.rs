@@ -545,7 +545,13 @@ mod tests {
     use super::*;
 
     fn rec(name: &str) -> ServerRecord {
-        ServerRecord::new_owned(new_server_id(), name.to_string(), "alice".to_string())
+        let identity = crate::crypto::identity::Identity::new().unwrap();
+        ServerRecord::new_owned(
+            new_server_id(),
+            name.to_string(),
+            "alice".to_string(),
+            PeerCard::sign(&identity).unwrap(),
+        )
     }
 
     #[test]
