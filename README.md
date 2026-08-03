@@ -160,6 +160,7 @@ Trigger a manual build or release anytime from the **Actions** tab.
 - [ ] **M11** — Headless node mode (`--node`): lightweight always-on routing node (Pi/VPS/old phone)
 - [ ] **M12** — Node bootstrap + capacity caps for low-end devices
 - [ ] **M13** — Deployment guide + public node list
+- [ ] **M14** — Custom profiles: signed display name, profile picture (DHT avatar), about me
 
 ---
 

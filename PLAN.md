@@ -69,6 +69,27 @@ forms the backbone.
       tiered relaying (clients relay only while idle/charging).
 - [ ] **M13 — Deployment guide + public node list.** How to stand up a node on a
       cheap VPS/Pi, and the canonical node list clients bootstrap to.
+- [ ] **M14 — Custom profiles.** Global display name, profile picture and "about
+      me", all signed by the identity so they can't be impersonated. Profile
+      rides alongside the peer card (member lists, join notices, DM envelopes);
+      avatars are parked as DHT blobs and fetched by hash. Editable from a
+      settings screen in the UI.
+
+## Profile system design (M14)
+
+- **`SignedProfile`** — `{ display_name, about, avatar_hash }` + an Ed25519
+  signature over the serialized profile, bound to the identity's peer ID.
+  Self-authenticating, like the peer card: any peer can verify who it's from.
+- **Transport** — the profile rides wherever the peer card already travels
+  (server member lists, join notices, DM envelopes), so contacts learn it with
+  no extra round-trips.
+- **Avatar** — a small image parked via the existing DHT blob system
+  (`park_blob`/`fetch_blob`, torrent-style). The profile stores the blob hash;
+  clients fetch + cache avatars lazily. Sizing is capped so low-end devices and
+  the DHT aren't flooded.
+- **UI** — settings screen to edit name/about/avatar; avatars + names surface in
+  the DM list, member list, message headers and the profile of your own node.
+  Per-server nicknames remain an override on top of the global name.
 
 ## Low-end device strategy
 
