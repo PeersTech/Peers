@@ -50,8 +50,16 @@ backend**, and the frontend never sees a secret.
 | Blob parking | Share large files torrent-style via the Kademlia DHT — the sender can go offline after uploading |
 | Multi-recipient envelopes | One sealed message addressed to any number of peers, each with their own key |
 | Local keystore | Argon2id + XChaCha20-Poly1305 sealed `identity.json`, permissions `0600` |
+| At-rest state | Sealed `state.json` — servers, keychains, DM sessions and full history survive restart |
+| Presence | Live online/offline dots per member across the mesh |
+| Signed snapshots | Owner-signed server history export/import (verify before merging) |
+| Deterministic dialing | Invites carry the owner's listen addresses; joiners dial them directly |
 | NAT-friendly | TCP + QUIC transports, noise encryption, public bootstrap nodes |
 | Cross-platform | Windows, macOS and Linux installers built by GitHub Actions |
+
+> Planning **international, cross-NAT chat** via a decentralized network of
+> always-on Peers nodes (friend codes, Circuit Relay v2, hole punching, headless
+> node mode) — see [`PLAN.md`](PLAN.md).
 
 ### Cryptography
 
@@ -137,11 +145,21 @@ Trigger a manual build or release anytime from the **Actions** tab.
 
 - [x] **M1** — Scaffold: React UI shell + 3-pane layout
 - [x] **M2** — Crypto core: identity, keystore, sessions, AEAD, fingerprints (tested)
-- [ ] **M3** — Swarm: libp2p node, DHT blob parking, gossipsub chat, tray + background seeding
-- [ ] **M4** — Servers: create/invite/join, owner-signed member lists, rotating server keys
-- [ ] **M5** — Channels + roles: ACLs, live bindings, UI wiring
-- [ ] **M6** — Snapshots: owner-signed history export/import
-- [ ] **M7** — Packaging + open-source release
+- [x] **M3** — Swarm: libp2p node, DHT blob parking, gossipsub chat, tray + background seeding
+- [x] **M4** — Servers: create/invite/join, owner-signed member lists, rotating server keys
+- [x] **M5** — Channels + roles: ACLs, live bindings, UI wiring
+- [x] **M6** — Snapshots: owner-signed history export/import
+- [x] **M6.5** — Persistence, presence, deterministic invite dialing
+- [ ] **M7** — Packaging + open-source release (installers build in CI; release not cut yet)
+
+### Node network (international chat — see [`PLAN.md`](PLAN.md))
+
+- [ ] **M8** — Friend codes: share/scan peer-ID code, DHT `find_peer`, direct dial
+- [ ] **M9** — Circuit Relay v2: NAT'd peers connect through always-on nodes
+- [ ] **M10** — DCUtR hole punching: upgrade relayed connections to direct P2P
+- [ ] **M11** — Headless node mode (`--node`): lightweight always-on routing node (Pi/VPS/old phone)
+- [ ] **M12** — Node bootstrap + capacity caps for low-end devices
+- [ ] **M13** — Deployment guide + public node list
 
 ---
 
