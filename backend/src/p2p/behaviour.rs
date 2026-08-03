@@ -33,7 +33,7 @@ pub enum Event {
     Ping(ping::Event),
     Kademlia(kad::Event),
     Gossipsub(gossipsub::Event),
-    RequestResponse(request_response::Event<BlobCodec>),
+    RequestResponse(request_response::Event<Vec<u8>, Vec<u8>>),
 }
 
 impl From<identify::Event> for Event {
@@ -60,8 +60,8 @@ impl From<gossipsub::Event> for Event {
     }
 }
 
-impl From<request_response::Event<BlobCodec>> for Event {
-    fn from(event: request_response::Event<BlobCodec>) -> Self {
+impl From<request_response::Event<Vec<u8>, Vec<u8>>> for Event {
+    fn from(event: request_response::Event<Vec<u8>, Vec<u8>>) -> Self {
         Self::RequestResponse(event)
     }
 }

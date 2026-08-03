@@ -463,10 +463,12 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
-    let mut dir = state.dir.lock().unwrap();
-    let dir = dir.as_mut().ok_or("not unlocked")?;
-    let recipients = dir.recipient_keys();
-    let payload = dir.seal(&identity, &recipients, channel.as_bytes(), text.as_bytes())?;
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipients = dir.recipient_keys();
+        dir.seal(&identity, &recipients, channel.as_bytes(), text.as_bytes())?
+    };
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Publish {
         topic: format!("peers/v1/ch/{channel}"),
@@ -529,9 +531,9 @@ pub fn run() {
             let app_handle = app.handle().clone();
             app.listen("node://event", move |event| {
                 let state = app_handle.state::<AppState>();
-                let payload: NodeEvent = match event.payload().map(serde_json::from_str) {
-                    Some(Ok(ev)) => ev,
-                    _ => return,
+                let payload: NodeEvent = match serde_json::from_str(event.payload()) {
+                    Ok(ev) => ev,
+                    Err(_) => return,
                 };
                 if let NodeEvent::Message { topic, from, data } = payload {
                     // Server control plane: member lists and join notices

@@ -272,7 +272,7 @@ impl Node {
                         .swarm
                         .behaviour_mut()
                         .kademlia
-                        .start_providing(kad::Key::new(hash))
+                        .start_providing(kad::RecordKey::new(&hash))
                     {
                         Ok(_) => {
                             self.announced.insert(hash);
@@ -300,7 +300,7 @@ impl Node {
                     .swarm
                     .behaviour_mut()
                     .kademlia
-                    .get_providers(kad::Key::new(hash));
+                    .get_providers(kad::RecordKey::new(&hash));
                 self.pending_fetches.insert(qid, hash);
             }
             NodeCommand::Shutdown => {}
@@ -368,7 +368,11 @@ impl Node {
                 _ => {}
             },
             behaviour::Event::RequestResponse(rrev) => match rrev {
-                RequestResponseEvent::Message { peer, message } => match message {
+                RequestResponseEvent::Message {
+                    peer,
+                    message,
+                    ..
+                } => match message {
                     RequestResponseMessage::Request {
                         request, channel, ..
                     } => {

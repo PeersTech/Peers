@@ -521,7 +521,7 @@ impl SignedMessage {
         if !pk.verify(&bytes, &sig) {
             return Err(PeersError::SnapshotCorrupt);
         }
-        let from = libp2p::PeerId::from_public_key(&libp2p::identity::PublicKey::Ed25519(pk));
+        let from = libp2p::PeerId::from_public_key(&pk.into());
         if from.to_string() != self.from {
             return Err(PeersError::SnapshotCorrupt);
         }
