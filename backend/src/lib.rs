@@ -930,8 +930,7 @@ pub fn run() {
                             };
                             if ok {
                                 {
-                                    let mut history =
-                                        app_handle.state::<AppState>().history.lock().unwrap();
+                                    let mut history = state.history.lock().unwrap();
                                     history.push_server(
                                         &format!("{server_id}/{}", msg.channel),
                                         msg.clone(),
@@ -967,8 +966,7 @@ pub fn run() {
                         Ok(plaintext) => {
                             let text = String::from_utf8_lossy(&plaintext).to_string();
                             {
-                                let mut history =
-                                    app_handle.state::<AppState>().history.lock().unwrap();
+                                let mut history = state.history.lock().unwrap();
                                 history.push_dm(
                                     &from,
                                     DmMessage {
