@@ -30,6 +30,7 @@ pub enum Role {
 
 /// A member entry in the signed list.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Member {
     pub peer_id: String,
     pub name: String,
@@ -39,6 +40,7 @@ pub struct Member {
 
 /// A channel plus its ACL (minimum roles to read / write).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChannelConfig {
     pub name: String,
     pub topic: String,
@@ -423,6 +425,7 @@ impl ServerView {
 /// owner to add them to the signed list. The owner verifies the list
 /// membership itself; this is only a request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JoinNotice {
     pub kind: String,
     pub server_id: String,
