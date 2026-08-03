@@ -103,7 +103,10 @@ async fn unlock(
     let _ = handle.send(NodeCommand::Listen).await;
     // Receive DMs addressed to us: our own peer id is our DM topic.
     let _ = handle
-        .send(NodeCommand::Subscribe(format!("peers/v1/ch/{}", id.peer_id)))
+        .send(NodeCommand::Subscribe(format!(
+            "peers/v1/ch/{}",
+            id.peer_id
+        )))
         .await;
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
