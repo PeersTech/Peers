@@ -323,16 +323,18 @@ impl Node {
 
     fn handle_behaviour_event(&mut self, ev: behaviour::Event) {
         match ev {
-            behaviour::Event::Identify(identify::Event::Received { info, .. }) => {
-                let peer = info.public_key.to_peer_id();
-                let addrs: Vec<Multiaddr> = info.listen_addrs.clone();
-                for addr in &addrs {
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer, addr.clone());
+            behaviour::Event::Identify(ev) => {
+                if let identify::Event::Received { info, .. } = *ev {
+                    let peer = info.public_key.to_peer_id();
+                    let addrs: Vec<Multiaddr> = info.listen_addrs.clone();
+                    for addr in &addrs {
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer, addr.clone());
+                    }
+                    self.peer_addresses.insert(peer, addrs);
                 }
-                self.peer_addresses.insert(peer, addrs);
             }
             behaviour::Event::Identify(_) => {}
             behaviour::Event::Ping(ping::Event { peer, result, .. }) => {

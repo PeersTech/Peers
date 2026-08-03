@@ -29,7 +29,7 @@ pub struct Behaviour {
 /// One variant per sub-behaviour; the swarm loop matches on these.
 #[derive(Debug)]
 pub enum Event {
-    Identify(identify::Event),
+    Identify(Box<identify::Event>),
     Ping(ping::Event),
     Kademlia(kad::Event),
     Gossipsub(gossipsub::Event),
@@ -38,7 +38,7 @@ pub enum Event {
 
 impl From<identify::Event> for Event {
     fn from(event: identify::Event) -> Self {
-        Self::Identify(event)
+        Self::Identify(Box::new(event))
     }
 }
 
