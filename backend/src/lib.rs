@@ -3,7 +3,7 @@ mod error;
 mod p2p;
 
 use crate::crypto::{Identity, Keystore, SessionDir};
-use crate::error::Result;
+use crate::error::PeersError;
 use crate::p2p::{NodeCommand, NodeEvent, NodeHandle};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
@@ -36,7 +36,7 @@ struct IdentityInfo {
     fingerprint: String,
 }
 
-fn info_for(id: &Identity) -> Result<IdentityInfo> {
+fn info_for(id: &Identity) -> Result<IdentityInfo, PeersError> {
     Ok(IdentityInfo {
         peer_id: id.peer_id.to_string(),
         peer_id_short: id.peer_id_short(),

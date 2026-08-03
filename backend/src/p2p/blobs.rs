@@ -53,21 +53,23 @@ impl BlobStore {
 #[derive(Clone, Debug)]
 pub struct BlobCodec;
 
-fn read_frame<T: AsyncRead + Unpin + Send>(io: &mut T, limit: usize) -> io::Result<Vec<u8>> {
-    let len = io.read_u32().await?;
-    if len as usize > limit {
+async fn read_frame<T: AsyncRead + Unpin + Send>(io: &mut T, limit: usize) -> io::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    io.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "frame too large",
         ));
     }
-    let mut buf = vec![0u8; len as usize];
+    let mut buf = vec![0u8; len];
     io.read_exact(&mut buf).await?;
     Ok(buf)
 }
 
 async fn write_frame<T: AsyncWrite + Unpin + Send>(io: &mut T, data: &[u8]) -> io::Result<()> {
-    io.write_u32(data.len() as u32).await?;
+    io.write_all(&(data.len() as u32).to_be_bytes()).await?;
     io.write_all(data).await?;
     io.flush().await
 }

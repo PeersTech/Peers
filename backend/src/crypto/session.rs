@@ -51,7 +51,7 @@ impl Session {
         salt_hasher.update(canon_b);
         let salt = salt_hasher.finalize();
 
-        let (root_hkdf, _) = Hkdf::<Sha256>::extract(Some(&salt), shared.as_bytes());
+        let (_, root_hkdf) = Hkdf::<Sha256>::extract(Some(&salt), shared.as_bytes());
         let mut root = [0u8; 32];
         root_hkdf
             .expand(b"peers/v1/root", &mut root)
@@ -79,7 +79,7 @@ impl Session {
             return Err(PeersError::GapTooLarge);
         }
         let chain = self.chain_at(n);
-        let (hk, _) = Hkdf::<Sha256>::extract(Some(&n.to_be_bytes()), &chain);
+        let (_, hk) = Hkdf::<Sha256>::extract(Some(&n.to_be_bytes()), &chain);
         let mut key = [0u8; 32];
         hk.expand(b"peers/v1/msg", &mut key)
             .map_err(|e| PeersError::Crypto(format!("hkdf message key: {e}")))?;

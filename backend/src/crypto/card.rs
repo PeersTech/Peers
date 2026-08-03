@@ -4,7 +4,6 @@ use crate::crypto::session::Session;
 use crate::error::{PeersError, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use x25519_dalek::StaticSecret;
 
 /// Domain separation string for the identity-card signature.
 const CARD_DOMAIN: &[u8] = b"peers/v1/card";
@@ -53,8 +52,10 @@ impl PeerCard {
     pub fn verify(&self) -> Result<()> {
         let pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&self.ed_pub)
             .map_err(|e| PeersError::Crypto(format!("card pubkey: {e}")))?;
-        pk.verify(&self.sig, &sign_message(&self.x25519_pub))
-            .map_err(|_| PeersError::Crypto("card signature invalid".into()))
+        if !pk.verify(&self.sig, &sign_message(&self.x25519_pub)) {
+            return Err(PeersError::Crypto("card signature invalid".into()));
+        }
+        Ok(())
     }
 }
 
@@ -206,7 +207,7 @@ impl SessionDir {
 fn card_contact_key(card: &PeerCard) -> String {
     // Stable pseudo-peer-id: "k" + base32 of the ed25519 key. The real peer
     // id (multihash) is not derivable from the raw key without extra deps.
-    base32::encode(base32::Alphabet::RFC4648 { padding: false }, &card.ed_pub)
+    base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &card.ed_pub)
 }
 
 fn parse_card(payload: &[u8]) -> Result<PeerCard> {

@@ -1,5 +1,5 @@
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioResolver;
+use hickory_resolver::TokioAsyncResolver;
 use libp2p::Multiaddr;
 use std::time::Duration;
 
@@ -13,10 +13,7 @@ const BOOTSTRAP_DNSADDR_HOST: &str = "bootstrap.libp2p.io";
 /// plaintext. Returns concrete `/ip4/.../tcp/.../p2p/<id>` addrs ready
 /// to dial; empty on failure (the app still works over LAN/manual).
 pub async fn resolve_public_bootstrap() -> Vec<Multiaddr> {
-    let resolver = match TokioResolver::new(ResolverConfig::default(), ResolverOpts::default()) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
+    let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
     let fqdn = format!("_dnsaddr.{BOOTSTRAP_DNSADDR_HOST}");
     let lookup =
         match tokio::time::timeout(Duration::from_secs(10), resolver.txt_lookup(fqdn)).await {

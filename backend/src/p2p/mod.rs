@@ -7,13 +7,13 @@ use crate::error::{PeersError, Result};
 use behaviour::Behaviour;
 use blobs::{BlobHash, BlobStore};
 use futures::StreamExt;
-use libp2p::gossipsub::{Sha256Hash, Topic};
+use libp2p::gossipsub::Sha256Topic;
 use libp2p::multiaddr::Protocol;
-use libp2p::request_response::{OutboundRequestId, RequestResponseEvent, RequestResponseMessage};
-use libp2p::{
-    gossipsub, identify, kademlia, request_response, Multiaddr, PeerId, Swarm, SwarmBuilder,
-    SwarmEvent,
+use libp2p::request_response::{
+    Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
+use libp2p::swarm::SwarmEvent;
+use libp2p::{gossipsub, identify, kad, Multiaddr, PeerId, Swarm, SwarmBuilder};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{broadcast, mpsc};
 
@@ -108,7 +108,11 @@ pub fn spawn(identity: Identity) -> Result<NodeHandle> {
         )
         .map_err(|e| PeersError::P2p(format!("tcp transport: {e}")))?
         .with_quic()
-        .with_behaviour(|key| behaviour::Behaviour::new(key))
+        .with_behaviour(|key| {
+            behaviour::Behaviour::new(key).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                e.into()
+            })
+        })
         .map_err(|e| PeersError::P2p(format!("behaviour init: {e}")))?
         .build();
 
@@ -140,9 +144,9 @@ pub fn parse_hex_hash(s: &str) -> Option<BlobHash> {
 struct Node {
     swarm: Swarm<Behaviour>,
     blobs: BlobStore,
-    topics: HashMap<String, Topic<Sha256Hash>>,
+    topics: HashMap<String, Sha256Topic>,
     /// Blob hash per active DHT provider lookup.
-    pending_fetches: HashMap<kademlia::QueryId, BlobHash>,
+    pending_fetches: HashMap<kad::QueryId, BlobHash>,
     /// Blob hash per in-flight request-response request.
     fetch_requests: HashMap<OutboundRequestId, BlobHash>,
     /// Hashes with an active (or completed) blob request, to avoid dupes.
@@ -228,7 +232,7 @@ impl Node {
                 let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
             }
             NodeCommand::Subscribe(topic_name) => {
-                let topic = Topic::new(topic_name.clone());
+                let topic = Sha256Topic::new(topic_name.clone());
                 match self.swarm.behaviour_mut().gossipsub.subscribe(&topic) {
                     Ok(_) => {
                         self.topics.insert(topic_name, topic);
@@ -269,7 +273,7 @@ impl Node {
                         .swarm
                         .behaviour_mut()
                         .kademlia
-                        .start_providing(kademlia::Key::new(hash))
+                        .start_providing(kad::Key::new(hash))
                     {
                         Ok(_) => {
                             self.announced.insert(hash);
@@ -297,7 +301,7 @@ impl Node {
                     .swarm
                     .behaviour_mut()
                     .kademlia
-                    .get_providers(kademlia::Key::new(hash));
+                    .get_providers(kad::Key::new(hash));
                 self.pending_fetches.insert(qid, hash);
             }
             NodeCommand::Shutdown => {}
@@ -341,10 +345,10 @@ impl Node {
             }
             behaviour::Event::Identify(_) | behaviour::Event::Ping(_) => {}
             behaviour::Event::Kademlia(kev) => match kev {
-                kademlia::Event::OutboundQueryProgressed { id, result, .. } => {
+                kad::Event::OutboundQueryProgressed { id, result, .. } => {
                     self.handle_query_progress(id, result);
                 }
-                kademlia::Event::RoutingUpdated {
+                kad::Event::RoutingUpdated {
                     peer, addresses, ..
                 } => {
                     self.peer_addresses
@@ -413,14 +417,14 @@ impl Node {
         }
     }
 
-    fn handle_query_progress(&mut self, id: kademlia::QueryId, result: kademlia::QueryResult) {
+    fn handle_query_progress(&mut self, id: kad::QueryId, result: kad::QueryResult) {
         match result {
-            kademlia::QueryResult::GetProviders(res) => {
+            kad::QueryResult::GetProviders(res) => {
                 let Some(&hash) = self.pending_fetches.get(&id) else {
                     return;
                 };
                 match res {
-                    Ok(kademlia::GetProvidersOk::FoundProviders { providers, .. }) => {
+                    Ok(kad::GetProvidersOk::FoundProviders { providers, .. }) => {
                         if self.in_flight.contains(&hash) {
                             return;
                         }
@@ -439,7 +443,7 @@ impl Node {
                             self.fetch_requests.insert(rid, hash);
                         }
                     }
-                    Ok(kademlia::GetProvidersOk::FinishedWithNoAdditionalRecord { .. }) => {
+                    Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. }) => {
                         if !self.in_flight.contains(&hash) {
                             self.pending_fetches.remove(&id);
                             self.emit(NodeEvent::BlobFetchFailed {
@@ -458,7 +462,7 @@ impl Node {
                     }
                 }
             }
-            kademlia::QueryResult::StartProviding(res) => {
+            kad::QueryResult::StartProviding(res) => {
                 if let Err(e) = res {
                     self.emit(NodeEvent::Error {
                         message: format!("provider announcement failed: {e}"),

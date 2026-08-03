@@ -131,8 +131,8 @@ impl Keystore {
             )));
         }
         let salt = base64_decode(&file.kdf.salt)?;
-        let nonce = base64_decode(&file.kdf.nonce)?;
-        let sealed = base64_decode(&file.kdf.sealed)?;
+        let nonce = base64_decode(&file.nonce)?;
+        let sealed = base64_decode(&file.sealed)?;
 
         let params = Params::new(
             file.kdf.memory,

@@ -1,5 +1,5 @@
 use crate::error::{PeersError, Result};
-use libp2p::identity::{Keypair, PublicKey};
+use libp2p::identity::Keypair;
 use libp2p::PeerId;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -40,12 +40,11 @@ impl Identity {
 
     /// Raw Ed25519 public key bytes.
     fn ed25519_raw(&self) -> Result<[u8; 32]> {
-        match self.keypair.public() {
-            PublicKey::Ed25519(pk) => Ok(pk.to_bytes()),
-            other => Err(PeersError::Identity(format!(
-                "expected ed25519 public key, got {other:?}"
-            ))),
-        }
+        self.keypair
+            .public()
+            .try_into_ed25519()
+            .map(|pk| pk.to_bytes())
+            .map_err(|_| PeersError::Identity("expected ed25519 public key".into()))
     }
 
     /// Serializes the identity: [protobuf-encoded ed25519 keypair][x25519 secret].
@@ -88,7 +87,7 @@ impl Identity {
         h.update(ed);
         h.update(self.x25519_public());
         let digest = h.finalize();
-        let b32 = base32::encode(base32::Alphabet::RFC4648 { padding: false }, &digest)
+        let b32 = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &digest)
             .to_ascii_uppercase();
         let bytes = b32.as_bytes();
         let mut out = String::with_capacity(bytes.len() + bytes.len() / 4);
@@ -153,7 +152,7 @@ mod tests {
         let fp = id.fingerprint().unwrap();
         let plain = fp.replace(' ', "");
         assert_eq!(plain.len(), 52, "SHA-256 → 52 base32 chars");
-        let decoded = base32::decode(Alphabet::RFC4648 { padding: false }, &plain).unwrap();
+        let decoded = base32::decode(Alphabet::Rfc4648 { padding: false }, &plain).unwrap();
         assert_eq!(decoded.len(), 32);
         assert_eq!(id.fingerprint_short().unwrap().chars().count(), 9);
     }

@@ -18,7 +18,8 @@ pub fn seal(session: &mut Session, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u
     let seq = session.counter;
     let key = session.next_key()?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    let nonce = Nonce::from_slice(&nonce_for(seq));
+    let nf = nonce_for(seq);
+    let nonce = Nonce::from_slice(&nf);
     let payload = Payload {
         msg: plaintext,
         aad,
@@ -44,7 +45,8 @@ pub fn open(session: &mut Session, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>>
     let seq = u64::from_be_bytes(sealed[..8].try_into().map_err(|_| PeersError::BadCipher)?);
     let key = session.key_at(seq)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    let nonce = Nonce::from_slice(&nonce_for(seq));
+    let nf = nonce_for(seq);
+    let nonce = Nonce::from_slice(&nf);
     let payload = Payload {
         msg: &sealed[8..],
         aad,
