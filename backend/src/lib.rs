@@ -170,7 +170,8 @@ async fn unlock(
         )))
         .await;
     // Re-subscribe to every server control topic we know about.
-    for rec in state.servers.lock().unwrap().records() {
+    let records = state.servers.lock().unwrap().records();
+    for rec in records {
         let _ = handle
             .send(NodeCommand::Subscribe(server_topic(&rec.id)))
             .await;

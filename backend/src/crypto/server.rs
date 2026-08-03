@@ -853,7 +853,6 @@ mod tests {
     fn snapshot_sign_and_verify() {
         let owner = rec("snap");
         let keypair = Keypair::generate_ed25519();
-        let peer_id = libp2p::PeerId::from(keypair.public());
         let msg = SignedMessage::sign(&keypair, &owner.id, "general", "snapshot this").unwrap();
         let snap = Snapshot::sign(&owner, vec![msg]).unwrap();
         assert!(snap.verify(&owner).is_ok());
