@@ -336,7 +336,6 @@ impl Node {
                     self.peer_addresses.insert(peer, addrs);
                 }
             }
-            behaviour::Event::Identify(_) => {}
             behaviour::Event::Ping(ping::Event { peer, result, .. }) => {
                 if let Err(e) = result {
                     self.emit(NodeEvent::Error {
