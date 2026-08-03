@@ -77,12 +77,9 @@ mod tests {
     fn pair() -> (StaticSecret, StaticSecret, [u8; 32], [u8; 32]) {
         let a = StaticSecret::random_from_rng(OsRng);
         let b = StaticSecret::random_from_rng(OsRng);
-        (
-            a,
-            b,
-            XPublic::from(&a).to_bytes(),
-            XPublic::from(&b).to_bytes(),
-        )
+        let a_pub = XPublic::from(&a).to_bytes();
+        let b_pub = XPublic::from(&b).to_bytes();
+        (a, b, a_pub, b_pub)
     }
 
     #[test]

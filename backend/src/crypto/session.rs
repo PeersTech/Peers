@@ -131,7 +131,7 @@ mod tests {
     fn both_sides_match() {
         let (a, b, a_pub, b_pub) = pair();
         let mut sa = Session::new(&a, b_pub).unwrap();
-        let mut sb = Session::new(&b, a_pub).unwrap();
+        let sb = Session::new(&b, a_pub).unwrap();
         for i in 0..25u64 {
             let ka = sa.next_key().unwrap();
             let kb = sb.key_at(i).unwrap();

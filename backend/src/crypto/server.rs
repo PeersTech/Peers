@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn stale_key_rejected() {
-        let owner = rec("stale");
+        let mut owner = rec("stale");
         let list0 = owner.signed_list().unwrap();
         let mut joiner = ServerRecord::new_joined(&owner.invite().unwrap());
         joiner.verify_list(&list0).unwrap();

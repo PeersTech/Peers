@@ -50,7 +50,7 @@ jobs:
       - name: Build app
         uses: tauri-apps/tauri-action@v0
         with:
-          appPath: backend
+          projectPath: backend
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

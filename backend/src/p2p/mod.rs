@@ -41,7 +41,7 @@ pub enum NodeCommand {
 }
 
 /// Events emitted by the node, relayed to the frontend as Tauri events.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum NodeEvent {
     Listening {
@@ -368,11 +368,7 @@ impl Node {
                 _ => {}
             },
             behaviour::Event::RequestResponse(rrev) => match rrev {
-                RequestResponseEvent::Message {
-                    peer,
-                    message,
-                    ..
-                } => match message {
+                RequestResponseEvent::Message { message, .. } => match message {
                     RequestResponseMessage::Request {
                         request, channel, ..
                     } => {

@@ -198,7 +198,7 @@ mod tests {
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains(&id.peer_id.to_string()), "peer id leaked");
         assert!(
-            !raw.contains(&id.x25519_secret.to_bytes()[..]),
+            !raw.contains(&base64_encode(&id.x25519_secret.to_bytes())),
             "x25519 secret leaked"
         );
 
