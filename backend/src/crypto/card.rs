@@ -52,7 +52,7 @@ impl PeerCard {
     pub fn verify(&self) -> Result<()> {
         let pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&self.ed_pub)
             .map_err(|e| PeersError::Crypto(format!("card pubkey: {e}")))?;
-        if !pk.verify(&self.sig, &sign_message(&self.x25519_pub)) {
+        if !pk.verify(&sign_message(&self.x25519_pub), &self.sig) {
             return Err(PeersError::Crypto("card signature invalid".into()));
         }
         Ok(())
