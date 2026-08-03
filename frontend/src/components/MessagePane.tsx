@@ -1,13 +1,14 @@
 import {useEffect, useRef, useState} from "react";
-import type {Message} from "../data/mock";
+import type {UiMessage} from "../lib/api";
 
 interface Props {
     channelName: string;
-    messages: Message[];
+    subtitle: string;
+    messages: UiMessage[];
     onSend: (text: string) => void;
 }
 
-export function MessagePane({channelName, messages, onSend}: Props) {
+export function MessagePane({channelName, subtitle, messages, onSend}: Props) {
     const [text, setText] = useState("");
     const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -27,13 +28,13 @@ export function MessagePane({channelName, messages, onSend}: Props) {
             <div className="flex h-12 shrink-0 items-center gap-2 border-b border-[#1e1f22] px-4 shadow-sm">
                 <span className="text-lg leading-none text-[#8a8f98]">#</span>
                 <span className="font-semibold text-[#e8eaed]">{channelName}</span>
-                <span className="ml-auto text-xs text-[#5a5f66]">E2E encrypted · swarm: online</span>
+                <span className="ml-auto text-xs text-[#5a5f66]">{subtitle}</span>
             </div>
 
             <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
                 {messages.map((m, i) => {
                     const firstInBlock = i === 0 || messages[i - 1].author !== m.author;
-                    const mine = m.author === "you";
+                    const mine = m.mine;
                     return (
                         <div key={m.id} className={`mb-1 flex gap-3 ${mine ? "flex-row-reverse" : ""}`}>
                             {firstInBlock && (
@@ -53,11 +54,6 @@ export function MessagePane({channelName, messages, onSend}: Props) {
                                 <div className={`inline-block rounded-lg px-3 py-1.5 text-left text-sm text-[#e8eaed] ${
                                     mine ? "bg-[#1f8b4c]/30" : "bg-[#31333a]"
                                 }`}>
-                                    {m.replyTo && (
-                                        <div className="mb-0.5 border-l-2 border-[#4ade80] pl-2 text-xs italic text-[#8a8f98]">
-                                            replying…
-                                        </div>
-                                    )}
                                     {m.text}
                                 </div>
                             </div>
@@ -75,7 +71,7 @@ export function MessagePane({channelName, messages, onSend}: Props) {
                             if (e.key === "Enter") submit();
                             if (e.key === "Escape") setText("");
                         }}
-                        placeholder={`Message #${channelName} — encrypted with the server key`}
+                        placeholder={`Message #${channelName}`}
                         className="flex-1 bg-transparent text-sm text-[#e8eaed] placeholder-[#6d7278] outline-none"
                     />
                     <span className="text-[10px] text-[#5a5f66]">ctrl+k</span>

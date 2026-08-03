@@ -414,6 +414,7 @@ pub struct ServerView {
     /// Joined via invite but not yet on the owner's signed list.
     pub pending: bool,
     pub channels: Vec<ChannelConfig>,
+    pub members: Vec<Member>,
 }
 
 impl ServerView {
@@ -428,6 +429,7 @@ impl ServerView {
             epoch: s.keys.as_ref().map(|k| k.epoch).unwrap_or(0),
             pending: s.keys.is_none() && s.role_of(me).is_none(),
             channels: s.channels.clone(),
+            members: s.members.clone(),
         }
     }
 }

@@ -1,17 +1,21 @@
-import {servers, dms, type Server, type DM} from "../data/mock";
+import type {ServerView} from "../lib/api";
 
 interface Props {
-    servers: Server[];
-    dms: DM[];
+    servers: ServerView[];
+    dms: {id: string; name: string; unread: number}[];
     activeServer: string | null;
     activeDm: string | null;
     onSelect: (id: string) => void;
+    onCreate: () => void;
+    onJoin: () => void;
+    serverHasUnread: (id: string) => boolean;
+    you: string;
 }
 
 const roleColor = (role: string) =>
     role === "owner" ? "#4ade80" : role === "admin" ? "#60a5fa" : "#a1a1aa";
 
-export function ServerRail({servers, dms, activeServer, activeDm, onSelect}: Props) {
+export function ServerRail({servers, dms, activeServer, activeDm, onSelect, onCreate, onJoin, serverHasUnread, you}: Props) {
     const dmActive = activeDm !== null;
     const dmUnread = dms.reduce((n, d) => n + d.unread, 0);
 
@@ -41,25 +45,35 @@ export function ServerRail({servers, dms, activeServer, activeDm, onSelect}: Pro
                         className={`relative flex h-11 w-11 items-center justify-center rounded-2xl text-base font-bold transition-all hover:rounded-xl ${
                             active ? "bg-[#4ade80] text-black" : "bg-[#212226] text-[#b9c0c9] hover:bg-[#3a3d43]"
                         }`}
-                        title={s.name}
+                        title={s.name + (s.pending ? " (joining…)" : "")}
                     >
-                        {s.short}
+                        {s.name.slice(0, 2).toUpperCase()}
                         {active && <span className="absolute -left-3 h-6 w-1 rounded-full bg-white"/>}
-                        {!active && s.channels.some((c) => c.unread > 0) && (
+                        {!active && serverHasUnread(s.id) && (
                             <span className="absolute right-0 top-0 h-2.5 w-2.5 rounded-full border-2 border-[#17181c] bg-[#4ade80]"/>
                         )}
                     </button>
                 );
             })}
-            <button
-                className="mt-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-[#212226] text-2xl font-light text-[#4ade80] hover:rounded-xl"
-                title="Create server"
-            >
-                +
-            </button>
+            <div className="mt-auto flex flex-col items-center gap-2">
+                <button
+                    onClick={onCreate}
+                    className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#212226] text-2xl font-light text-[#4ade80] hover:rounded-xl"
+                    title="Create server"
+                >
+                    +
+                </button>
+                <button
+                    onClick={onJoin}
+                    className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#212226] text-xl font-bold text-[#60a5fa] hover:rounded-xl"
+                    title="Join with an invite"
+                >
+                    ↓
+                </button>
+            </div>
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-[#4ade80] to-[#16a34a] text-sm font-bold text-black"
-                 title="You — peer ID 12D3Koo…m7x9">
-                Y
+                 title="You">
+                {you[0].toUpperCase()}
             </div>
         </div>
     );
