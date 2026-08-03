@@ -299,10 +299,10 @@ mod tests {
         let handle = store.open("correct password").unwrap();
         handle.save(&PersistedState::default()).unwrap();
 
-        assert!(matches!(
-            store.open("wrong password"),
-            Err(PeersError::BadPassword)
-        ));
+        // `open` derives the key; the wrong password is detected on the
+        // first decrypt in `load` (mirrors the unlock flow).
+        let bad = store.open("wrong password").unwrap();
+        assert!(matches!(bad.load(), Err(PeersError::BadPassword)));
     }
 
     #[test]
