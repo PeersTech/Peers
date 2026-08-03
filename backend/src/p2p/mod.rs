@@ -109,9 +109,8 @@ pub fn spawn(identity: Identity) -> Result<NodeHandle> {
         .map_err(|e| PeersError::P2p(format!("tcp transport: {e}")))?
         .with_quic()
         .with_behaviour(|key| {
-            behaviour::Behaviour::new(key).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.into()
-            })
+            behaviour::Behaviour::new(key)
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
         })
         .map_err(|e| PeersError::P2p(format!("behaviour init: {e}")))?
         .build();

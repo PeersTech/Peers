@@ -7,8 +7,9 @@
 //! follow the rotation chain (`signing_pub` signs this list, `next_pub`
 //! signs the next one).
 //!
-//! Invites are self-contained: they embed the current server key so a new
-//! joiner can anchor its trust and start verifying lists immediately.
+//! Invites are self-contained: they embed the chain-head key (the key
+//! that will sign the next list), so a joiner can anchor its trust and
+//! start verifying lists immediately.
 
 use crate::error::{PeersError, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -16,6 +17,7 @@ use libp2p::identity::{ed25519, Keypair};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Minimum role required for a channel operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -75,7 +77,8 @@ pub struct InvitePayload {
     pub server_name: String,
     pub owner_peer: String,
     pub nonce: [u8; 16],
-    /// Trust anchor for the joiner: the key that signs the next list.
+    /// Key that signs this invite and the next list; the joiner's trust
+    /// anchor (`known_pub`). The invite's signature verifies against it.
     pub next_pub: [u8; 32],
 }
 
@@ -84,6 +87,21 @@ pub struct InvitePayload {
 pub struct Invite {
     pub payload: InvitePayload,
     pub sig: String,
+}
+
+impl Invite {
+    /// Verifies the invite against the key embedded in its own payload, so
+    /// a joiner can authenticate it before trusting `next_pub`.
+    pub fn verify(&self) -> Result<()> {
+        let bytes = serde_json::to_vec(&self.payload).map_err(PeersError::Serde)?;
+        let sig = B64.decode(&self.sig).map_err(|_| PeersError::BadInvite)?;
+        let pk = ed25519::PublicKey::try_from_bytes(&self.payload.next_pub)
+            .map_err(|_| PeersError::BadInvite)?;
+        if !pk.verify(&bytes, &sig) {
+            return Err(PeersError::BadInvite);
+        }
+        Ok(())
+    }
 }
 
 /// Rotating server signing keys. `prev` signs the first list after a
@@ -164,9 +182,7 @@ impl ServerRecord {
     /// Verifies `sig` (base64) over the payload bytes with `pub_bytes`.
     fn verify_sig(pub_bytes: &[u8; 32], payload: &ListPayload, sig: &str) -> Result<()> {
         let bytes = Self::sign_bytes(payload)?;
-        let sig = B64
-            .decode(sig)
-            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        let sig = B64.decode(sig).map_err(|_| PeersError::SnapshotCorrupt)?;
         let pk = ed25519::PublicKey::try_from_bytes(pub_bytes)
             .map_err(|_| PeersError::SnapshotCorrupt)?;
         if !pk.verify(&bytes, &sig) {
@@ -177,10 +193,7 @@ impl ServerRecord {
 
     /// Signs the current member list with the chain-linking key.
     pub fn signed_list(&self) -> Result<SignedList> {
-        let keys = self
-            .keys
-            .as_ref()
-            .ok_or(PeersError::NotOwner)?;
+        let keys = self.keys.as_ref().ok_or(PeersError::NotOwner)?;
         let payload = ListPayload {
             version: 1,
             server_id: self.id.clone(),
@@ -209,12 +222,11 @@ impl ServerRecord {
         Ok(())
     }
 
-    /// Creates an invite signed by the current key.
+    /// Creates an invite anchored on the chain head (the key that will
+    /// sign the next list), signed by that same key.
     pub fn invite(&self) -> Result<Invite> {
-        let keys = self
-            .keys
-            .as_ref()
-            .ok_or(PeersError::NotOwner)?;
+        let keys = self.keys.as_ref().ok_or(PeersError::NotOwner)?;
+        let signing = keys.signing_key();
         let mut nonce = [0u8; 16];
         OsRng.fill_bytes(&mut nonce);
         let payload = InvitePayload {
@@ -223,11 +235,10 @@ impl ServerRecord {
             server_name: self.name.clone(),
             owner_peer: self.owner_peer.clone(),
             nonce,
-            next_pub: keys.next_pub(),
+            next_pub: ed25519_bytes(&signing.public()),
         };
         let bytes = serde_json::to_vec(&payload).map_err(PeersError::Serde)?;
-        let sig = keys
-            .current
+        let sig = signing
             .sign(&bytes)
             .map_err(|e| PeersError::Crypto(format!("invite sign: {e}")))?;
         Ok(Invite {
@@ -282,4 +293,349 @@ pub fn server_topic(server_id: &str) -> String {
 /// The gossip topic for a channel inside a server.
 pub fn channel_topic(server_id: &str, channel: &str) -> String {
     format!("peers/v1/ch/{server_id}/{channel}")
+}
+
+/// Generates a random server id (hex, 16 chars).
+pub fn new_server_id() -> String {
+    let mut b = [0u8; 8];
+    OsRng.fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+impl ServerRecord {
+    /// Creates a server owned by `owner_peer` with a fresh signing key.
+    pub fn new_owned(id: String, name: String, owner_peer: String) -> Self {
+        let keys = ServerKeys::new();
+        let members = vec![Member {
+            peer_id: owner_peer.clone(),
+            name: "owner".to_string(),
+            role: Role::Owner,
+            joined_epoch: 0,
+        }];
+        let channels = vec![ChannelConfig {
+            name: "general".to_string(),
+            topic: "general".to_string(),
+            read_min: Role::Member,
+            write_min: Role::Member,
+        }];
+        Self {
+            known_pub: keys.signing_pub(),
+            keys: Some(keys),
+            id,
+            name,
+            owner_peer,
+            members,
+            channels,
+        }
+    }
+
+    /// Creates a joined (non-owner) record anchored on the invite's key.
+    /// Members/channels are empty until the first verifiable list arrives.
+    pub fn new_joined(invite: &Invite) -> Self {
+        Self {
+            id: invite.payload.server_id.clone(),
+            name: invite.payload.server_name.clone(),
+            owner_peer: invite.payload.owner_peer.clone(),
+            keys: None,
+            known_pub: invite.payload.next_pub,
+            members: Vec::new(),
+            channels: Vec::new(),
+        }
+    }
+}
+
+/// Registry of servers this node owns or has joined.
+#[derive(Default)]
+pub struct ServerDir {
+    servers: HashMap<String, ServerRecord>,
+}
+
+impl ServerDir {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn create(&mut self, id: String, name: String, owner_peer: String) -> ServerRecord {
+        let rec = ServerRecord::new_owned(id.clone(), name, owner_peer);
+        self.servers.insert(id, rec.clone());
+        rec
+    }
+
+    pub fn get(&self, id: &str) -> Option<&ServerRecord> {
+        self.servers.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut ServerRecord> {
+        self.servers.get_mut(id)
+    }
+
+    pub fn insert(&mut self, rec: ServerRecord) {
+        self.servers.insert(rec.id.clone(), rec);
+    }
+
+    /// Verifies and applies a joined invite.
+    pub fn join(&mut self, invite: &Invite) -> Result<ServerRecord> {
+        invite.verify()?;
+        if self.servers.contains_key(&invite.payload.server_id) {
+            return Err(PeersError::AlreadyMember);
+        }
+        let rec = ServerRecord::new_joined(invite);
+        self.servers.insert(rec.id.clone(), rec.clone());
+        Ok(rec)
+    }
+
+    pub fn remove(&mut self, id: &str) -> bool {
+        self.servers.remove(id).is_some()
+    }
+
+    pub fn views(&self, me: &str) -> Vec<ServerView> {
+        self.servers
+            .values()
+            .map(|s| ServerView::from_record(s, me))
+            .collect()
+    }
+
+    pub fn view(&self, id: &str, me: &str) -> Option<ServerView> {
+        self.servers.get(id).map(|s| ServerView::from_record(s, me))
+    }
+}
+
+/// Frontend-friendly snapshot of a server.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerView {
+    pub id: String,
+    pub name: String,
+    pub owner_peer: String,
+    pub is_owner: bool,
+    pub my_role: Option<Role>,
+    pub member_count: usize,
+    pub epoch: u64,
+    /// Joined via invite but not yet on the owner's signed list.
+    pub pending: bool,
+    pub channels: Vec<ChannelConfig>,
+}
+
+impl ServerView {
+    pub fn from_record(s: &ServerRecord, me: &str) -> Self {
+        Self {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            owner_peer: s.owner_peer.clone(),
+            is_owner: s.owner_peer == me,
+            my_role: s.role_of(me),
+            member_count: s.members.len(),
+            epoch: s.keys.as_ref().map(|k| k.epoch).unwrap_or(0),
+            pending: s.keys.is_none() && s.role_of(me).is_none(),
+            channels: s.channels.clone(),
+        }
+    }
+}
+
+/// Plaintext notice a joiner publishes on the server topic asking the
+/// owner to add them to the signed list. The owner verifies the list
+/// membership itself; this is only a request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JoinNotice {
+    pub kind: String,
+    pub server_id: String,
+    pub peer_id: String,
+    pub name: String,
+    pub nonce: [u8; 16],
+}
+
+impl JoinNotice {
+    pub const KIND: &'static str = "join";
+
+    pub fn new(server_id: &str, peer_id: &str, name: &str, nonce: [u8; 16]) -> Self {
+        Self {
+            kind: Self::KIND.to_string(),
+            server_id: server_id.to_string(),
+            peer_id: peer_id.to_string(),
+            name: name.to_string(),
+            nonce,
+        }
+    }
+}
+
+/// A channel message: signed by the sender's Ed25519 key, whose public key
+/// is embedded so any member can verify authenticity and bind it to the
+/// sender's peer ID. Channel messages are broadcast (not encrypted).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SignedMessage {
+    pub version: u8,
+    pub server_id: String,
+    pub channel: String,
+    pub from: String,
+    /// Ed25519 public key of the sender, 32 bytes.
+    pub pubkey: [u8; 32],
+    pub text: String,
+    pub ts: u64,
+    pub sig: String,
+}
+
+impl SignedMessage {
+    /// Signs `text` with the caller's identity key. The signature covers
+    /// every field except `sig` itself (canonical JSON, declared order).
+    pub fn sign(keypair: &Keypair, server_id: &str, channel: &str, text: &str) -> Result<Self> {
+        let mut msg = Self {
+            version: 1,
+            server_id: server_id.to_string(),
+            channel: channel.to_string(),
+            from: libp2p::PeerId::from(keypair.public()).to_string(),
+            pubkey: keypair
+                .public()
+                .clone()
+                .try_into_ed25519()
+                .map_err(|_| PeersError::Identity("expected ed25519 key".into()))?
+                .to_bytes(),
+            text: text.to_string(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            sig: String::new(),
+        };
+        let bytes = serde_json::to_vec(&msg).map_err(PeersError::Serde)?;
+        let sig = keypair
+            .sign(&bytes)
+            .map_err(|e| PeersError::Crypto(format!("message sign: {e}")))?;
+        msg.sig = B64.encode(sig);
+        Ok(msg)
+    }
+
+    /// Verifies the signature and that the embedded key matches `from`'s
+    /// peer ID, and that `from` is a member of `rec`.
+    pub fn verify(&self, rec: &ServerRecord) -> Result<()> {
+        if rec.role_of(&self.from).is_none() {
+            return Err(PeersError::NotInServer);
+        }
+        let pk = ed25519::PublicKey::try_from_bytes(&self.pubkey)
+            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        let mut copy = self.clone();
+        let sig = B64
+            .decode(&copy.sig)
+            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        copy.sig.clear();
+        let bytes = serde_json::to_vec(&copy).map_err(PeersError::Serde)?;
+        if !pk.verify(&bytes, &sig) {
+            return Err(PeersError::SnapshotCorrupt);
+        }
+        let from = libp2p::PeerId::from_public_key(&libp2p::identity::PublicKey::Ed25519(pk));
+        if from.to_string() != self.from {
+            return Err(PeersError::SnapshotCorrupt);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(name: &str) -> ServerRecord {
+        ServerRecord::new_owned(new_server_id(), name.to_string(), "alice".to_string())
+    }
+
+    #[test]
+    fn invite_verifies() {
+        let r = rec("test");
+        let invite = r.invite().unwrap();
+        assert!(invite.verify().is_ok());
+    }
+
+    #[test]
+    fn tampered_invite_fails() {
+        let r = rec("test");
+        let mut invite = r.invite().unwrap();
+        invite.payload.next_pub[0] ^= 0xff;
+        assert!(matches!(invite.verify(), Err(PeersError::BadInvite)));
+    }
+
+    #[test]
+    fn list_verifies_and_advances_chain() {
+        let owner = rec("chain");
+        let list = owner.signed_list().unwrap();
+        let mut joiner = ServerRecord::new_joined(&owner.invite().unwrap());
+        joiner.verify_list(&list).unwrap();
+        assert_eq!(joiner.members.len(), 1);
+        assert_eq!(joiner.known_pub, list.payload.next_pub);
+    }
+
+    #[test]
+    fn rotated_list_links_epochs() {
+        let mut owner = rec("rotate");
+        owner.keys.as_mut().unwrap().rotate();
+        let list = owner.signed_list().unwrap();
+        let mut joiner = ServerRecord::new_joined(&owner.invite().unwrap());
+        joiner.verify_list(&list).unwrap();
+        assert_eq!(joiner.known_pub, list.payload.next_pub);
+    }
+
+    #[test]
+    fn stale_key_rejected() {
+        let owner = rec("stale");
+        let list0 = owner.signed_list().unwrap();
+        let mut joiner = ServerRecord::new_joined(&owner.invite().unwrap());
+        joiner.verify_list(&list0).unwrap();
+        owner.keys.as_mut().unwrap().rotate();
+        let list1 = owner.signed_list().unwrap();
+        joiner.verify_list(&list1).unwrap();
+        assert!(matches!(
+            joiner.verify_list(&list0),
+            Err(PeersError::UnknownEpoch)
+        ));
+    }
+
+    #[test]
+    fn role_acls() {
+        let mut owner = rec("acl");
+        owner.members.push(Member {
+            peer_id: "bob".to_string(),
+            name: "bob".to_string(),
+            role: Role::Member,
+            joined_epoch: 1,
+        });
+        owner.channels.push(ChannelConfig {
+            name: "admin-only".to_string(),
+            topic: "admin-only".to_string(),
+            read_min: Role::Admin,
+            write_min: Role::Admin,
+        });
+        assert!(owner.can_write("bob", "general"));
+        assert!(!owner.can_write("bob", "admin-only"));
+        assert!(owner.can_write("alice", "admin-only"));
+    }
+
+    #[test]
+    fn member_ordering() {
+        assert!(Role::Member < Role::Admin);
+        assert!(Role::Admin < Role::Owner);
+    }
+
+    #[test]
+    fn signed_message_round_trip() {
+        let mut owner = rec("msgs");
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = libp2p::PeerId::from(keypair.public());
+        owner.members.push(Member {
+            peer_id: peer_id.to_string(),
+            name: "bob".to_string(),
+            role: Role::Member,
+            joined_epoch: 1,
+        });
+        let msg = SignedMessage::sign(&keypair, &owner.id, "general", "hello").unwrap();
+        assert!(msg.verify(&owner).is_ok());
+        let mut tampered = msg.clone();
+        tampered.text = "hacked".to_string();
+        assert!(matches!(
+            tampered.verify(&owner),
+            Err(PeersError::SnapshotCorrupt)
+        ));
+        let stranger = rec("stranger");
+        assert!(matches!(
+            msg.verify(&stranger),
+            Err(PeersError::NotInServer)
+        ));
+    }
 }
