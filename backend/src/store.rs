@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-const KDF_NAME: &str = "argon2id";
 const KDF_TIME: u32 = 3;
 const KDF_MEMORY: u32 = 64 * 1024; // 64 MiB
 const KDF_THREADS: u32 = 4;
@@ -288,7 +287,6 @@ mod tests {
             },
         );
         handle.save(&state).unwrap();
-        drop(handle);
 
         let handle2 = store.open("hunter2hunter").unwrap();
         let state2 = handle2.load().unwrap();
@@ -300,7 +298,6 @@ mod tests {
         let store = temp_store("badpass");
         let handle = store.open("correct password").unwrap();
         handle.save(&PersistedState::default()).unwrap();
-        drop(handle);
 
         assert!(matches!(
             store.open("wrong password"),

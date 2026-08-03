@@ -13,6 +13,13 @@ const ENVELOPE_VERSION: u8 = 0x01;
 /// Cap on recipients per message (defends the header against bloat).
 const MAX_RECIPIENTS: usize = 64;
 
+/// One persisted session: the x25519 contact key + its serializable state.
+pub type ExportedSessions = Vec<(Vec<u8>, crate::crypto::session::SessionState)>;
+/// Contact map (peer id -> x25519 key).
+pub type ExportedContacts = Vec<(String, Vec<u8>)>;
+/// Everything a [`SessionDir`] needs to survive a restart.
+pub type ExportedDir = (ExportedSessions, ExportedContacts);
+
 /// Self-authenticating identity card: the sender's Ed25519 public key, the
 /// X25519 key used for ECDH, and an Ed25519 signature binding them. The
 /// signature is over SHA-256("peers/v1/card" || x25519_pub), so anyone can
@@ -96,12 +103,7 @@ impl SessionDir {
     /// Snapshots the dir (per-contact sessions + contact x25519 keys) so it
     /// can be sealed to disk and restored after a restart. The secrets ride
     /// inside the state envelope, which is password-encrypted at rest.
-    pub fn export(
-        &self,
-    ) -> (
-        Vec<(Vec<u8>, crate::crypto::session::SessionState)>,
-        Vec<(String, Vec<u8>)>,
-    ) {
+    pub fn export(&self) -> ExportedDir {
         let sessions = self
             .sessions
             .iter()
@@ -117,11 +119,7 @@ impl SessionDir {
 
     /// Restores state written by [`SessionDir::export`] into an empty dir.
     /// Existing contacts/sessions are kept; restored ones take precedence.
-    pub fn restore(
-        &mut self,
-        sessions: &[(Vec<u8>, crate::crypto::session::SessionState)],
-        contacts: &[(String, Vec<u8>)],
-    ) {
+    pub fn restore(&mut self, sessions: &ExportedSessions, contacts: &ExportedContacts) {
         for (key, state) in sessions {
             if let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) {
                 self.sessions.insert(key, Session::import(state));
