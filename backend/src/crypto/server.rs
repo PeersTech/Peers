@@ -11,6 +11,7 @@
 //! that will sign the next list), so a joiner can anchor its trust and
 //! start verifying lists immediately.
 
+use crate::crypto::card::PeerCard;
 use crate::error::{PeersError, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use libp2p::identity::{ed25519, Keypair};
@@ -36,6 +37,9 @@ pub struct Member {
     pub name: String,
     pub role: Role,
     pub joined_epoch: u64,
+    /// Validated identity card, if the owner has one for this member.
+    /// Riding inside the signed list doubles as the DM key exchange.
+    pub card: Option<PeerCard>,
 }
 
 /// A channel plus its ACL (minimum roles to read / write).
@@ -295,13 +299,14 @@ pub fn new_server_id() -> String {
 
 impl ServerRecord {
     /// Creates a server owned by `owner_peer` with a fresh signing key.
-    pub fn new_owned(id: String, name: String, owner_peer: String) -> Self {
+    pub fn new_owned(id: String, name: String, owner_peer: String, owner_card: PeerCard) -> Self {
         let keys = ServerKeys::new();
         let members = vec![Member {
             peer_id: owner_peer.clone(),
             name: "owner".to_string(),
             role: Role::Owner,
             joined_epoch: 0,
+            card: Some(owner_card),
         }];
         let channels = vec![ChannelConfig {
             name: "general".to_string(),
@@ -346,8 +351,14 @@ impl ServerDir {
         Self::default()
     }
 
-    pub fn create(&mut self, id: String, name: String, owner_peer: String) -> ServerRecord {
-        let rec = ServerRecord::new_owned(id.clone(), name, owner_peer);
+    pub fn create(
+        &mut self,
+        id: String,
+        name: String,
+        owner_peer: String,
+        owner_card: PeerCard,
+    ) -> ServerRecord {
+        let rec = ServerRecord::new_owned(id.clone(), name, owner_peer, owner_card);
         self.servers.insert(id, rec.clone());
         rec
     }
@@ -432,18 +443,28 @@ pub struct JoinNotice {
     pub peer_id: String,
     pub name: String,
     pub nonce: [u8; 16],
+    /// The joiner's identity card, so the owner can accept and every
+    /// member can start an E2E DM with them immediately.
+    pub card: PeerCard,
 }
 
 impl JoinNotice {
     pub const KIND: &'static str = "join";
 
-    pub fn new(server_id: &str, peer_id: &str, name: &str, nonce: [u8; 16]) -> Self {
+    pub fn new(
+        server_id: &str,
+        peer_id: &str,
+        name: &str,
+        nonce: [u8; 16],
+        card: PeerCard,
+    ) -> Self {
         Self {
             kind: Self::KIND.to_string(),
             server_id: server_id.to_string(),
             peer_id: peer_id.to_string(),
             name: name.to_string(),
             nonce,
+            card,
         }
     }
 }
@@ -585,6 +606,7 @@ mod tests {
             name: "bob".to_string(),
             role: Role::Member,
             joined_epoch: 1,
+            card: None,
         });
         owner.channels.push(ChannelConfig {
             name: "admin-only".to_string(),
@@ -613,6 +635,7 @@ mod tests {
             name: "bob".to_string(),
             role: Role::Member,
             joined_epoch: 1,
+            card: None,
         });
         let msg = SignedMessage::sign(&keypair, &owner.id, "general", "hello").unwrap();
         assert!(msg.verify(&owner).is_ok());

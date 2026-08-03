@@ -2,6 +2,7 @@ mod crypto;
 mod error;
 mod p2p;
 
+use crate::crypto::card::PeerCard;
 use crate::crypto::server::{
     channel_topic, new_server_id, server_topic, ChannelConfig, Invite, JoinNotice, Member, Role,
     ServerDir, ServerRecord, ServerView, SignedList, SignedMessage,
@@ -100,6 +101,10 @@ async fn unlock(
 
     // Listen + bootstrap against the public IPFS testnet.
     let _ = handle.send(NodeCommand::Listen).await;
+    // Receive DMs addressed to us: our own peer id is our DM topic.
+    let _ = handle
+        .send(NodeCommand::Subscribe(format!("peers/v1/ch/{}", id.peer_id)))
+        .await;
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let addrs = crate::p2p::bootstrap::resolve_public_bootstrap().await;
@@ -179,11 +184,12 @@ async fn create_server(state: State<'_, AppState>, name: String) -> Result<Serve
         .ok_or("not unlocked")?;
     let me_str = me.peer_id.to_string();
     let id = new_server_id();
+    let card = PeerCard::sign(&me)?;
     let _ = state
         .servers
         .lock()
         .unwrap()
-        .create(id.clone(), name, me_str.clone());
+        .create(id.clone(), name, me_str.clone(), card);
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Subscribe(server_topic(&id))).await?;
     publish_list(&state, &id).await?;
@@ -218,6 +224,7 @@ async fn create_invite(state: State<'_, AppState>, server_id: String) -> Result<
 async fn join_server(
     state: State<'_, AppState>,
     invite_json: String,
+    name: String,
 ) -> Result<ServerView, String> {
     let me = state
         .identity
@@ -232,11 +239,13 @@ async fn join_server(
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     let topic = server_topic(&invite.payload.server_id);
     node.send(NodeCommand::Subscribe(topic)).await?;
+    let card = PeerCard::sign(&me)?;
     let notice = JoinNotice::new(
         &invite.payload.server_id,
         &me_str,
-        &me_str,
+        &name,
         invite.payload.nonce,
+        card,
     );
     let data = serde_json::to_vec(&notice).map_err(|e| e.to_string())?;
     node.send(NodeCommand::Publish {
@@ -254,6 +263,7 @@ async fn add_member(
     peer_id: String,
     name: String,
     role: String,
+    card: Option<PeerCard>,
 ) -> Result<ServerView, String> {
     let role: Role = serde_json::from_str(&format!("\"{role}\""))
         .map_err(|_| format!("invalid role: {role}"))?;
@@ -267,6 +277,7 @@ async fn add_member(
             name,
             role,
             joined_epoch: epoch,
+            card,
         });
         Ok(())
     })
@@ -542,9 +553,30 @@ pub fn run() {
                                 let mut servers = state.servers.lock().unwrap();
                                 match servers.get_mut(&server_id) {
                                     Some(rec) => match rec.verify_list(&list) {
-                                        Ok(()) => me.map(|id| {
-                                            ServerView::from_record(rec, &id.peer_id.to_string())
-                                        }),
+                                        Ok(()) => {
+                                            // Every member card rides the signed list,
+                                            // so a fresh list unlocks DMs with everyone.
+                                            let cards: Vec<(String, PeerCard)> = list
+                                                .payload
+                                                .members
+                                                .iter()
+                                                .filter_map(|m| {
+                                                    m.card.clone().map(|c| (m.peer_id.clone(), c))
+                                                })
+                                                .collect();
+                                            if let Some(mut dir) = state.dir.lock().unwrap().clone()
+                                            {
+                                                for (peer, card) in cards {
+                                                    dir.remember_contact(&peer, &card);
+                                                }
+                                            }
+                                            me.map(|id| {
+                                                ServerView::from_record(
+                                                    rec,
+                                                    &id.peer_id.to_string(),
+                                                )
+                                            })
+                                        }
                                         Err(e) => {
                                             let _ = app_handle.emit(
                                                 "server://error",
@@ -563,7 +595,25 @@ pub fn run() {
                                 let _ = app_handle.emit("server://list", v);
                             }
                         } else if let Ok(notice) = serde_json::from_slice::<JoinNotice>(&data) {
-                            let _ = app_handle.emit("server://join-request", notice);
+                            let state = app_handle.state::<AppState>();
+                            // Cache the joiner's card so anyone with the notice
+                            // can DM them; only the owner acts on the request.
+                            if let Some(mut dir) = state.dir.lock().unwrap().clone() {
+                                dir.remember_contact(&notice.peer_id, &notice.card);
+                            }
+                            let is_owner = {
+                                let me = state.identity.lock().unwrap().clone();
+                                let servers = state.servers.lock().unwrap();
+                                match (me, servers.get(&notice.server_id)) {
+                                    (Some(me), Some(rec)) => {
+                                        rec.owner_peer == me.peer_id.to_string()
+                                    }
+                                    _ => false,
+                                }
+                            };
+                            if is_owner {
+                                let _ = app_handle.emit("server://join-request", notice);
+                            }
                         }
                         return;
                     }

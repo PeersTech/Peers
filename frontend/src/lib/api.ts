@@ -3,6 +3,12 @@ import {listen} from "@tauri-apps/api/event";
 
 export type Role = "member" | "admin" | "owner";
 
+export interface PeerCard {
+    edPub: number[];
+    x25519Pub: number[];
+    sig: number[];
+}
+
 export interface ChannelConfig {
     name: string;
     topic: string;
@@ -15,6 +21,7 @@ export interface Member {
     name: string;
     role: Role;
     joinedEpoch: number;
+    card?: PeerCard;
 }
 
 export interface ServerView {
@@ -57,6 +64,7 @@ export interface JoinNotice {
     peerId: string;
     name: string;
     nonce: number[];
+    card: PeerCard;
 }
 
 export interface UiMessage {
@@ -77,10 +85,11 @@ export const lock = () => invoke<void>("lock");
 export const createServer = (name: string) => invoke<ServerView>("create_server", {name});
 export const listServers = () => invoke<ServerView[]>("list_servers");
 export const createInvite = (serverId: string) => invoke<string>("create_invite", {serverId});
-export const joinServer = (inviteJson: string) => invoke<ServerView>("join_server", {inviteJson});
+export const joinServer = (inviteJson: string, name: string) =>
+    invoke<ServerView>("join_server", {inviteJson, name});
 export const leaveServer = (serverId: string) => invoke<void>("leave_server", {serverId});
-export const addMember = (serverId: string, peerId: string, name: string, role: Role) =>
-    invoke<ServerView>("add_member", {serverId, peerId, name, role});
+export const addMember = (serverId: string, peerId: string, name: string, role: Role, card?: PeerCard) =>
+    invoke<ServerView>("add_member", {serverId, peerId, name, role, card});
 export const setChannel = (serverId: string, name: string, topic: string, readMin: Role, writeMin: Role) =>
     invoke<ServerView>("set_channel", {serverId, name, topic, readMin, writeMin});
 

@@ -2,6 +2,7 @@ use crate::crypto::cipher::{open, seal};
 use crate::crypto::identity::Identity;
 use crate::crypto::session::Session;
 use crate::error::{PeersError, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -16,7 +17,8 @@ const MAX_RECIPIENTS: usize = 64;
 /// X25519 key used for ECDH, and an Ed25519 signature binding them. The
 /// signature is over SHA-256("peers/v1/card" || x25519_pub), so anyone can
 /// verify the card and cache (peer id -> x25519 key) for later sends.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PeerCard {
     pub ed_pub: [u8; 32],
     pub x25519_pub: [u8; 32],

@@ -100,6 +100,7 @@ export default function App() {
         );
         track(
             onServerMessage((m) => {
+                if (m.from === live.current.me?.peerId) return;
                 const key = `${m.serverId}/${m.channel}`;
                 const members = live.current.servers[m.serverId]?.members ?? [];
                 const msg: UiMessage = {
@@ -120,7 +121,8 @@ export default function App() {
         track(onServerError((e) => setError(`${e.serverId}: ${e.error}`)));
         track(
             onNodeMessage((m) => {
-                const chan = m.channel.replace(/^peers\/v1\/ch\//, '');
+                if (m.from === live.current.me?.peerId) return;
+                const chan = m.from;
                 setDms((old) =>
                     old.some((d) => d.id === chan) ? old : [...old, {id: chan, name: shortId(chan), unread: 0}],
                 );
@@ -132,7 +134,7 @@ export default function App() {
                         authorColor: colorFor(m.from),
                         time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
                         text: m.text,
-                        mine: live.current.me?.peerId === m.from,
+                        mine: false,
                     };
                     setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
                     if (activeRef.current.dm !== chan) {
@@ -250,8 +252,9 @@ export default function App() {
     const join = async () => {
         const j = prompt('Paste the invite JSON');
         if (!j?.trim()) return;
+        const name = prompt('Your display name in this server')?.trim() || 'guest';
         try {
-            const v = await joinServer(j.trim());
+            const v = await joinServer(j.trim(), name);
             setServers((old) => ({...old, [v.id]: v}));
             await selectServer(v.id);
         } catch (e) {
@@ -298,7 +301,7 @@ export default function App() {
 
     const acceptJoin = async (n: JoinNotice) => {
         try {
-            const v = await addMember(n.serverId, n.peerId, n.name, 'member');
+            const v = await addMember(n.serverId, n.peerId, n.name, 'member', n.card);
             setServers((old) => ({...old, [v.id]: v}));
             setJoinRequests((old) => old.filter((x) => x.peerId !== n.peerId));
         } catch (e) {
