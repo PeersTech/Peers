@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/api": "^2.11.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "^4.3.3"

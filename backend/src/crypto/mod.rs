@@ -2,6 +2,7 @@ pub mod card;
 pub mod cipher;
 pub mod identity;
 pub mod keystore;
+pub mod server;
 pub mod session;
 
 pub use card::SessionDir;
