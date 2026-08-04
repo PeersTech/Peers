@@ -1,15 +1,17 @@
 import {useMemo, useRef, useState, type KeyboardEvent} from "react";
 import {
-    memberName, parseMentions, shortId, type Member, type Mention, type UiMessage,
+    memberName, parseMentions, shortId, type Contact, type Mention, type UiMessage,
 } from "../lib/api";
 
 interface Props {
     channelName: string;
     subtitle: string;
     messages: UiMessage[];
-    members: Member[];
+    members: Contact[];
     myPeerId: string;
     onSend: (text: string) => void;
+    /** Returns an avatar data URL for a peer id, or null to show the color dot. */
+    avatarFor?: (peerId: string) => string | null;
 }
 
 function splitText(text: string, mentions: Mention[]) {
@@ -25,7 +27,7 @@ function splitText(text: string, mentions: Mention[]) {
 }
 
 /** A rendered @mention. Member → blue ping pill; non-member → gray (not a ping). */
-function MentionPill({peerId, member, dim}: {peerId: string; member?: Member; dim?: boolean}) {
+function MentionPill({peerId, member, dim}: {peerId: string; member?: Contact; dim?: boolean}) {
     if (!member || dim) {
         return (
             <span className="rounded bg-[#4f545c]/50 px-1 text-[#b5bac1]">@{shortId(peerId)}</span>
@@ -38,7 +40,7 @@ function MentionPill({peerId, member, dim}: {peerId: string; member?: Member; di
     );
 }
 
-function MentionText({text, members, dim}: {text: string; members: Member[]; dim?: boolean}) {
+function MentionText({text, members, dim}: {text: string; members: Contact[]; dim?: boolean}) {
     const mentions = useMemo(() => parseMentions(text, members), [text, members]);
     const segs = useMemo(() => splitText(text, mentions), [text, mentions]);
     return (
@@ -61,7 +63,7 @@ function MentionComposer({
     onSend,
     placeholder,
 }: {
-    members: Member[];
+    members: Contact[];
     onSend: (text: string) => void;
     placeholder: string;
 }) {
@@ -227,7 +229,7 @@ function hashColor(s: string) {
     return palette[h % palette.length];
 }
 
-export function MessagePane({channelName, subtitle, messages, members, myPeerId, onSend}: Props) {
+export function MessagePane({channelName, subtitle, messages, members, myPeerId, onSend, avatarFor}: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
 
     // Scroll when messages change or the view swaps.
@@ -259,10 +261,27 @@ export function MessagePane({channelName, subtitle, messages, members, myPeerId,
                             }`}
                         >
                             {firstInBlock && (
-                                <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-black"
-                                     style={{background: m.authorColor}}>
-                                    {m.author[0].toUpperCase()}
-                                </div>
+                                avatarFor ? (
+                                    <div className="mt-1 h-8 w-8 shrink-0 overflow-hidden rounded-full">
+                                        {avatarFor(m.authorPeer) ? (
+                                            <img
+                                                src={avatarFor(m.authorPeer) as string}
+                                                alt=""
+                                                className="h-full w-full object-cover"
+                                            />
+                                        ) : (
+                                            <div className="flex h-full w-full items-center justify-center text-xs font-bold text-black"
+                                                 style={{background: m.authorColor}}>
+                                                {m.author[0].toUpperCase()}
+                                            </div>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-black"
+                                         style={{background: m.authorColor}}>
+                                        {m.author[0].toUpperCase()}
+                                    </div>
+                                )
                             )}
                             {!firstInBlock && <div className="w-8 shrink-0"/>}
                             <div className={`min-w-0 max-w-[70%] ${mine ? "text-right" : ""}`}>

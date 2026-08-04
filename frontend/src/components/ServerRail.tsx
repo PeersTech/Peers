@@ -5,6 +5,7 @@ interface Props {
     dms: {id: string; name: string; unread: number}[];
     activeServer: string | null;
     activeDm: string | null;
+    plazaActive: boolean;
     onSelect: (id: string) => void;
     onCreate: () => void;
     onJoin: () => void;
@@ -12,12 +13,13 @@ interface Props {
     you: string;
     youFull: string;
     onCopyYou: () => void;
+    onOpenSettings: () => void;
 }
 
 const roleColor = (role: string) =>
     role === "owner" ? "#23a55a" : role === "admin" ? "#5865f2" : "#a1a1aa";
 
-export function ServerRail({servers, dms, activeServer, activeDm, onSelect, onCreate, onJoin, serverHasUnread, you, youFull, onCopyYou}: Props) {
+export function ServerRail({servers, dms, activeServer, activeDm, plazaActive, onSelect, onCreate, onJoin, serverHasUnread, you, youFull, onCopyYou, onOpenSettings}: Props) {
     const dmActive = activeDm !== null;
     const dmUnread = dms.reduce((n, d) => n + d.unread, 0);
 
@@ -36,6 +38,17 @@ export function ServerRail({servers, dms, activeServer, activeDm, onSelect, onCr
                 {dmUnread > 0 && (
                     <span className="absolute -mt-6 ml-7 rounded-full bg-[#f23f43] px-1 text-[10px] font-bold text-white">{dmUnread}</span>
                 )}
+            </button>
+            <button
+                onClick={() => onSelect("__plaza__")}
+                className={`flex h-11 w-11 items-center justify-center rounded-2xl transition-all hover:rounded-xl ${
+                    plazaActive ? "bg-[#eb459e] text-white" : "bg-[#2b2d31] text-[#eb459e] hover:bg-[#eb459e] hover:text-white"
+                }`}
+                title="Plaza — public channel"
+            >
+                <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+                    <path d="M12 2a5 5 0 0 0-5 5c0 .6.1 1.2.3 1.7A4.5 4.5 0 0 0 3 13v2a1 1 0 0 0 1 1h2.2a6 6 0 0 0 11.6 0H20a1 1 0 0 0 1-1v-2a4.5 4.5 0 0 0-4.3-4.3c.2-.5.3-1.1.3-1.7a5 5 0 0 0-5-5zm0 2a3 3 0 0 1 3 3c0 .4-.1.8-.2 1.1l-.3.9h-5l-.3-.9A3 3 0 0 1 9 7a3 3 0 0 1 3-3z"/>
+                </svg>
             </button>
             <div className="my-1 h-px w-8 bg-[#35373c]"/>
             {servers.map((s) => {
@@ -73,6 +86,15 @@ export function ServerRail({servers, dms, activeServer, activeDm, onSelect, onCr
                     ↓
                 </button>
             </div>
+            <button
+                onClick={onOpenSettings}
+                title="Profile & settings"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-[#2b2d31] text-[#b5bac1] hover:bg-[#35373c] hover:text-[#f2f3f5]"
+            >
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                    <path d="M19.14 12.94a7.5 7.5 0 0 0 .05-.94c0-.32-.02-.63-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.4 7.4 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.66 9.78a.5.5 0 0 0 .12.64l2.03 1.58a7.5 7.5 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.23.4.33.6.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.04.24.24.42.5.42h3.84c.26 0 .46-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.2.08.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/>
+                </svg>
+            </button>
             <button
                 onClick={onCopyYou}
                 title={`You · ${youFull || "…"} — click to copy`}

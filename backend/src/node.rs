@@ -41,7 +41,7 @@ pub async fn run_headless() -> Result<()> {
     println!("peers node peer id: {}", identity.peer_id);
     println!("peers node identity: {}", identity_path().display());
 
-    let handle = p2p::spawn(identity)?;
+    let handle = p2p::spawn(identity, true)?;
 
     // Surface operational events to stdout for the operator.
     let mut rx = handle.subscribe();
@@ -63,10 +63,12 @@ pub async fn run_headless() -> Result<()> {
     handle.send(NodeCommand::Relay(true)).await?;
     handle.send(NodeCommand::Listen).await?;
 
-    // Dial known peers (VPS backbone) from env/config.
+    // Dial known peers (VPS backbone) from env/config and reserve relay slots
+    // on them, so this node can be used as a rendezvous for hole-punching.
     for ma in p2p::bootstrap::known_nodes() {
         println!("dialing known node: {ma}");
-        let _ = handle.send(NodeCommand::Dial(ma)).await;
+        let _ = handle.send(NodeCommand::Dial(ma.clone())).await;
+        let _ = handle.send(NodeCommand::ListenOnRelay(ma)).await;
     }
 
     // Bootstrap the DHT against the public IPFS testnet.

@@ -1,13 +1,15 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, colorFor, copyText, createInvite, createServer, dmHistory, exportSnapshot, hasIdentity,
-    importSnapshot, initIdentity, isUnlocked, joinServer, leaveServer, listServers, lock,
-    mentionsMe, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onServerError, onServerList,
-    onServerMessage, onlinePeers, peerName, publish, publishChannel, removeMember, renameServer,
-    rotateKey, serverHistory, setChannel, setRole, shortId, subscribe, subscribeChannel, timeFor,
-    unlock,
-    type IdentityInfo, type JoinNotice, type ServerView, type UiMessage,
+    addMember, colorFor, contactProfiles, copyText, createInvite, createServer, dmHistory, exportSnapshot,
+    fetchBlob, getProfile, hasIdentity, importSnapshot, initIdentity, isUnlocked, joinServer, leaveServer,
+    listServers, lock, mentionsMe, onBlobFetched, onBlobParked, onJoinRequest, onNodeMessage, onPeerConnected,
+    onPeerDisconnected, onPlazaMessage, onPlazaProfile, onServerError, onServerList, onServerMessage,
+    onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish, publishChannel, publishPlaza,
+    removeMember, renameServer, rotateKey, serverHistory, setChannel, setProfile, setRole, shortId,
+    subscribe, subscribeChannel, timeFor, unlock,
+    type Contact, type IdentityInfo, type JoinNotice, type PlazaPost, type PlazaPresence,
+    type ServerView, type SignedProfile, type UiMessage,
 } from './lib/api';
 import {ServerRail} from './components/ServerRail';
 import {ChannelList} from './components/ChannelList';
@@ -17,6 +19,16 @@ export interface DM {
     id: string;
     name: string;
     unread: number;
+}
+
+/** Byte array → data-URL base64 (for avatars). Chunked to avoid stack limits. */
+function bytesToBase64(bytes: number[]): string {
+    let bin = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode(...bytes.slice(i, i + CHUNK));
+    }
+    return btoa(bin);
 }
 
 type Phase = 'boot' | 'onboarding' | 'locked' | 'ready';
@@ -39,8 +51,20 @@ export default function App() {
     const [password2, setPassword2] = useState('');
     const [busy, setBusy] = useState(false);
     const [online, setOnline] = useState<Set<string>>(new Set());
+    const [plazaOpen, setPlazaOpen] = useState(false);
+    const [plazaPosts, setPlazaPosts] = useState<PlazaPost[]>([]);
+    const [plazaWho, setPlazaWho] = useState<PlazaPresence[]>([]);
+    const [profiles, setProfiles] = useState<Record<string, SignedProfile>>({});
+    const [myProfile, setMyProfile] = useState<SignedProfile | null>(null);
+    const [blobs, setBlobs] = useState<Record<string, number[]>>({});
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    const [profileName, setProfileName] = useState('');
+    const [profileAbout, setProfileAbout] = useState('');
+    const [avatarBytes, setAvatarBytes] = useState<number[] | null>(null);
+    const [pendingHash, setPendingHash] = useState<string | null>(null);
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
+    const blobQueued = useRef(new Set<string>());
 
     const live = useRef({me: null as IdentityInfo | null, servers: {} as Record<string, ServerView>});
     useEffect(() => {
@@ -90,11 +114,129 @@ export default function App() {
                 time: timeFor(d.ts),
                 text: d.text,
                 mine: d.from === live.current.me?.peerId,
+                authorPeer: d.from,
                 mentionsMe: mentionsMe(d.text, live.current.me?.peerId ?? ''),
             }));
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
         } catch (e) {
             setError(String(e));
+        }
+    };
+
+    const ensureBlob = (hash: string) => {
+        if (!hash || blobs[hash] || blobQueued.current.has(hash)) return;
+        blobQueued.current.add(hash);
+        void fetchBlob(hash).catch(() => {});
+    };
+
+    const blobUrl = (hash: string | null | undefined): string | null => {
+        if (!hash) return null;
+        const data = blobs[hash];
+        if (!data || data.length === 0) return null;
+        return `data:image/png;base64,${bytesToBase64(data)}`;
+    };
+
+    const avatarFor = (peerId: string): string | null => {
+        const p = profiles[peerId];
+        if (!p?.avatarHash) return null;
+        ensureBlob(p.avatarHash);
+        return blobUrl(p.avatarHash);
+    };
+
+    const contactName = (peerId: string) => profiles[peerId]?.displayName || shortId(peerId);
+
+    /** Everyone we could @-mention: server members plus known signed profiles. */
+    const contactsFor = (): Contact[] => {
+        const out: Contact[] = [];
+        const seen = new Set<string>();
+        for (const s of Object.values(servers)) {
+            for (const m of s.members) {
+                if (!seen.has(m.peerId)) {
+                    seen.add(m.peerId);
+                    out.push(m);
+                }
+            }
+        }
+        for (const p of Object.values(profiles)) {
+            if (!seen.has(p.peerId)) {
+                seen.add(p.peerId);
+                out.push({peerId: p.peerId, name: p.displayName, profile: p});
+            }
+        }
+        return out;
+    };
+
+    const loadProfiles = async () => {
+        try {
+            const [mine, all] = await Promise.all([getProfile(), contactProfiles()]);
+            setMyProfile(mine);
+            setProfiles(all);
+            for (const p of Object.values(all)) if (p.avatarHash) ensureBlob(p.avatarHash);
+        } catch {
+            // profiles are best-effort
+        }
+    };
+
+    const loadPlaza = async () => {
+        try {
+            const [hist, who] = await Promise.all([plazaHistory(), plazaWho()]);
+            setPlazaPosts(
+                hist.map((d, i) => ({
+                    id: `${d.from}:${d.ts}:${i}`,
+                    author: d.profile?.displayName || shortId(d.from),
+                    authorColor: colorFor(d.from),
+                    authorPeer: d.from,
+                    time: timeFor(d.ts),
+                    text: d.text,
+                    mine: d.from === live.current.me?.peerId,
+                    profile: d.profile,
+                })),
+            );
+            setPlazaWho(who);
+            for (const d of hist) if (d.profile?.avatarHash) ensureBlob(d.profile.avatarHash);
+        } catch (e) {
+            setError(String(e));
+        }
+    };
+
+    const openPlaza = () => {
+        setPlazaOpen(true);
+        setDmOpen(false);
+        setActiveServer(null);
+        setActiveDm(null);
+        setActiveChannel(null);
+        void loadPlaza();
+    };
+
+    const onAvatarFile = async (file: File) => {
+        try {
+            const buf = Array.from(new Uint8Array(await file.arrayBuffer()));
+            setAvatarBytes(buf);
+            setPendingHash(null);
+            await parkBlob(buf);
+        } catch (e) {
+            setError(String(e));
+        }
+    };
+
+    const saveProfile = async (e: FormEvent) => {
+        e.preventDefault();
+        const name = profileName.trim();
+        if (!name) {
+            setError('Display name required');
+            return;
+        }
+        const hash = pendingHash ?? myProfile?.avatarHash ?? null;
+        try {
+            const p = await setProfile(name, profileAbout.trim(), hash);
+            setMyProfile(p);
+            setProfiles((old) => ({...old, [live.current.me?.peerId ?? '']: p}));
+            setNotice('Profile saved');
+            setSettingsOpen(false);
+            setAvatarBytes(null);
+            setPendingHash(null);
+        } catch (err) {
+            setError(String(err));
         }
     };
 
@@ -107,11 +249,13 @@ export default function App() {
             if (msgs.length === 0) return;
             const list: UiMessage[] = msgs.map((d, i) => ({
                 id: `${d.peer}:${d.ts}:${i}`,
-                author: d.mine ? (me?.peerIdShort ?? 'you') : shortId(peer),
+                author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(peer),
                 authorColor: d.mine ? '#23a55a' : colorFor(peer),
                 time: timeFor(d.ts),
                 text: d.text,
                 mine: d.mine,
+                authorPeer: d.mine ? (me?.peerId ?? '') : peer,
+                mentionsMe: mentionsMe(d.text, me?.peerId ?? ''),
             }));
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
         } catch (e) {
@@ -134,6 +278,7 @@ export default function App() {
                 }
                 setPhase('ready');
                 await refreshServers();
+                await loadProfiles();
                 try {
                     setOnline(new Set(await onlinePeers()));
                 } catch {
@@ -156,7 +301,21 @@ export default function App() {
             });
         };
         track(
-            onServerList((v) => setServers((old) => ({...old, [v.id]: v}))),
+            onServerList((v) => {
+                setServers((old) => ({...old, [v.id]: v}));
+                const profs: Record<string, SignedProfile> = {};
+                for (const m of v.members) {
+                    if (m.profile?.verify) {
+                        if (m.profile.peerId === m.peerId) profs[m.peerId] = m.profile;
+                    } else if (m.profile) {
+                        profs[m.peerId] = m.profile;
+                    }
+                }
+                if (Object.keys(profs).length > 0) {
+                    setProfiles((old) => ({...old, ...profs}));
+                    for (const p of Object.values(profs)) if (p.avatarHash) ensureBlob(p.avatarHash);
+                }
+            }),
         );
         track(
             onServerMessage((m) => {
@@ -191,11 +350,13 @@ export default function App() {
                     const key = `dm:${chan}`;
                     const msg: UiMessage = {
                         id: crypto.randomUUID(),
-                        author: shortId(m.from),
+                        author: contactName(m.from),
                         authorColor: colorFor(m.from),
                         time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
                         text: m.text,
                         mine: false,
+                        authorPeer: m.from,
+                        mentionsMe: mentionsMe(m.text, live.current.me?.peerId ?? ''),
                     };
                     setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
                     if (activeRef.current.dm !== chan) {
@@ -234,6 +395,41 @@ export default function App() {
                 }),
             ),
         );
+        track(
+            onPlazaMessage((m) => {
+                if (m.profile) setProfiles((old) => ({...old, [m.from]: m.profile}));
+                setPlazaPosts((old) => {
+                    const id = `${m.from}:${m.ts}`;
+                    if (old.some((p) => p.id === id)) return old;
+                    const post: PlazaPost = {
+                        id,
+                        author: m.profile?.displayName || shortId(m.from),
+                        authorColor: colorFor(m.from),
+                        authorPeer: m.from,
+                        time: timeFor(m.ts),
+                        text: m.text,
+                        mine: m.from === live.current.me?.peerId,
+                        profile: m.profile,
+                    };
+                    return [...old, post];
+                });
+                if (m.profile?.avatarHash) ensureBlob(m.profile.avatarHash);
+            }),
+        );
+        track(
+            onPlazaProfile((m) => {
+                if (m.profile) {
+                    setProfiles((old) => ({...old, [m.peerId]: m.profile}));
+                    if (m.profile.avatarHash) ensureBlob(m.profile.avatarHash);
+                }
+            }),
+        );
+        track(
+            onBlobFetched((e) => setBlobs((old) => ({...old, [e.hash]: e.data}))),
+        );
+        track(
+            onBlobParked((e) => setPendingHash((h) => h ?? e.hash)),
+        );
         return () => {
             cancelled = true;
             offs.forEach((u) => u());
@@ -241,6 +437,7 @@ export default function App() {
     }, []);
 
     const jumpTo = (serverId: string, channel: string) => {
+        setPlazaOpen(false);
         setActiveServer(serverId);
         setActiveDm(null);
         setDmOpen(false);
@@ -262,7 +459,12 @@ export default function App() {
     };
 
     const select = (id: string) => {
+        if (id === '__plaza__') {
+            openPlaza();
+            return;
+        }
         if (id === '__dms__') {
+            setPlazaOpen(false);
             setDmOpen(true);
             setActiveServer(null);
             setActiveChannel(null);
@@ -319,6 +521,21 @@ export default function App() {
             const key = `${activeServer}/${activeChannel}`;
             setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
             void publishChannel(activeServer, activeChannel, t).catch((e) => setError(String(e)));
+        } else if (plazaOpen) {
+            setPlazaPosts((old) => [
+                ...old,
+                {
+                    id: crypto.randomUUID(),
+                    author: myProfile?.displayName || me?.peerIdShort ?? 'you',
+                    authorColor: '#23a55a',
+                    authorPeer: me?.peerId ?? '',
+                    time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
+                    text: t,
+                    mine: true,
+                    profile: myProfile,
+                },
+            ]);
+            void publishPlaza(t).catch((e) => setError(String(e)));
         }
     };
 
@@ -491,6 +708,14 @@ export default function App() {
         setNotice('Copied your peer id');
     };
 
+    const openSettings = () => {
+        setProfileName(myProfile?.displayName || me?.defaultName || me?.peerIdShort || '');
+        setProfileAbout(myProfile?.about || '');
+        setAvatarBytes(null);
+        setPendingHash(null);
+        setSettingsOpen(true);
+    };
+
     const doLock = async () => {
         try {
             await lock();
@@ -503,6 +728,11 @@ export default function App() {
         setHistory({});
         setUnread({});
         setJoinRequests([]);
+        setPlazaOpen(false);
+        setPlazaPosts([]);
+        setPlazaWho([]);
+        setProfiles({});
+        setMyProfile(null);
         setActiveServer(null);
         setActiveDm(null);
         setActiveChannel(null);
@@ -585,13 +815,34 @@ export default function App() {
     const serverList = Object.values(servers);
     const server = activeServer ? servers[activeServer] : null;
     const dm = activeDm ? dms.find((d) => d.id === activeDm) : null;
-    const paneKey = dm ? `dm:${dm.id}` : server && activeChannel ? `${server.id}/${activeChannel}` : null;
-    const paneMessages = paneKey ? history[paneKey] ?? [] : [];
-    const paneName = dm
-        ? dm.name
-        : server?.channels.find((c) => c.name === activeChannel)?.name ?? '';
+    const plazaMessages: UiMessage[] = plazaPosts.map((p) => ({
+        id: p.id,
+        author: p.author,
+        authorColor: p.authorColor,
+        time: p.time,
+        text: p.text,
+        mine: p.mine,
+        authorPeer: p.authorPeer,
+    }));
+    const paneKey = plazaOpen
+        ? 'plaza'
+        : dm
+          ? `dm:${dm.id}`
+          : server && activeChannel
+            ? `${server.id}/${activeChannel}`
+            : null;
+    const paneMessages = plazaOpen ? plazaMessages : paneKey ? history[paneKey] ?? [] : [];
+    const paneName = plazaOpen
+        ? 'plaza'
+        : dm
+          ? (profiles[dm.id]?.displayName ?? dm.name)
+          : server?.channels.find((c) => c.name === activeChannel)?.name ?? '';
     const onlineCount = server ? server.members.filter((m) => online.has(m.peerId)).length : 0;
     const dmOnline = dm ? online.has(dm.id) : false;
+    const paneMembers: Contact[] = plazaOpen || dm
+        ? contactsFor()
+        : (server?.members ?? []);
+    const plazaHere = plazaWho.length + (me ? 1 : 0);
 
     return (
         <div className="flex h-full w-full bg-[#1e1f22] text-[#f2f3f5]">
@@ -600,6 +851,7 @@ export default function App() {
                 dms={dms}
                 activeServer={dmOpen ? null : activeServer}
                 activeDm={dmOpen ? (activeDm ?? '__dms__') : null}
+                plazaActive={plazaOpen}
                 onSelect={select}
                 onCreate={() => void createSrv()}
                 onJoin={() => void join()}
@@ -609,8 +861,51 @@ export default function App() {
                 you={me?.peerIdShort ?? 'y'}
                 youFull={me?.peerId ?? ''}
                 onCopyYou={copyMyId}
+                onOpenSettings={openSettings}
             />
-            {dmOpen ? (
+            {plazaOpen ? (
+                <div className="flex h-full w-[248px] flex-col bg-[#2b2d31]">
+                    <div className="flex h-12 shrink-0 items-center justify-between border-b border-[#1e1f22] px-4">
+                        <span className="font-semibold">Plaza</span>
+                        <span className="text-[10px] text-[#80848e]">{plazaHere} here</span>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-2">
+                        {plazaWho.map((p) => {
+                            const prof = profiles[p.peerId];
+                            const name = prof?.displayName || shortId(p.peerId);
+                            return (
+                                <div key={p.peerId} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-[#b5bac1]">
+                                    <span
+                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-black"
+                                        style={{background: colorFor(p.peerId)}}
+                                    >
+                                        {name[0].toUpperCase()}
+                                    </span>
+                                    <span className="flex-1 truncate">{name}</span>
+                                    <span className="h-2 w-2 rounded-full bg-[#23a55a]"/>
+                                </div>
+                            );
+                        })}
+                        {me && (
+                            <div className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-[#b5bac1]">
+                                <span
+                                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-black"
+                                    style={{background: '#23a55a'}}
+                                >
+                                    {(myProfile?.displayName || me.peerIdShort)[0].toUpperCase()}
+                                </span>
+                                <span className="flex-1 truncate">{myProfile?.displayName || me.peerIdShort}</span>
+                                <span className="h-2 w-2 rounded-full bg-[#23a55a]"/>
+                            </div>
+                        )}
+                        {plazaWho.length === 0 && (
+                            <div className="px-2 py-4 text-xs text-[#949ba4]">
+                                No one in the Plaza right now — say hi!
+                            </div>
+                        )}
+                    </div>
+                </div>
+            ) : dmOpen ? (
                 <div className="flex h-full w-[248px] flex-col bg-[#2b2d31]">
                     <div className="flex h-12 shrink-0 items-center justify-between border-b border-[#1e1f22] px-4">
                         <span className="font-semibold">Direct messages</span>
@@ -645,12 +940,16 @@ export default function App() {
                                     className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-black"
                                     style={{background: colorFor(d.id)}}
                                 >
-                                    {d.name[0].toUpperCase()}
+                                    {avatarFor(d.id) ? (
+                                        <img src={avatarFor(d.id) as string} alt="" className="h-full w-full rounded-full object-cover"/>
+                                    ) : (
+                                        (profiles[d.id]?.displayName || d.name)[0].toUpperCase()
+                                    )}
                                 </span>
                                 {online.has(d.id) && (
                                     <span className="absolute left-[22px] top-[22px] h-2.5 w-2.5 rounded-full border-2 border-[#2b2d31] bg-[#23a55a]"/>
                                 )}
-                                <span className="flex-1 truncate">{d.name}</span>
+                                <span className="flex-1 truncate">{profiles[d.id]?.displayName || d.name}</span>
                                 {d.unread > 0 && (
                                     <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#f23f43] px-1 text-[10px] font-bold text-white">
                                         {d.unread}
@@ -690,12 +989,83 @@ export default function App() {
             )}
             <MessagePane
                 channelName={paneName || '…'}
-                subtitle={dm ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}` : server ? `E2E encrypted · ${onlineCount}/${server.memberCount} online` : ''}
+                subtitle={plazaOpen
+                    ? `Public · ${plazaHere} here`
+                    : dm
+                      ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}`
+                      : server
+                        ? `E2E encrypted · ${onlineCount}/${server.memberCount} online`
+                        : ''}
                 messages={paneMessages}
-                members={server?.members ?? []}
+                members={paneMembers}
                 myPeerId={me?.peerId ?? ''}
                 onSend={send}
+                avatarFor={avatarFor}
             />
+            {settingsOpen && (
+                <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={() => setSettingsOpen(false)}>
+                    <form
+                        onSubmit={(e) => void saveProfile(e)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-96 rounded-2xl border border-[#35373c] bg-[#2b2d31] p-5"
+                    >
+                        <div className="mb-4 flex items-center justify-between">
+                            <h2 className="text-lg font-bold text-[#f2f3f5]">Your profile</h2>
+                            <button type="button" onClick={() => setSettingsOpen(false)} className="text-[#949ba4] hover:text-[#f2f3f5]">✕</button>
+                        </div>
+                        <div className="mb-4 flex items-center gap-4">
+                            <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full text-sm font-bold text-black"
+                                 style={{background: avatarBytes || myProfile?.avatarHash ? 'transparent' : '#23a55a'}}>
+                                {avatarBytes ? (
+                                    <img src={bytesToBase64(avatarBytes)} alt="" className="h-full w-full object-cover"/>
+                                ) : myProfile?.avatarHash && blobUrl(myProfile.avatarHash) ? (
+                                    <img src={blobUrl(myProfile.avatarHash) as string} alt="" className="h-full w-full object-cover"/>
+                                ) : (
+                                    (myProfile?.displayName || me?.peerIdShort || '?')[0].toUpperCase()
+                                )}
+                            </div>
+                            <label className="cursor-pointer rounded-md bg-[#35373c] px-3 py-1.5 text-sm text-[#f2f3f5] hover:bg-[#404249]">
+                                Upload avatar
+                                <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        const f = e.target.files?.[0];
+                                        if (f) void onAvatarFile(f);
+                                    }}
+                                />
+                            </label>
+                            <span className="text-[10px] text-[#80848e]">
+                                {myProfile?.avatarHash ? 'Avatar shared across servers' : 'No avatar yet'}
+                            </span>
+                        </div>
+                        <label className="mb-1 block text-xs text-[#949ba4]">Display name</label>
+                        <input
+                            value={profileName}
+                            onChange={(e) => setProfileName(e.target.value)}
+                            className="mb-3 w-full rounded-lg bg-[#1e1f22] px-3 py-2 text-sm text-[#f2f3f5] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                            placeholder="Display name"
+                        />
+                        <label className="mb-1 block text-xs text-[#949ba4]">About</label>
+                        <textarea
+                            value={profileAbout}
+                            onChange={(e) => setProfileAbout(e.target.value)}
+                            rows={2}
+                            className="mb-4 w-full resize-none rounded-lg bg-[#1e1f22] px-3 py-2 text-sm text-[#f2f3f5] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                            placeholder="A short bio…"
+                        />
+                        <div className="flex justify-end gap-2">
+                            <button type="button" onClick={() => setSettingsOpen(false)} className="rounded-lg px-3 py-2 text-sm text-[#949ba4] hover:bg-[#35373c]">
+                                Cancel
+                            </button>
+                            <button type="submit" className="rounded-lg bg-[#5865f2] px-4 py-2 text-sm font-semibold text-white hover:bg-[#4752c4]">
+                                Save
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            )}
             {notice && (
                 <div
                     className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-[#1e3d2a] bg-[#12231a] px-3 py-2 text-xs text-[#23a55a]"

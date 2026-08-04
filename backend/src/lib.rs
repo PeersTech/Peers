@@ -9,7 +9,8 @@ pub use node::run_headless;
 use crate::crypto::card::{PeerCard, SignedProfile};
 use crate::crypto::server::{
     channel_topic, new_server_id, server_topic, ChannelConfig, Invite, JoinNotice, Member,
-    ProfileNotice, Role, ServerDir, ServerRecord, ServerView, SignedList, SignedMessage, Snapshot,
+    PLAZA_TOPIC, PlazaMessage, ProfileNotice, Role, ServerDir, ServerRecord, ServerView,
+    SignedList, SignedMessage, Snapshot,
 };
 use crate::crypto::{Identity, Keystore, SessionDir};
 use crate::error::PeersError;
@@ -19,7 +20,7 @@ use crate::store::{
 };
 use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -28,6 +29,12 @@ use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 /// Gossip topic clients use to ask always-on relay nodes to mesh the topics
 /// they subscribe to. Mirrors `p2p::RELAY_CONTROL_TOPIC`.
 const RELAY_CONTROL_TOPIC: &str = "peers/v1/relay";
+
+/// How many recent Plaza messages we keep in memory for new views.
+const PLAZA_HISTORY_LIMIT: usize = 200;
+
+/// How long a Plaza participant counts as "here" after their last message.
+const PLAZA_PRESENCE_WINDOW_SECS: u64 = 600;
 
 /// Subscribes to a topic and asks any connected relay nodes to mesh it too,
 /// so our messages reach peers who only connect through them.
@@ -64,6 +71,11 @@ pub struct AppState {
     profile: Mutex<Option<SignedProfile>>,
     /// Cached, verified display profiles of peers we've met (peer id → profile).
     profiles: Mutex<HashMap<String, SignedProfile>>,
+    /// Recent self-signed messages seen on the global Plaza (deduped by sig).
+    plaza: Mutex<VecDeque<PlazaMessage>>,
+    /// Last seen timestamp per Plaza participant (peer id → ts), for
+    /// "who's here".
+    plaza_seen: Mutex<HashMap<String, u64>>,
 }
 
 impl Default for AppState {
@@ -81,6 +93,8 @@ impl Default for AppState {
             addrs: Mutex::new(Vec::new()),
             profile: Mutex::new(None),
             profiles: Mutex::new(HashMap::new()),
+            plaza: Mutex::new(VecDeque::new()),
+            plaza_seen: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -158,7 +172,7 @@ async fn unlock(
         )?;
     }
 
-    let handle = p2p::spawn(id.clone())?;
+    let handle = p2p::spawn(id.clone(), false)?;
     *state.identity.lock().unwrap() = Some(id.clone());
     *state.node.lock().unwrap() = Some(handle.clone());
     *state.storage.lock().unwrap() = Some(store_handle);
@@ -203,14 +217,19 @@ async fn unlock(
         .await;
     // Receive DMs addressed to us: our own peer id is our DM topic.
     let _ = subscribe_with_relay(&state, format!("peers/v1/ch/{}", id.peer_id)).await;
+    // Auto-join the global Plaza (no invites, can't leave).
+    let _ = subscribe_with_relay(&state, PLAZA_TOPIC.to_string()).await;
+    announce_plaza_profile(&state).await;
     // Re-subscribe to every server control topic we know about.
     let records = state.servers.lock().unwrap().records();
     for rec in records {
         let _ = subscribe_with_relay(&state, server_topic(&rec.id)).await;
     }
-    // Dial any known always-on nodes so we reach peers we share no mesh with.
+    // Dial any known always-on nodes so we reach peers we share no mesh with,
+    // and reserve a circuit slot on each so NAT'd peers can reach us too.
     for ma in crate::p2p::bootstrap::known_nodes() {
-        let _ = handle.send(NodeCommand::Dial(ma)).await;
+        let _ = handle.send(NodeCommand::Dial(ma.clone())).await;
+        let _ = handle.send(NodeCommand::ListenOnRelay(ma)).await;
     }
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -257,6 +276,8 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.presence.lock().unwrap() = HashSet::new();
     *state.profile.lock().unwrap() = None;
     *state.profiles.lock().unwrap() = HashMap::new();
+    *state.plaza.lock().unwrap() = VecDeque::new();
+    *state.plaza_seen.lock().unwrap() = HashMap::new();
     Ok(())
 }
 
@@ -809,6 +830,8 @@ async fn set_profile(
         }
     }
     persist(&state);
+    // Let the Plaza (and anyone "here") learn the new name/avatar.
+    announce_plaza_profile(&state).await;
     Ok(profile)
 }
 
@@ -822,6 +845,97 @@ fn get_profile(state: State<'_, AppState>) -> Result<Option<SignedProfile>, Stri
 #[tauri::command]
 fn contact_profiles(state: State<'_, AppState>) -> Result<HashMap<String, SignedProfile>, String> {
     Ok(state.profiles.lock().unwrap().clone())
+}
+
+/// A Plaza participant and when they were last seen.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlazaPresence {
+    peer_id: String,
+    last_ts: u64,
+}
+
+/// Appends a verified Plaza message to the in-memory buffer (deduped by
+/// signature) and records the sender's last-seen time.
+fn push_plaza(state: &AppState, msg: PlazaMessage) {
+    let peer = msg.from.clone();
+    let ts = msg.ts;
+    {
+        let mut buf = state.plaza.lock().unwrap();
+        if !buf.iter().any(|m| m.sig == msg.sig) {
+            buf.push_back(msg);
+            if buf.len() > PLAZA_HISTORY_LIMIT {
+                buf.pop_front();
+            }
+        }
+    }
+    state.plaza_seen.lock().unwrap().insert(peer, ts);
+}
+
+/// Publishes our signed display profile on the Plaza so anyone "here"
+/// learns who we are. Best-effort; called on unlock and after set_profile.
+async fn announce_plaza_profile(state: &AppState) {
+    let Some(identity) = state.identity.lock().unwrap().clone() else { return };
+    let Some(node) = state.node.lock().unwrap().clone() else { return };
+    let Some(profile) = state.profile.lock().unwrap().clone() else { return };
+    let Ok(msg) = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_PROFILE, "", Some(profile)) else { return };
+    if let Ok(data) = serde_json::to_vec(&msg) {
+        let _ = node
+            .send(NodeCommand::Publish {
+                topic: PLAZA_TOPIC.to_string(),
+                data,
+            })
+            .await;
+    }
+}
+
+/// Sends a self-signed chat message to the global Plaza.
+#[tauri::command]
+async fn publish_plaza(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(());
+    }
+    let msg = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_CHAT, &text, None)?;
+    let data = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish {
+        topic: PLAZA_TOPIC.to_string(),
+        data,
+    })
+    .await?;
+    push_plaza(&state, msg);
+    Ok(())
+}
+
+/// Recent verified Plaza messages, oldest first.
+#[tauri::command]
+fn plaza_history(state: State<'_, AppState>) -> Result<Vec<PlazaMessage>, String> {
+    Ok(state.plaza.lock().unwrap().iter().cloned().collect())
+}
+
+/// Plaza participants seen in the last few minutes.
+#[tauri::command]
+fn plaza_who(state: State<'_, AppState>) -> Result<Vec<PlazaPresence>, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let seen = state.plaza_seen.lock().unwrap();
+    Ok(seen
+        .iter()
+        .filter(|(_, ts)| now.saturating_sub(**ts) < PLAZA_PRESENCE_WINDOW_SECS)
+        .map(|(peer_id, last_ts)| PlazaPresence {
+            peer_id: peer_id.clone(),
+            last_ts: *last_ts,
+        })
+        .collect())
 }
 
 /// Parks bytes (sealed envelope or media chunk) and announces them on the
@@ -884,6 +998,9 @@ pub fn run() {
             set_profile,
             get_profile,
             contact_profiles,
+            publish_plaza,
+            plaza_history,
+            plaza_who,
             export_snapshot,
             import_snapshot,
         ])
@@ -1118,6 +1235,48 @@ pub fn run() {
                         }
                         return;
                     }
+                    // Global Plaza: self-signed chat + profile announcements.
+                    if topic == PLAZA_TOPIC {
+                        if let Ok(msg) = serde_json::from_slice::<PlazaMessage>(&data) {
+                            if msg.verify().is_ok() {
+                                let state = app_handle.state::<AppState>();
+                                push_plaza(&state, msg.clone());
+                                if msg.kind == PlazaMessage::KIND_PROFILE {
+                                    if let Some(profile) = &msg.profile {
+                                        state
+                                            .profiles
+                                            .lock()
+                                            .unwrap()
+                                            .insert(msg.from.clone(), profile.clone());
+                                    }
+                                    let _ = app_handle.emit(
+                                        "plaza://profile",
+                                        serde_json::json!({
+                                            "peerId": msg.from,
+                                            "profile": msg.profile,
+                                        }),
+                                    );
+                                } else {
+                                    let profile = state
+                                        .profiles
+                                        .lock()
+                                        .unwrap()
+                                        .get(&msg.from)
+                                        .cloned();
+                                    let _ = app_handle.emit(
+                                        "plaza://message",
+                                        serde_json::json!({
+                                            "from": msg.from,
+                                            "text": msg.text,
+                                            "ts": msg.ts,
+                                            "profile": profile,
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                        return;
+                    }
                     let identity = state.identity.lock().unwrap().clone();
                     let Some(identity) = identity else { return };
                     // Open against the live dir so contact caching and session
@@ -1168,6 +1327,23 @@ pub fn run() {
                             );
                         }
                     }
+                }
+                // Blob transfer events (avatar/media) go straight to the UI.
+                if let NodeEvent::BlobFetched { hash, data } = payload {
+                    let _ = app_handle.emit(
+                        "blob://fetched",
+                        serde_json::json!({ "hash": hash, "data": data }),
+                    );
+                } else if let NodeEvent::BlobFetchFailed { hash, reason } = payload {
+                    let _ = app_handle.emit(
+                        "blob://failed",
+                        serde_json::json!({ "hash": hash, "reason": reason }),
+                    );
+                } else if let NodeEvent::BlobParked { hash } = payload {
+                    let _ = app_handle.emit(
+                        "blob://parked",
+                        serde_json::json!({ "hash": hash }),
+                    );
                 }
             });
             Ok(())

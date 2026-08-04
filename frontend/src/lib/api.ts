@@ -52,6 +52,7 @@ export interface IdentityInfo {
     peerId: string;
     peerIdShort: string;
     fingerprint: string;
+    defaultName?: string;
 }
 
 export interface ServerMessage {
@@ -103,8 +104,54 @@ export interface UiMessage {
     time: string;
     text: string;
     mine: boolean;
+    /** Peer id of the author (for avatars); omitted for plain DMs. */
+    authorPeer?: string;
     /** True when this server message @-mentions our own peer id (a ping). */
     mentionsMe?: boolean;
+}
+
+/** A verified Plaza message as stored/returned by the backend. */
+export interface PlazaMessageDto {
+    version: number;
+    kind: string;
+    from: string;
+    pubkey: number[];
+    ts: number;
+    text: string;
+    profile?: SignedProfile | null;
+    sig: string;
+}
+
+/** Frontend-friendly Plaza post (author resolved to a display name). */
+export interface PlazaPost {
+    id: string;
+    author: string;
+    authorColor: string;
+    authorPeer: string;
+    time: string;
+    text: string;
+    mine: boolean;
+    profile?: SignedProfile | null;
+}
+
+/** A Plaza participant and when they were last seen (plaza_who). */
+export interface PlazaPresence {
+    peerId: string;
+    lastTs: number;
+}
+
+/** A live plaza://profile announcement. */
+export interface PlazaProfile {
+    peerId: string;
+    profile: SignedProfile | null;
+}
+
+/** A live plaza://message announcement. */
+export interface PlazaMessage {
+    from: string;
+    text: string;
+    ts: number;
+    profile?: SignedProfile | null;
 }
 
 export const hasIdentity = () => invoke<boolean>("has_identity");
@@ -131,6 +178,30 @@ export const publishChannel = (serverId: string, channel: string, text: string) 
 
 export const subscribe = (channel: string) => invoke<void>("subscribe", {channel});
 export const publish = (channel: string, text: string) => invoke<void>("publish", {channel, text});
+
+export const setProfile = (displayName: string, about: string, avatarHash: string | null) =>
+    invoke<SignedProfile>("set_profile", {displayName, about, avatarHash});
+export const getProfile = () => invoke<SignedProfile | null>("get_profile");
+export const contactProfiles = () =>
+    invoke<Record<string, SignedProfile>>("contact_profiles");
+
+export const parkBlob = (data: number[]) => invoke<string>("park_blob", {data});
+export const fetchBlob = (hash: string) => invoke<void>("fetch_blob", {hash});
+
+export const publishPlaza = (text: string) => invoke<void>("publish_plaza", {text});
+export const plazaHistory = () => invoke<PlazaMessageDto[]>("plaza_history");
+export const plazaWho = () => invoke<PlazaPresence[]>("plaza_who");
+
+export const onBlobFetched = (cb: (e: {hash: string; data: number[]}) => void) =>
+    listen<{hash: string; data: number[]}>("blob://fetched", (e) => cb(e.payload));
+export const onBlobFetchFailed = (cb: (e: {hash: string; reason: string}) => void) =>
+    listen<{hash: string; reason: string}>("blob://failed", (e) => cb(e.payload));
+export const onBlobParked = (cb: (e: {hash: string}) => void) =>
+    listen<{hash: string}>("blob://parked", (e) => cb(e.payload));
+export const onPlazaMessage = (cb: (m: PlazaMessage) => void) =>
+    listen<PlazaMessage>("plaza://message", (e) => cb(e.payload));
+export const onPlazaProfile = (cb: (m: PlazaProfile) => void) =>
+    listen<PlazaProfile>("plaza://profile", (e) => cb(e.payload));
 
 export const serverHistory = (serverId: string, channel: string) =>
     invoke<SignedMessageDto[]>("server_history", {serverId, channel});
@@ -174,11 +245,19 @@ export async function copyText(text: string) {
     }
 }
 
-export const peerName = (peerId: string, members: Member[]) =>
+/** Anything that has a server name and (optionally) a signed profile —
+ *  both server members and Plaza participants qualify. */
+export interface Contact {
+    peerId: string;
+    name: string;
+    profile?: SignedProfile;
+}
+
+export const peerName = (peerId: string, members: Contact[]) =>
     members.find((m) => m.peerId === peerId)?.name ?? shortId(peerId);
 
-/** Display name for a member: signed profile name first, else server name. */
-export const memberName = (m: Member) =>
+/** Display name for a contact: signed profile name first, else local name. */
+export const memberName = (m: {name: string; profile?: SignedProfile}) =>
     m.profile?.displayName && m.profile.displayName.trim() ? m.profile.displayName : m.name;
 
 /** A parsed @-mention in a message: the peer id and (if a member) the member. */
@@ -186,7 +265,7 @@ export interface Mention {
     start: number;
     end: number;
     peerId: string;
-    member?: Member;
+    member?: Contact;
 }
 
 const MENTION_RE = /@([0-9A-Za-z]{44,52})/g;
@@ -194,7 +273,7 @@ const MENTION_RE = /@([0-9A-Za-z]{44,52})/g;
 /** Finds `@<peerId>` mentions in `text`, resolving each against `members`.
  *  Mentions of non-members are still returned (peerId set, member undefined)
  *  so the caller can render them as "not a ping". */
-export function parseMentions(text: string, members: Member[]): Mention[] {
+export function parseMentions(text: string, members: Contact[]): Mention[] {
     const out: Mention[] = [];
     const re = new RegExp(MENTION_RE.source, "g");
     let m: RegExpExecArray | null;

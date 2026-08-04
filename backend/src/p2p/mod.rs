@@ -42,6 +42,10 @@ pub enum NodeCommand {
     Bootstrap(Vec<Multiaddr>),
     /// Dial a single peer directly (e.g. the owner behind an invite).
     Dial(Multiaddr),
+    /// Reserve a circuit slot on a relay node: `listen_on(addr + /p2p-circuit)`
+    /// so we become reachable as `/p2p/<relay>/p2p-circuit/p2p/<us>` and other
+    /// NAT'd peers can dial us through it.
+    ListenOnRelay(Multiaddr),
     /// Join a gossip topic ("peers/v1/ch/<channel>").
     Subscribe(String),
     Unsubscribe(String),
@@ -114,7 +118,11 @@ impl NodeHandle {
 }
 
 /// Builds the swarm, opens listeners and spawns the event loop task.
-pub fn spawn(identity: Identity) -> Result<NodeHandle> {
+///
+/// `serve_relay` turns on the circuit-relay server role (accepting
+/// reservations and forwarding connections). Only headless `--node` builds
+/// pass `true`; GUI clients relay nothing (tiered relaying).
+pub fn spawn(identity: Identity, serve_relay: bool) -> Result<NodeHandle> {
     let swarm = SwarmBuilder::with_existing_identity(identity.keypair.clone())
         .with_tokio()
         .with_tcp(
@@ -124,8 +132,10 @@ pub fn spawn(identity: Identity) -> Result<NodeHandle> {
         )
         .map_err(|e| PeersError::P2p(format!("tcp transport: {e}")))?
         .with_quic()
-        .with_behaviour(|key| {
-            behaviour::Behaviour::new(key)
+        .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
+        .map_err(|e| PeersError::P2p(format!("relay client transport: {e}")))?
+        .with_behaviour(|key, relay_client| {
+            behaviour::Behaviour::new(key, relay_client, serve_relay)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
         })
         .map_err(|e| PeersError::P2p(format!("behaviour init: {e}")))?
@@ -262,6 +272,16 @@ impl Node {
             NodeCommand::Dial(addr) => {
                 let _ = self.swarm.dial(addr);
             }
+            NodeCommand::ListenOnRelay(addr) => {
+                let mut ma = addr.clone();
+                ma.push(Protocol::P2pCircuit);
+                match self.swarm.listen_on(ma) {
+                    Ok(_) => {}
+                    Err(e) => self.emit(NodeEvent::Error {
+                        message: format!("listen on relay {addr}: {e}"),
+                    }),
+                }
+            }
             NodeCommand::Subscribe(topic_name) => {
                 let topic = Sha256Topic::new(topic_name.clone());
                 match self.swarm.behaviour_mut().gossipsub.subscribe(&topic) {
@@ -373,8 +393,17 @@ impl Node {
                             .add_address(&peer, addr.clone());
                     }
                     self.peer_addresses.insert(peer, addrs);
+                    // The address the relay/router observed for us is our best
+                    // external (NAT-mapped) address — a DCUtR hole-punch
+                    // candidate.
+                    if let Some(observed) = info.observed_addr.clone() {
+                        self.swarm.add_external_address(observed);
+                    }
                 }
             }
+            behaviour::Event::RelayClient(_) => {}
+            behaviour::Event::RelayServer(_) => {}
+            behaviour::Event::Dcutr(_) => {}
             behaviour::Event::Ping(ping::Event { peer, result, .. }) => {
                 if let Err(e) = result {
                     self.emit(NodeEvent::Error {
