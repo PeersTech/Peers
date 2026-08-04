@@ -225,8 +225,7 @@ impl Node {
                         .subscribe(&topic)
                         .is_ok()
                     {
-                        self.topics
-                            .insert(RELAY_CONTROL_TOPIC.to_string(), topic);
+                        self.topics.insert(RELAY_CONTROL_TOPIC.to_string(), topic);
                     }
                 }
             }
@@ -397,8 +396,7 @@ impl Node {
             },
             behaviour::Event::Gossipsub(gev) => match gev {
                 gossipsub::Event::Message { message, .. } => {
-                    let control_hash =
-                        Sha256Topic::new(RELAY_CONTROL_TOPIC.to_string()).hash();
+                    let control_hash = Sha256Topic::new(RELAY_CONTROL_TOPIC.to_string()).hash();
                     // Relay nodes mesh any topic they're asked to relay, so
                     // peers that only meet through them still gossip.
                     if self.relay && message.topic == control_hash {
