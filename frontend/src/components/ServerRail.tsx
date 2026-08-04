@@ -10,12 +10,14 @@ interface Props {
     onJoin: () => void;
     serverHasUnread: (id: string) => boolean;
     you: string;
+    youFull: string;
+    onCopyYou: () => void;
 }
 
 const roleColor = (role: string) =>
     role === "owner" ? "#23a55a" : role === "admin" ? "#5865f2" : "#a1a1aa";
 
-export function ServerRail({servers, dms, activeServer, activeDm, onSelect, onCreate, onJoin, serverHasUnread, you}: Props) {
+export function ServerRail({servers, dms, activeServer, activeDm, onSelect, onCreate, onJoin, serverHasUnread, you, youFull, onCopyYou}: Props) {
     const dmActive = activeDm !== null;
     const dmUnread = dms.reduce((n, d) => n + d.unread, 0);
 
@@ -71,10 +73,13 @@ export function ServerRail({servers, dms, activeServer, activeDm, onSelect, onCr
                     ↓
                 </button>
             </div>
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-[#23a55a] to-[#16a34a] text-sm font-bold text-black"
-                 title="You">
+            <button
+                onClick={onCopyYou}
+                title={`You · ${youFull || "…"} — click to copy`}
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-[#23a55a] to-[#16a34a] text-sm font-bold text-black hover:opacity-90"
+            >
                 {you[0].toUpperCase()}
-            </div>
+            </button>
         </div>
     );
 }

@@ -21,12 +21,13 @@ interface Props {
     onPromoteMember: (peerId: string, role: "admin" | "member") => void;
     onExportSnapshot: () => void;
     onImportSnapshot: () => void;
+    onCopyMyId: () => void;
 }
 
 export function ChannelList({
     server, activeChannel, unreadFor, me, joinRequests, online, onSelectChannel, onInvite,
     onAddChannel, onAddMember, onAcceptJoin, onRejectJoin, onLeave, onRename, onRotateKey,
-    onKickMember, onPromoteMember, onExportSnapshot, onImportSnapshot,
+    onKickMember, onPromoteMember, onExportSnapshot, onImportSnapshot, onCopyMyId,
 }: Props) {
     const unreadTotal = server.channels.reduce((n, c) => n + unreadFor(c.name), 0);
     const onlineCount = server.members.filter((m) => online.has(m.peerId)).length;
@@ -206,7 +207,11 @@ export function ChannelList({
                     <div className="truncate text-sm font-medium text-[#f2f3f5]">you</div>
                     <div className="truncate text-[11px] text-[#949ba4]">{me?.peerIdShort ?? "…"}</div>
                 </div>
-                <button title={`Fingerprint: ${me?.fingerprint ?? "…"}`} className="text-[#949ba4] hover:text-white">
+                <button
+                    onClick={onCopyMyId}
+                    title={`Your peer id: ${me?.peerId ?? "…"} — click to copy`}
+                    className="text-[#949ba4] hover:text-white"
+                >
                     <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
                         <path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
                     </svg>

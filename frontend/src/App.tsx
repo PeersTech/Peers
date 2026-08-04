@@ -1,9 +1,9 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, colorFor, createInvite, createServer, dmHistory, exportSnapshot, hasIdentity,
+    addMember, colorFor, copyText, createInvite, createServer, dmHistory, exportSnapshot, hasIdentity,
     importSnapshot, initIdentity, isUnlocked, joinServer, leaveServer, listServers, lock,
-    onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onServerError, onServerList,
+    mentionsMe, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onServerError, onServerList,
     onServerMessage, onlinePeers, peerName, publish, publishChannel, removeMember, renameServer,
     rotateKey, serverHistory, setChannel, setRole, shortId, subscribe, subscribeChannel, timeFor,
     unlock,
@@ -90,6 +90,7 @@ export default function App() {
                 time: timeFor(d.ts),
                 text: d.text,
                 mine: d.from === live.current.me?.peerId,
+                mentionsMe: mentionsMe(d.text, live.current.me?.peerId ?? ''),
             }));
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
         } catch (e) {
@@ -169,6 +170,7 @@ export default function App() {
                     time: timeFor(m.ts),
                     text: m.text,
                     mine: live.current.me?.peerId === m.from,
+                    mentionsMe: mentionsMe(m.text, live.current.me?.peerId ?? ''),
                 };
                 setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
                 const act = activeRef.current;
@@ -483,6 +485,12 @@ export default function App() {
         }
     };
 
+    const copyMyId = () => {
+        if (!me) return;
+        void copyText(me.peerId);
+        setNotice('Copied your peer id');
+    };
+
     const doLock = async () => {
         try {
             await lock();
@@ -540,7 +548,7 @@ export default function App() {
                     <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-[#5865f2] text-lg font-bold text-white">P</div>
                     <h1 className="mt-3 text-xl font-bold text-[#f2f3f5]">Peers</h1>
                     <p className="mb-4 text-xs text-[#949ba4]">
-                        {phase === 'onboarding' ? 'Create your encrypted identity — this password seals your keys locally.' : 'Enter your password to unlock your identity and start the swarm.'}
+                        {phase === 'onboarding' ? 'Create your encrypted identity — this password seals your keys locally.' : 'Enter the password you chose when you first set up Peers to unlock your identity and start the swarm.'}
                     </p>
                     <input
                         type="password"
@@ -599,6 +607,8 @@ export default function App() {
                     Object.entries(unread).some(([k, n]) => n > 0 && k.startsWith(`${id}/`))
                 }
                 you={me?.peerIdShort ?? 'y'}
+                youFull={me?.peerId ?? ''}
+                onCopyYou={copyMyId}
             />
             {dmOpen ? (
                 <div className="flex h-full w-[248px] flex-col bg-[#2b2d31]">
@@ -671,6 +681,7 @@ export default function App() {
                     onPromoteMember={(peerId, role) => void promoteMember(server.id, peerId, role)}
                     onExportSnapshot={() => void exportSnapshotUi(server.id)}
                     onImportSnapshot={() => void importSnapshotUi(server.id)}
+                    onCopyMyId={copyMyId}
                 />
             ) : (
                 <div className="flex h-full w-[248px] items-center justify-center bg-[#2b2d31] px-4 text-center text-xs text-[#949ba4]">
@@ -681,6 +692,8 @@ export default function App() {
                 channelName={paneName || '…'}
                 subtitle={dm ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}` : server ? `E2E encrypted · ${onlineCount}/${server.memberCount} online` : ''}
                 messages={paneMessages}
+                members={server?.members ?? []}
+                myPeerId={me?.peerId ?? ''}
                 onSend={send}
             />
             {notice && (

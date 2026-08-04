@@ -9,6 +9,16 @@ export interface PeerCard {
     sig: number[];
 }
 
+export interface SignedProfile {
+    version: number;
+    peerId: string;
+    pubkey: number[];
+    displayName: string;
+    about: string;
+    avatarHash: string | null;
+    sig: string;
+}
+
 export interface ChannelConfig {
     name: string;
     topic: string;
@@ -22,6 +32,7 @@ export interface Member {
     role: Role;
     joinedEpoch: number;
     card?: PeerCard;
+    profile?: SignedProfile;
 }
 
 export interface ServerView {
@@ -92,6 +103,8 @@ export interface UiMessage {
     time: string;
     text: string;
     mine: boolean;
+    /** True when this server message @-mentions our own peer id (a ping). */
+    mentionsMe?: boolean;
 }
 
 export const hasIdentity = () => invoke<boolean>("has_identity");
@@ -152,8 +165,55 @@ export const onPeerDisconnected = (cb: (peerId: string) => void) =>
 
 export const shortId = (id: string) => (id.length > 13 ? `${id.slice(0, 12)}…` : id);
 
+/** Copies `text` to the clipboard, falling back to a copyable prompt. */
+export async function copyText(text: string) {
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch {
+        window.prompt("Copy manually:", text);
+    }
+}
+
 export const peerName = (peerId: string, members: Member[]) =>
     members.find((m) => m.peerId === peerId)?.name ?? shortId(peerId);
+
+/** Display name for a member: signed profile name first, else server name. */
+export const memberName = (m: Member) =>
+    m.profile?.displayName && m.profile.displayName.trim() ? m.profile.displayName : m.name;
+
+/** A parsed @-mention in a message: the peer id and (if a member) the member. */
+export interface Mention {
+    start: number;
+    end: number;
+    peerId: string;
+    member?: Member;
+}
+
+const MENTION_RE = /@([0-9A-Za-z]{44,52})/g;
+
+/** Finds `@<peerId>` mentions in `text`, resolving each against `members`.
+ *  Mentions of non-members are still returned (peerId set, member undefined)
+ *  so the caller can render them as "not a ping". */
+export function parseMentions(text: string, members: Member[]): Mention[] {
+    const out: Mention[] = [];
+    const re = new RegExp(MENTION_RE.source, "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+        const peerId = m[1];
+        out.push({
+            start: m.index,
+            end: m.index + m[0].length,
+            peerId,
+            member: members.find((x) => x.peerId === peerId),
+        });
+    }
+    return out;
+}
+
+/** True if `text` mentions our own peer id (so we can flag pings). */
+export function mentionsMe(text: string, myPeerId: string): boolean {
+    return text.includes(`@${myPeerId}`);
+}
 
 export const colorFor = (s: string) => {
     const palette = ["#5865f2", "#23a55a", "#eb459e", "#f0b232", "#faa61a", "#b18cff", "#1abc9c", "#f23f43", "#3ba55d", "#e91e63"];
