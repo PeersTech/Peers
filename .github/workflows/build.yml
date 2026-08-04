@@ -14,11 +14,8 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            artifact: linux
           - platform: windows-latest
-            artifact: windows
           - platform: macos-latest
-            artifact: macos
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -52,10 +49,50 @@ jobs:
         with:
           projectPath: backend
 
-      - name: Upload artifacts
+      - name: Upload Linux .deb
+        if: matrix.platform == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
-          name: peers-${{ matrix.artifact }}
-          path: |
-            backend/target/release/bundle/**/*
+          name: peers-linux-deb
+          path: backend/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+      - name: Upload Linux .rpm
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: peers-linux-rpm
+          path: backend/target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+      - name: Upload Linux AppImage
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: peers-linux-appimage
+          path: backend/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+      - name: Upload Windows .msi
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: peers-windows-msi
+          path: backend/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+      - name: Upload Windows setup .exe
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: peers-windows-setup
+          path: backend/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Upload macOS .dmg
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: peers-macos-dmg
+          path: backend/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
