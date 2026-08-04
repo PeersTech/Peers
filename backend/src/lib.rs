@@ -1,7 +1,10 @@
 mod crypto;
 mod error;
+mod node;
 mod p2p;
 mod store;
+
+pub use node::run_headless;
 
 use crate::crypto::card::PeerCard;
 use crate::crypto::server::{
@@ -21,6 +24,25 @@ use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
+
+/// Gossip topic clients use to ask always-on relay nodes to mesh the topics
+/// they subscribe to. Mirrors `p2p::RELAY_CONTROL_TOPIC`.
+const RELAY_CONTROL_TOPIC: &str = "peers/v1/relay";
+
+/// Subscribes to a topic and asks any connected relay nodes to mesh it too,
+/// so our messages reach peers who only connect through them.
+async fn subscribe_with_relay(state: &AppState, topic: String) -> Result<(), String> {
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Subscribe(topic.clone())).await?;
+    let notice = serde_json::json!({ "op": "subscribe", "topic": topic });
+    let _ = node
+        .send(NodeCommand::Publish {
+            topic: RELAY_CONTROL_TOPIC.to_string(),
+            data: serde_json::to_vec(&notice).map_err(|e| e.to_string())?,
+        })
+        .await;
+    Ok(())
+}
 
 /// Shared app state. `node`/`identity`/`dir`/`servers`/`storage`/`history`
 /// exist only after a successful unlock; the keystore is always available.
@@ -162,19 +184,21 @@ async fn unlock(
 
     // Listen + bootstrap against the public IPFS testnet.
     let _ = handle.send(NodeCommand::Listen).await;
-    // Receive DMs addressed to us: our own peer id is our DM topic.
+    // The relay-control topic is how we register with (and reach) the
+    // always-on backbone nodes; we must subscribe to publish on it.
     let _ = handle
-        .send(NodeCommand::Subscribe(format!(
-            "peers/v1/ch/{}",
-            id.peer_id
-        )))
+        .send(NodeCommand::Subscribe(RELAY_CONTROL_TOPIC.to_string()))
         .await;
+    // Receive DMs addressed to us: our own peer id is our DM topic.
+    let _ = subscribe_with_relay(&state, format!("peers/v1/ch/{}", id.peer_id)).await;
     // Re-subscribe to every server control topic we know about.
     let records = state.servers.lock().unwrap().records();
     for rec in records {
-        let _ = handle
-            .send(NodeCommand::Subscribe(server_topic(&rec.id)))
-            .await;
+        let _ = subscribe_with_relay(&state, server_topic(&rec.id)).await;
+    }
+    // Dial any known always-on nodes so we reach peers we share no mesh with.
+    for ma in crate::p2p::bootstrap::known_nodes() {
+        let _ = handle.send(NodeCommand::Dial(ma)).await;
     }
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -288,8 +312,7 @@ async fn create_server(state: State<'_, AppState>, name: String) -> Result<Serve
         .lock()
         .unwrap()
         .create(id.clone(), name, me_str.clone(), card);
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Subscribe(server_topic(&id))).await?;
+    subscribe_with_relay(&state, server_topic(&id)).await?;
     publish_list(&state, &id).await?;
     persist(&state);
     state
@@ -342,7 +365,7 @@ async fn join_server(
     let rec = state.servers.lock().unwrap().join(&invite)?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     let topic = server_topic(&invite.payload.server_id);
-    node.send(NodeCommand::Subscribe(topic)).await?;
+    subscribe_with_relay(&state, topic.clone()).await?;
     // Dial the owner's advertised addresses so we get a direct connection
     // and the gossipsub mesh forms without waiting on DHT discovery.
     if let Ok(owner) = invite.payload.owner_peer.parse::<PeerId>() {
@@ -523,10 +546,7 @@ async fn subscribe_channel(
     server_id: String,
     channel: String,
 ) -> Result<(), String> {
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Subscribe(channel_topic(&server_id, &channel)))
-        .await?;
-    Ok(())
+    subscribe_with_relay(&state, channel_topic(&server_id, &channel)).await
 }
 
 #[tauri::command]
@@ -594,10 +614,7 @@ fn server_history(
 
 #[tauri::command]
 async fn subscribe(state: State<'_, AppState>, channel: String) -> Result<(), String> {
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    let topic = format!("peers/v1/ch/{channel}");
-    node.send(NodeCommand::Subscribe(topic)).await?;
-    Ok(())
+    subscribe_with_relay(&state, format!("peers/v1/ch/{channel}")).await
 }
 
 #[tauri::command]

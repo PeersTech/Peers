@@ -62,11 +62,25 @@ forms the backbone.
       connect through always-on nodes. Needed for international NAT traversal.
 - [ ] **M10 — DCUtR hole punching.** After relay rendezvous, upgrade to a direct
       connection where NATs allow — the backbone stays a light switchboard.
-- [ ] **M11 — Headless node mode (`--node`).** Run the Rust backend alone as a
-      routing/relay node with no GUI: tiny footprint, 24/7 on a Pi/VPS/old phone.
-- [ ] **M12 — Node bootstrap + capacity caps.** Clients connect to a short list
+- [ ] **M11 — Headless node mode (`--node`).** ~~Run the Rust backend alone as a
+      routing/relay node with no GUI: tiny footprint, 24/7 on a Pi/VPS/old phone.~~
+      **Done:** `peers --node` starts the backend with no webview — it listens, dials
+      known nodes, bootstraps the DHT, and relays gossip for any topic clients ask
+      it to. Identity is auto-generated and stored 0600 at `<config>/peers/node_identity.json`.
+- [~] **M12 — Node bootstrap + capacity caps.** ~~Clients connect to a short list
       of known nodes on startup; per-node concurrent-relay and bandwidth caps;
-      tiered relaying (clients relay only while idle/charging).
+      tiered relaying (clients relay only while idle/charging).~~
+      **Partial:** bootstrap is in — clients and nodes dial `PEERS_NODES`
+      (comma-separated multiaddrs) or `<config>/peers/nodes.json` on startup.
+      Capacity caps + tiered relaying still pending.
+
+### Relay mesh (how the backbone relays your chat)
+
+Clients publish a `{ "op": "subscribe", "topic": "<name>" }` notice on the shared
+`peers/v1/relay` topic whenever they join a server/channel/DM topic. Headless nodes
+(`--node`) listen on that topic and mesh anything they're asked to, so two NAT'd
+clients who both dial the same VPS node exchange chat through it. The control
+traffic is dropped by clients (only the node in relay mode acts on it).
 - [ ] **M13 — Deployment guide + public node list.** How to stand up a node on a
       cheap VPS/Pi, and the canonical node list clients bootstrap to.
 - [ ] **M14 — Custom profiles.** Global display name, profile picture and "about

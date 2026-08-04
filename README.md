@@ -157,8 +157,8 @@ Trigger a manual build or release anytime from the **Actions** tab.
 - [ ] **M8** — Friend codes: share/scan peer-ID code, DHT `find_peer`, direct dial
 - [ ] **M9** — Circuit Relay v2: NAT'd peers connect through always-on nodes
 - [ ] **M10** — DCUtR hole punching: upgrade relayed connections to direct P2P
-- [ ] **M11** — Headless node mode (`--node`): lightweight always-on routing node (Pi/VPS/old phone)
-- [ ] **M12** — Node bootstrap + capacity caps for low-end devices
+- [x] **M11** — Headless node mode (`--node`): run the backend as an always-on routing/relay node (Pi/VPS)
+- [~] **M12** — Node bootstrap (clients dial known nodes via `PEERS_NODES`/`nodes.json`; capacity caps pending)
 - [ ] **M13** — Deployment guide + public node list
 - [ ] **M14** — Custom profiles: signed display name, profile picture (DHT avatar), about me
 

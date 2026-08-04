@@ -17,10 +17,26 @@ use libp2p::{gossipsub, identify, kad, ping, Multiaddr, PeerId, Swarm, SwarmBuil
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{broadcast, mpsc};
 
+/// Gossip topic shared by relay nodes and clients. Clients publish tiny
+/// "please mesh topic X for me" notices on it so always-on relay nodes
+/// know which server/channel/DM topics they must subscribe to (and thus
+/// relay) for clients that only meet through them.
+pub const RELAY_CONTROL_TOPIC: &str = "peers/v1/relay";
+
+/// A relay-control notice: `{ "op": "subscribe", "topic": "<name>" }`.
+#[derive(serde::Deserialize)]
+struct RelayControl {
+    op: String,
+    topic: String,
+}
+
 /// Commands sent from the app layer into the swarm loop.
 #[derive(Debug)]
 pub enum NodeCommand {
-    /// Open listeners (TCP + QUIC) on all interfaces.
+    /// Turn the node into an always-on relay: subscribes to
+    /// [`RELAY_CONTROL_TOPIC`] and meshes any topic it's asked to relay.
+    Relay(bool),
+    /// Listen for connections on all interfaces.
     Listen,
     /// Dial bootstrap multiaddrs, seed the DHT routing table, bootstrap.
     Bootstrap(Vec<Multiaddr>),
@@ -154,6 +170,8 @@ struct Node {
     announced: HashSet<BlobHash>,
     /// Addresses learned from DHT routing updates + identify.
     peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Whether this node relays gossip for topics it's told about.
+    relay: bool,
     events: broadcast::Sender<NodeEvent>,
 }
 
@@ -172,6 +190,7 @@ impl Node {
             in_flight: HashSet::new(),
             announced: HashSet::new(),
             peer_addresses: HashMap::new(),
+            relay: false,
             events,
         };
 
@@ -195,6 +214,22 @@ impl Node {
 
     fn handle_command(&mut self, cmd: NodeCommand) {
         match cmd {
+            NodeCommand::Relay(on) => {
+                self.relay = on;
+                if on {
+                    let topic = Sha256Topic::new(RELAY_CONTROL_TOPIC.to_string());
+                    if self
+                        .swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .subscribe(&topic)
+                        .is_ok()
+                    {
+                        self.topics
+                            .insert(RELAY_CONTROL_TOPIC.to_string(), topic);
+                    }
+                }
+            }
             NodeCommand::Listen => {
                 for addr in ["/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"] {
                     match addr.parse::<Multiaddr>() {
@@ -360,8 +395,32 @@ impl Node {
                 }
                 _ => {}
             },
-            behaviour::Event::Gossipsub(gev) => {
-                if let gossipsub::Event::Message { message, .. } = gev {
+            behaviour::Event::Gossipsub(gev) => match gev {
+                gossipsub::Event::Message { message, .. } => {
+                    let control_hash =
+                        Sha256Topic::new(RELAY_CONTROL_TOPIC.to_string()).hash();
+                    // Relay nodes mesh any topic they're asked to relay, so
+                    // peers that only meet through them still gossip.
+                    if self.relay && message.topic == control_hash {
+                        if let Ok(ctrl) = serde_json::from_slice::<RelayControl>(&message.data) {
+                            if ctrl.op == "subscribe" && !ctrl.topic.is_empty() {
+                                let topic = Sha256Topic::new(ctrl.topic.clone());
+                                match self.swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+                                    Ok(_) => {
+                                        self.topics.insert(ctrl.topic.clone(), topic);
+                                    }
+                                    Err(e) => self.emit(NodeEvent::Error {
+                                        message: format!("relay subscribe {}: {e}", ctrl.topic),
+                                    }),
+                                }
+                            }
+                        }
+                    }
+                    // Relay control traffic is internal; never surface it as
+                    // a user message.
+                    if message.topic == control_hash {
+                        return;
+                    }
                     if let Some(from) = message.source {
                         self.emit(NodeEvent::Message {
                             topic: message.topic.to_string(),
@@ -370,7 +429,8 @@ impl Node {
                         });
                     }
                 }
-            }
+                _ => {}
+            },
             behaviour::Event::RequestResponse(rrev) => match *rrev {
                 RequestResponseEvent::Message { message, .. } => match message {
                     RequestResponseMessage::Request {
