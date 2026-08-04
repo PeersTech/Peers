@@ -6,10 +6,10 @@ mod store;
 
 pub use node::run_headless;
 
-use crate::crypto::card::PeerCard;
+use crate::crypto::card::{PeerCard, SignedProfile};
 use crate::crypto::server::{
-    channel_topic, new_server_id, server_topic, ChannelConfig, Invite, JoinNotice, Member, Role,
-    ServerDir, ServerRecord, ServerView, SignedList, SignedMessage, Snapshot,
+    channel_topic, new_server_id, server_topic, ChannelConfig, Invite, JoinNotice, Member,
+    ProfileNotice, Role, ServerDir, ServerRecord, ServerView, SignedList, SignedMessage, Snapshot,
 };
 use crate::crypto::{Identity, Keystore, SessionDir};
 use crate::error::PeersError;
@@ -19,7 +19,7 @@ use crate::store::{
 };
 use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -60,6 +60,10 @@ pub struct AppState {
     /// Our own listen multiaddrs, learned from node `Listening` events.
     /// Shared in invites so other peers can dial us directly.
     addrs: Mutex<Vec<String>>,
+    /// Our own signed display profile (name/about/avatar).
+    profile: Mutex<Option<SignedProfile>>,
+    /// Cached, verified display profiles of peers we've met (peer id → profile).
+    profiles: Mutex<HashMap<String, SignedProfile>>,
 }
 
 impl Default for AppState {
@@ -75,6 +79,8 @@ impl Default for AppState {
             history: Mutex::new(History::default()),
             presence: Mutex::new(HashSet::new()),
             addrs: Mutex::new(Vec::new()),
+            profile: Mutex::new(None),
+            profiles: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -85,6 +91,10 @@ struct IdentityInfo {
     peer_id: String,
     peer_id_short: String,
     fingerprint: String,
+    /// The auto-generated fun display name this identity would get by
+    /// default (e.g. "JuicyPear"), so the UI can show it before any profile
+    /// is set.
+    default_name: String,
 }
 
 fn info_for(id: &Identity) -> Result<IdentityInfo, PeersError> {
@@ -92,6 +102,7 @@ fn info_for(id: &Identity) -> Result<IdentityInfo, PeersError> {
         peer_id: id.peer_id.to_string(),
         peer_id_short: id.peer_id_short(),
         fingerprint: id.fingerprint()?,
+        default_name: crate::crypto::card::default_display_name(&id.peer_id),
     })
 }
 
@@ -152,6 +163,7 @@ async fn unlock(
     *state.node.lock().unwrap() = Some(handle.clone());
     *state.storage.lock().unwrap() = Some(store_handle);
     *state.history.lock().unwrap() = history;
+    *state.profile.lock().unwrap() = persisted.profile.clone();
 
     // Relay node events to the frontend and track presence.
     let mut rx = handle.subscribe();
@@ -218,12 +230,14 @@ fn persist(state: &AppState) {
         let servers = state.servers.lock().unwrap();
         let dir = state.dir.lock().unwrap();
         let history = state.history.lock().unwrap();
+        let profile = state.profile.lock().unwrap();
         let servers: Vec<_> = servers.records().iter().map(|r| r.to_persisted()).collect();
         match dir.as_ref() {
-            Some(dir) => state_from(dir, &servers, &history),
+            Some(dir) => state_from(dir, &servers, &history, &profile),
             None => PersistedState {
                 servers,
                 history: history.clone(),
+                profile: profile.clone(),
                 ..PersistedState::default()
             },
         }
@@ -241,6 +255,8 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.identity.lock().unwrap() = None;
     *state.history.lock().unwrap() = History::default();
     *state.presence.lock().unwrap() = HashSet::new();
+    *state.profile.lock().unwrap() = None;
+    *state.profiles.lock().unwrap() = HashMap::new();
     Ok(())
 }
 
@@ -380,12 +396,14 @@ async fn join_server(
     // join, so the owner is guaranteed to receive the notice via gossip.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     let card = PeerCard::sign(&me)?;
+    let profile = state.profile.lock().unwrap().clone();
     let notice = JoinNotice::new(
         &invite.payload.server_id,
         &me_str,
         &name,
         invite.payload.nonce,
         card,
+        profile,
     );
     let data = serde_json::to_vec(&notice).map_err(|e| e.to_string())?;
     node.send(NodeCommand::Publish {
@@ -408,6 +426,7 @@ async fn add_member(
 ) -> Result<ServerView, String> {
     let role: Role = serde_json::from_str(&format!("\"{role}\""))
         .map_err(|_| format!("invalid role: {role}"))?;
+    let profile = state.profiles.lock().unwrap().get(&peer_id).cloned();
     mutate_server(&state, &server_id, move |rec| {
         if rec.members.iter().any(|m| m.peer_id == peer_id) {
             return Err(PeersError::AlreadyMember.into());
@@ -419,6 +438,7 @@ async fn add_member(
             role,
             joined_epoch: epoch,
             card,
+            profile,
         });
         Ok(())
     })
@@ -737,11 +757,77 @@ async fn import_snapshot(
     Ok(imported)
 }
 
+/// Sets (and signs) our display profile: name, about and optional avatar
+/// blob hash. The profile is persisted, folded into the signed lists of any
+/// servers we own, and announced on every server we belong to so contacts
+/// learn it without extra round-trips.
+#[tauri::command]
+async fn set_profile(
+    state: State<'_, AppState>,
+    display_name: String,
+    about: String,
+    avatar_hash: Option<String>,
+) -> Result<SignedProfile, String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    let me = identity.peer_id.to_string();
+    let profile = SignedProfile::sign(&identity, &display_name, &about, avatar_hash)?;
+    *state.profile.lock().unwrap() = Some(profile.clone());
+
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    // Fold into signed lists of servers we own (everyone learns it with the
+    // next list), and notify owners of servers we merely belong to.
+    let records = state.servers.lock().unwrap().records();
+    for rec in &records {
+        if rec.owner_peer == me {
+            {
+                let mut servers = state.servers.lock().unwrap();
+                if let Some(r) = servers.get_mut(&rec.id) {
+                    if let Some(m) = r.members.iter_mut().find(|m| m.peer_id == me) {
+                        m.profile = Some(profile.clone());
+                    }
+                }
+            }
+            publish_list(&state, &rec.id).await?;
+        } else {
+            let notice = serde_json::to_vec(&ProfileNotice::new(
+                &rec.id,
+                &me,
+                profile.clone(),
+            ))
+            .map_err(|e| e.to_string())?;
+            let _ = node
+                .send(NodeCommand::Publish {
+                    topic: server_topic(&rec.id),
+                    data: notice,
+                })
+                .await;
+        }
+    }
+    persist(&state);
+    Ok(profile)
+}
+
+/// Our own signed profile, if one has been set.
+#[tauri::command]
+fn get_profile(state: State<'_, AppState>) -> Result<Option<SignedProfile>, String> {
+    Ok(state.profile.lock().unwrap().clone())
+}
+
+/// Verified display profiles we've learned for other peers (peer id → profile).
+#[tauri::command]
+fn contact_profiles(state: State<'_, AppState>) -> Result<HashMap<String, SignedProfile>, String> {
+    Ok(state.profiles.lock().unwrap().clone())
+}
+
 /// Parks bytes (sealed envelope or media chunk) and announces them on the
 /// DHT so other peers can fetch them while we're offline.
 #[tauri::command]
-async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, String> {
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, String> {    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::ParkBlob(data)).await?;
     Ok("queued".into())
 }
@@ -795,6 +881,9 @@ pub fn run() {
             server_history,
             dm_history,
             online_peers,
+            set_profile,
+            get_profile,
+            contact_profiles,
             export_snapshot,
             import_snapshot,
         ])
@@ -857,10 +946,11 @@ pub fn run() {
                         let server_id = server_id.to_string();
                         if let Ok(list) = serde_json::from_slice::<SignedList>(&data) {
                             let state = app_handle.state::<AppState>();
-                            let (cards, view) = {
+                            let (cards, profiles, view) = {
                                 let me = state.identity.lock().unwrap().clone();
                                 let mut servers = state.servers.lock().unwrap();
                                 let mut cards = Vec::new();
+                                let mut profiles = Vec::new();
                                 let view = match servers.get_mut(&server_id) {
                                     Some(rec) => match rec.verify_list(&list) {
                                         Ok(()) => {
@@ -874,6 +964,14 @@ pub fn run() {
                                                     m.card.clone().map(|c| (m.peer_id.clone(), c))
                                                 })
                                                 .collect();
+                                            // ...and every verified profile too.
+                                            for m in &list.payload.members {
+                                                if let Some(p) = &m.profile {
+                                                    if p.verify().is_ok() && p.peer_id == m.peer_id {
+                                                        profiles.push((m.peer_id.clone(), p.clone()));
+                                                    }
+                                                }
+                                            }
                                             me.map(|id| {
                                                 ServerView::from_record(
                                                     rec,
@@ -894,11 +992,17 @@ pub fn run() {
                                     },
                                     None => None,
                                 };
-                                (cards, view)
+                                (cards, profiles, view)
                             };
                             if let Some(dir) = state.dir.lock().unwrap().as_mut() {
                                 for (peer, card) in cards {
                                     dir.remember_contact(&peer, &card);
+                                }
+                            }
+                            {
+                                let mut cache = state.profiles.lock().unwrap();
+                                for (peer, profile) in profiles {
+                                    cache.insert(peer, profile);
                                 }
                             }
                             if view.is_some() {
@@ -914,6 +1018,15 @@ pub fn run() {
                             if let Some(dir) = state.dir.lock().unwrap().as_mut() {
                                 dir.remember_contact(&notice.peer_id, &notice.card);
                             }
+                            if let Some(profile) = &notice.profile {
+                                if profile.verify().is_ok() && profile.peer_id == notice.peer_id {
+                                    state
+                                        .profiles
+                                        .lock()
+                                        .unwrap()
+                                        .insert(notice.peer_id.clone(), profile.clone());
+                                }
+                            }
                             persist(&state);
                             let is_owner = {
                                 let me = state.identity.lock().unwrap().clone();
@@ -927,6 +1040,43 @@ pub fn run() {
                             };
                             if is_owner {
                                 let _ = app_handle.emit("server://join-request", notice);
+                            }
+                        } else if let Ok(pn) = serde_json::from_slice::<ProfileNotice>(&data) {
+                            let state = app_handle.state::<AppState>();
+                            if pn.profile.verify().is_ok() && pn.profile.peer_id == pn.peer_id {
+                                state
+                                    .profiles
+                                    .lock()
+                                    .unwrap()
+                                    .insert(pn.peer_id.clone(), pn.profile.clone());
+                                // If we own this server, fold the profile into the
+                                // signed list so everyone learns it, and persist.
+                                let me = state.identity.lock().unwrap().clone();
+                                let owned = {
+                                    let servers = state.servers.lock().unwrap();
+                                    match (me, servers.get(&pn.server_id)) {
+                                        (Some(me), Some(rec)) => {
+                                            rec.owner_peer == me.peer_id.to_string()
+                                        }
+                                        _ => false,
+                                    }
+                                };
+                                if owned {
+                                    {
+                                        let mut servers = state.servers.lock().unwrap();
+                                        if let Some(rec) = servers.get_mut(&pn.server_id) {
+                                            if let Some(m) = rec
+                                                .members
+                                                .iter_mut()
+                                                .find(|m| m.peer_id == pn.peer_id)
+                                            {
+                                                m.profile = Some(pn.profile.clone());
+                                            }
+                                        }
+                                    }
+                                    persist(&state);
+                                    let _ = publish_list(&state, &pn.server_id).await;
+                                }
                             }
                         }
                         return;

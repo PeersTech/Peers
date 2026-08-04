@@ -11,7 +11,7 @@
 //! that will sign the next list), so a joiner can anchor its trust and
 //! start verifying lists immediately.
 
-use crate::crypto::card::PeerCard;
+use crate::crypto::card::{PeerCard, SignedProfile};
 use crate::error::{PeersError, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use libp2p::identity::{ed25519, Keypair};
@@ -39,7 +39,12 @@ pub struct Member {
     pub joined_epoch: u64,
     /// Validated identity card, if the owner has one for this member.
     /// Riding inside the signed list doubles as the DM key exchange.
+    #[serde(default)]
     pub card: Option<PeerCard>,
+    /// The member's signed display profile (name/about/avatar), if known.
+    /// Kept inside the signed list so everyone learns it with the list.
+    #[serde(default)]
+    pub profile: Option<SignedProfile>,
 }
 
 /// A channel plus its ACL (minimum roles to read / write).
@@ -461,6 +466,7 @@ impl ServerRecord {
             role: Role::Owner,
             joined_epoch: 0,
             card: Some(owner_card),
+            profile: None,
         }];
         let channels = vec![ChannelConfig {
             name: "general".to_string(),
@@ -610,6 +616,10 @@ pub struct JoinNotice {
     /// The joiner's identity card, so the owner can accept and every
     /// member can start an E2E DM with them immediately.
     pub card: PeerCard,
+    /// The joiner's signed display profile, so members can show a real
+    /// name/avatar right away.
+    #[serde(default)]
+    pub profile: Option<SignedProfile>,
 }
 
 impl JoinNotice {
@@ -621,6 +631,7 @@ impl JoinNotice {
         name: &str,
         nonce: [u8; 16],
         card: PeerCard,
+        profile: Option<SignedProfile>,
     ) -> Self {
         Self {
             kind: Self::KIND.to_string(),
@@ -629,7 +640,123 @@ impl JoinNotice {
             name: name.to_string(),
             nonce,
             card,
+            profile,
         }
+    }
+}
+
+/// Plaintext notice a member publishes on the server topic when their
+/// profile changes, so the owner (and other members) can cache it; the
+/// owner folds it back into the next signed list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileNotice {
+    pub kind: String,
+    pub server_id: String,
+    pub peer_id: String,
+    pub profile: SignedProfile,
+}
+
+impl ProfileNotice {
+    pub const KIND: &'static str = "profile";
+
+    pub fn new(server_id: &str, peer_id: &str, profile: SignedProfile) -> Self {
+        Self {
+            kind: Self::KIND.to_string(),
+            server_id: server_id.to_string(),
+            peer_id: peer_id.to_string(),
+            profile,
+        }
+    }
+}
+
+/// The global community topic every peer auto-joins. Self-signed messages
+/// only — no owner, no ACL. Membership ("who's here") is derived from the
+/// verified profiles seen on it.
+pub const PLAZA_TOPIC: &str = "peers/v1/plaza";
+
+/// A self-signed message on the Plaza. `kind = "profile"` carries the
+/// sender's [`SignedProfile`] (announcing who they are / that they're here);
+/// `kind = "chat"` is a community chat message. Anyone can verify authorship
+/// from the embedded pubkey + signature; there is no server membership to
+/// check.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlazaMessage {
+    pub version: u8,
+    pub kind: String,
+    pub from: String,
+    /// Ed25519 public key of the sender, 32 bytes.
+    pub pubkey: [u8; 32],
+    pub ts: u64,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub profile: Option<SignedProfile>,
+    pub sig: String,
+}
+
+impl PlazaMessage {
+    pub const KIND_CHAT: &'static str = "chat";
+    pub const KIND_PROFILE: &'static str = "profile";
+
+    pub fn sign(
+        keypair: &Keypair,
+        kind: &str,
+        text: &str,
+        profile: Option<SignedProfile>,
+    ) -> Result<Self> {
+        let mut msg = Self {
+            version: 1,
+            kind: kind.to_string(),
+            from: libp2p::PeerId::from(keypair.public()).to_string(),
+            pubkey: keypair
+                .public()
+                .clone()
+                .try_into_ed25519()
+                .map_err(|_| PeersError::Identity("expected ed25519 key".into()))?
+                .to_bytes(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            text: text.to_string(),
+            profile,
+            sig: String::new(),
+        };
+        let bytes = serde_json::to_vec(&msg).map_err(PeersError::Serde)?;
+        let sig = keypair
+            .sign(&bytes)
+            .map_err(|e| PeersError::Crypto(format!("plaza sign: {e}")))?;
+        msg.sig = B64.encode(sig);
+        Ok(msg)
+    }
+
+    /// Verifies the signature and that the embedded key matches `from`'s
+    /// peer id. If a profile rides along, it must verify and match too.
+    pub fn verify(&self) -> Result<()> {
+        let pk = ed25519::PublicKey::try_from_bytes(&self.pubkey)
+            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        let mut copy = self.clone();
+        let sig = B64
+            .decode(&copy.sig)
+            .map_err(|_| PeersError::SnapshotCorrupt)?;
+        copy.sig.clear();
+        let bytes = serde_json::to_vec(&copy).map_err(PeersError::Serde)?;
+        if !pk.verify(&bytes, &sig) {
+            return Err(PeersError::SnapshotCorrupt);
+        }
+        let from = libp2p::PeerId::from_public_key(&pk.into());
+        if from.to_string() != self.from {
+            return Err(PeersError::SnapshotCorrupt);
+        }
+        if let Some(profile) = &self.profile {
+            profile.verify()?;
+            if profile.peer_id != self.from {
+                return Err(PeersError::SnapshotCorrupt);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -778,6 +905,7 @@ mod tests {
             role: Role::Member,
             joined_epoch: 1,
             card: None,
+            profile: None,
         });
         owner.channels.push(ChannelConfig {
             name: "admin-only".to_string(),
@@ -807,6 +935,7 @@ mod tests {
             role: Role::Member,
             joined_epoch: 1,
             card: None,
+            profile: None,
         });
         let msg = SignedMessage::sign(&keypair, &owner.id, "general", "hello").unwrap();
         assert!(msg.verify(&owner).is_ok());

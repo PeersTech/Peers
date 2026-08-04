@@ -2,6 +2,7 @@ use crate::crypto::cipher::{open, seal};
 use crate::crypto::identity::Identity;
 use crate::crypto::session::Session;
 use crate::error::{PeersError, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -60,6 +61,100 @@ impl PeerCard {
             .map_err(|e| PeersError::Crypto(format!("card pubkey: {e}")))?;
         if !pk.verify(&sign_message(&self.x25519_pub), &self.sig) {
             return Err(PeersError::Crypto("card signature invalid".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Self-authenticating display profile: a display name, an "about" line and
+/// an optional avatar blob hash, all signed by the identity so they can't be
+/// impersonated. Rides alongside the peer card wherever contacts are
+/// exchanged (member lists, join notices, profile notices).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedProfile {
+    pub version: u8,
+    pub peer_id: String,
+    /// Ed25519 public key of the identity, 32 bytes.
+    pub pubkey: [u8; 32],
+    pub display_name: String,
+    #[serde(default)]
+    pub about: String,
+    /// Hex DHT blob hash of the avatar image, if any.
+    #[serde(default)]
+    pub avatar_hash: Option<String>,
+    /// base64 Ed25519 signature over every field except `sig`.
+    pub sig: String,
+}
+
+/// Stable, playful auto-generated display name (e.g. "JuicyPear") seeded
+/// from the peer id, so every identity has a fun default without needing to
+/// persist it.
+pub fn default_display_name(peer_id: &libp2p::PeerId) -> String {
+    const ADJS: [&str; 12] = [
+        "Juicy", "Cosmic", "Turbo", "Silky", "Crispy", "Golden", "Mellow", "Fuzzy", "Swift",
+        "Velvet", "Spicy", "Breezy",
+    ];
+    const NOUNS: [&str; 12] = [
+        "Pear", "Comet", "Duck", "Ghost", "Taco", "Beetle", "Cloud", "Fox", "Cactus", "Orbit",
+        "Llama", "Waffle",
+    ];
+    let bytes = peer_id.as_ref();
+    let a = bytes[bytes.len() - 1] as usize % ADJS.len();
+    let n = bytes[0] as usize % NOUNS.len();
+    format!("{}{}", ADJS[a], NOUNS[n])
+}
+
+impl SignedProfile {
+    /// Signs a profile with the identity. Empty display name falls back to
+    /// a stable, playful auto-generated name (e.g. "JuicyPear") seeded from
+    /// the peer id, so every identity has a fun default.
+    pub fn sign(
+        identity: &Identity,
+        display_name: &str,
+        about: &str,
+        avatar_hash: Option<String>,
+    ) -> Result<Self> {
+        let display_name = display_name.trim().to_string();
+        let display_name = if display_name.is_empty() {
+            default_display_name(&identity.peer_id)
+        } else {
+            display_name
+        };
+        let mut p = Self {
+            version: 1,
+            peer_id: identity.peer_id.to_string(),
+            pubkey: identity.ed25519_public()?,
+            display_name,
+            about: about.trim().to_string(),
+            avatar_hash,
+            sig: String::new(),
+        };
+        let bytes = serde_json::to_vec(&p).map_err(PeersError::Serde)?;
+        let sig = identity
+            .keypair
+            .sign(&bytes)
+            .map_err(|e| PeersError::Crypto(format!("profile sign: {e}")))?;
+        p.sig = B64.encode(sig);
+        Ok(p)
+    }
+
+    /// Verifies the signature and that it's bound to `peer_id`.
+    pub fn verify(&self) -> Result<()> {
+        let pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&self.pubkey)
+            .map_err(|e| PeersError::Crypto(format!("profile pubkey: {e}")))?;
+        let mut copy = self.clone();
+        let sig = B64
+            .decode(&copy.sig)
+            .map_err(|_| PeersError::Crypto("profile sig not base64".into()))?;
+        copy.sig.clear();
+        let bytes = serde_json::to_vec(&copy).map_err(PeersError::Serde)?;
+        if !pk.verify(&bytes, &sig) {
+            return Err(PeersError::Crypto("profile signature invalid".into()));
+        }
+        let from = libp2p::PeerId::from_public_key(&pk.into());
+        if from.to_string() != self.peer_id {
+            return Err(PeersError::Crypto("profile peer id mismatch".into()));
         }
         Ok(())
     }
@@ -270,6 +365,50 @@ mod tests {
         let (a, _b) = pair();
         let card = PeerCard::sign(&a).unwrap();
         card.verify().unwrap();
+    }
+
+    #[test]
+    fn profile_signs_and_verifies() {
+        let (a, _b) = pair();
+        let p = SignedProfile::sign(&a, "JuicyPear", "hello world", None).unwrap();
+        p.verify().unwrap();
+        assert_eq!(p.peer_id, a.peer_id.to_string());
+        assert_eq!(p.display_name, "JuicyPear");
+        assert_eq!(p.about, "hello world");
+    }
+
+    #[test]
+    fn profile_empty_name_gets_fun_default() {
+        let (a, _b) = pair();
+        let p = SignedProfile::sign(&a, "   ", "", None).unwrap();
+        assert!(!p.display_name.is_empty());
+        assert_ne!(p.display_name, a.peer_id.to_string());
+        p.verify().unwrap();
+    }
+
+    #[test]
+    fn tampered_profile_rejected() {
+        let (a, _b) = pair();
+        let mut p = SignedProfile::sign(&a, "JuicyPear", "about", None).unwrap();
+        p.about = "rewritten".to_string();
+        assert!(p.verify().is_err());
+    }
+
+    #[test]
+    fn profile_bound_to_peer_id() {
+        let (a, b) = pair();
+        let mut p = SignedProfile::sign(&a, "JuicyPear", "", None).unwrap();
+        p.peer_id = b.peer_id.to_string();
+        assert!(p.verify().is_err());
+    }
+
+    #[test]
+    fn fun_default_name_is_stable() {
+        let (a, _b) = pair();
+        assert_eq!(
+            default_display_name(&a.peer_id),
+            default_display_name(&a.peer_id)
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! plaintext. The salt lives in the state file itself; a fresh salt is
 //! minted on first unlock.
 
-use crate::crypto::card::SessionDir;
+use crate::crypto::card::{SessionDir, SignedProfile};
 use crate::crypto::server::{PersistedServer, SignedMessage};
 use crate::error::{PeersError, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -87,6 +87,10 @@ pub struct PersistedState {
     pub contacts: Vec<(String, Vec<u8>)>,
     pub servers: Vec<PersistedServer>,
     pub history: History,
+    /// Our own signed display profile, so name/avatar/about survive a
+    /// restart without re-signing.
+    #[serde(default)]
+    pub profile: Option<SignedProfile>,
 }
 
 /// The file on disk: version + salt + one sealed payload.
@@ -231,12 +235,13 @@ fn decode(s: &str) -> Result<Vec<u8>> {
         .map_err(|e| PeersError::Keystore(format!("decode base64: {e}")))
 }
 
-/// Convenience: export the whole `SessionDir` + servers + history into a
-/// [`PersistedState`] and back.
+/// Convenience: export the whole `SessionDir` + servers + history + own
+/// profile into a [`PersistedState`] and back.
 pub fn state_from(
     dir: &SessionDir,
     servers: &[PersistedServer],
     history: &History,
+    profile: &Option<SignedProfile>,
 ) -> PersistedState {
     let (sessions, contacts) = dir.export();
     PersistedState {
@@ -244,6 +249,7 @@ pub fn state_from(
         contacts,
         servers: servers.to_vec(),
         history: history.clone(),
+        profile: profile.clone(),
     }
 }
 
