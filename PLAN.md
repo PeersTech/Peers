@@ -83,11 +83,34 @@ clients who both dial the same VPS node exchange chat through it. The control
 traffic is dropped by clients (only the node in relay mode acts on it).
 - [ ] **M13 — Deployment guide + public node list.** How to stand up a node on a
       cheap VPS/Pi, and the canonical node list clients bootstrap to.
-- [ ] **M14 — Custom profiles.** Global display name, profile picture and "about
+- [~] **M14 — Custom profiles.** ~~Global display name, profile picture and "about
       me", all signed by the identity so they can't be impersonated. Profile
       rides alongside the peer card (member lists, join notices, DM envelopes);
       avatars are parked as DHT blobs and fetched by hash. Editable from a
-      settings screen in the UI.
+      settings screen in the UI.~~
+      **In progress:** `SignedProfile` (display name/about/avatar) rides member
+      lists, join notices + profile notices; fun auto-names (JuicyPear); profile
+      cached per contact.
+- [ ] **M15 — The Plaza.** A global auto-joined channel every peer subscribes to
+      (no invites, can't leave). Self-signed chat + profiles; "who's here" =
+      verified profiles + connected peers. A community for discovery, not a
+      directory.
+- [ ] **M16 — Seed-phrase login.** The login passphrase IS the private key: 8–11
+      diceware words (or the private key hex) → 32 bytes → Ed25519 + X25519 keys
+      derived deterministically (wallet-style). Lost phrase = lost identity.
+- [ ] **M17 — Friend codes (peer-id sharing).** Share your peer id as a short
+      code / QR; add a friend by code → DHT `find_peer` → dial → mutual accept.
+      No usernames, no registry.
+
+## Identity, Plaza & usernames — finalized design
+
+Decided: **no usernames.** The peer id IS the handle. Fun auto-names (JuicyPear)
+and avatars are cosmetic display only (signed, un-impersonable). Adding a friend
+= share your peer-id code/QR out-of-band (like a phone number), then mutual
+accept. At 100–400k users this works because you already know the person you're
+adding — the Plaza handles *discovery* of new people, never *lookup* of a
+specific friend. Passphrase-is-the-key login; best-effort nothing, because there
+is nothing unique to enforce.
 
 ## Profile system design (M14)
 
