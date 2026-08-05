@@ -16,6 +16,10 @@ const KDF_THREADS: u32 = 4;
 const KDF_KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 
+/// Keystore format version. v1 (random key, password-sealed) is refused: its
+/// identity was never derived from a phrase, so no phrase can recover it.
+const VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 struct KdfParams {
     name: String,
@@ -33,8 +37,12 @@ struct KeystoreFile {
     sealed: String,
 }
 
-/// Stores the identity sealed with a password-derived key (Argon2id →
+/// Stores the identity sealed with a phrase-derived key (Argon2id →
 /// XChaCha20-Poly1305). The plaintext identity never touches disk.
+///
+/// Since M16 the keystore is a *cache*, not the source of truth: the recovery
+/// phrase both seals the file and derives the identity inside it, so deleting
+/// the file is recoverable and losing the phrase is not.
 pub struct Keystore {
     pub path: PathBuf,
 }
@@ -50,17 +58,20 @@ impl Keystore {
         base.join("peers").join("identity.json")
     }
 
-    /// Generates a new identity and seals it with the password.
-    pub fn create(&self, password: &str) -> Result<Identity> {
-        let id = Identity::new()?;
+    /// Derives the identity from `phrase` and seals it with that same phrase.
+    /// Idempotent: one phrase always yields one identity, so calling this
+    /// again after the file is lost recovers the original peer ID.
+    pub fn create_from_phrase(&self, phrase: &str) -> Result<Identity> {
+        let entropy = crate::crypto::mnemonic::decode(phrase)?;
+        let id = Identity::from_entropy(&entropy)?;
         let blob = id.marshal()?;
-        self.seal(&blob, password)?;
+        self.seal(&blob, phrase)?;
         Ok(id)
     }
 
-    /// Restores the identity if the password is correct.
-    pub fn load(&self, password: &str) -> Result<Identity> {
-        let blob = self.open(password)?;
+    /// Restores the identity if the phrase is correct.
+    pub fn load(&self, phrase: &str) -> Result<Identity> {
+        let blob = self.open(phrase)?;
         Identity::unmarshal(&blob)
     }
 
@@ -88,7 +99,7 @@ impl Keystore {
             .map_err(|e| PeersError::Keystore(format!("encrypt: {e}")))?;
 
         let file = KeystoreFile {
-            version: 1,
+            version: VERSION,
             kdf: KdfParams {
                 name: KDF_NAME.into(),
                 salt: base64_encode(&salt),
@@ -118,6 +129,15 @@ impl Keystore {
         }
         let data = fs::read(&self.path)?;
         let file: KeystoreFile = serde_json::from_slice(&data)?;
+        if file.version < VERSION {
+            return Err(PeersError::StaleKeystore);
+        }
+        if file.version > VERSION {
+            return Err(PeersError::Keystore(format!(
+                "keystore version {} is newer than this build supports",
+                file.version
+            )));
+        }
         if file.kdf.name != KDF_NAME {
             return Err(PeersError::Keystore(format!(
                 "unsupported kdf {}",
@@ -165,21 +185,23 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::mnemonic;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("peers-ks-{}-{}", tag, std::process::id()))
+            .join("identity.json")
+    }
 
     #[test]
     fn create_load_round_trip() {
-        let dir = std::env::temp_dir().join(format!("peers-keystore-test-{}", std::process::id()));
-        let path = dir.join("identity.json");
+        let path = temp_path("roundtrip");
         let ks = Keystore::new(path.clone());
-        let id = ks.create("correct horse battery staple").unwrap();
+        let phrase = mnemonic::generate(12).unwrap();
+        let id = ks.create_from_phrase(&phrase).unwrap();
 
-        let loaded = ks.load("correct horse battery staple").unwrap();
+        let loaded = ks.load(&phrase).unwrap();
         assert_eq!(loaded.peer_id, id.peer_id);
-
-        assert!(matches!(
-            ks.load("wrong password"),
-            Err(PeersError::BadPassword)
-        ));
 
         #[cfg(unix)]
         {
@@ -196,7 +218,87 @@ mod tests {
             "x25519 secret leaked"
         );
 
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn phrase_seals_and_reopens() {
+        let path = temp_path("phrase");
+        let ks = Keystore::new(path.clone());
+        let phrase = mnemonic::generate(12).unwrap();
+
+        let created = ks.create_from_phrase(&phrase).unwrap();
+        let loaded = ks.load(&phrase).unwrap();
+        assert_eq!(loaded.peer_id, created.peer_id);
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn wrong_phrase_rejected() {
+        let path = temp_path("wrongphrase");
+        let ks = Keystore::new(path.clone());
+        ks.create_from_phrase(&mnemonic::generate(12).unwrap())
+            .unwrap();
+
+        let other = mnemonic::generate(12).unwrap();
+        assert!(matches!(ks.load(&other), Err(PeersError::BadPassword)));
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The whole point of M16: delete the keystore, keep the phrase, and the
+    /// same peer ID comes back.
+    #[test]
+    fn identity_is_recoverable_without_the_file() {
+        let path = temp_path("recover");
+        let ks = Keystore::new(path.clone());
+        let phrase = mnemonic::generate(12).unwrap();
+        let original = ks.create_from_phrase(&phrase).unwrap();
+
+        fs::remove_file(&path).unwrap();
+        assert!(!ks.exists());
+
+        let recovered = ks.create_from_phrase(&phrase).unwrap();
+        assert_eq!(recovered.peer_id, original.peer_id);
+        assert_eq!(
+            recovered.x25519_secret.to_bytes(),
+            original.x25519_secret.to_bytes()
+        );
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn version_1_keystore_is_refused() {
+        let path = temp_path("v1");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = r#"{"version":1,"kdf":{"name":"argon2id","salt":"AAAA","time":3,
+                         "memory":65536,"threads":4},"nonce":"AAAA","sealed":"AAAA"}"#;
+        fs::write(&path, legacy).unwrap();
+
+        let ks = Keystore::new(path.clone());
+        assert!(matches!(ks.load("anything"), Err(PeersError::StaleKeystore)));
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn file_never_contains_the_phrase() {
+        let path = temp_path("leak");
+        let ks = Keystore::new(path.clone());
+        let phrase = mnemonic::generate(12).unwrap();
+        ks.create_from_phrase(&phrase).unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        for word in phrase.split_whitespace() {
+            assert!(
+                !raw.contains(word),
+                "phrase word leaked into keystore: {word}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

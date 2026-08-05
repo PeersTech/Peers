@@ -28,6 +28,21 @@ impl Identity {
         })
     }
 
+    /// Rebuilds the identity deterministically from mnemonic entropy. The same
+    /// phrase always yields the same peer ID, on any machine — this is what
+    /// makes the recovery phrase *be* the identity.
+    pub fn from_entropy(entropy: &[u8]) -> Result<Self> {
+        let (ed_seed, x_secret) = crate::crypto::seed::derive_keys(entropy)?;
+        let keypair = Keypair::ed25519_from_bytes(ed_seed)
+            .map_err(|e| PeersError::Identity(format!("ed25519 from seed: {e}")))?;
+        let peer_id = PeerId::from(keypair.public());
+        Ok(Self {
+            keypair,
+            x25519_secret: StaticSecret::from(x_secret),
+            peer_id,
+        })
+    }
+
     /// The X25519 public key (32 bytes).
     pub fn x25519_public(&self) -> [u8; 32] {
         XPublic::from(&self.x25519_secret).to_bytes()

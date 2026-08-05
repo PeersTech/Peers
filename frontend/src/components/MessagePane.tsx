@@ -1,11 +1,13 @@
-import {useMemo, useRef, useState, type KeyboardEvent} from "react";
+import {useEffect, useMemo, useRef, useState, type KeyboardEvent} from "react";
 import {
-    memberName, parseMentions, shortId, type Contact, type Mention, type UiMessage,
+    colorFor, memberName, parseMentions, shortId, type Contact, type Mention, type UiMessage,
 } from "../lib/api";
 
 interface Props {
     channelName: string;
     subtitle: string;
+    /** Hover text for the subtitle — used for network detail. */
+    subtitleTitle?: string;
     messages: UiMessage[];
     members: Contact[];
     myPeerId: string;
@@ -208,7 +210,7 @@ function MentionComposer({
                         >
                             <span
                                 className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-black"
-                                style={{background: hashColor(m.peerId)}}
+                                style={{background: colorFor(m.peerId)}}
                             >
                                 {memberName(m)[0].toUpperCase()}
                             </span>
@@ -222,33 +224,51 @@ function MentionComposer({
     );
 }
 
-function hashColor(s: string) {
-    const palette = ["#5865f2", "#23a55a", "#eb459e", "#f0b232", "#faa61a", "#b18cff", "#1abc9c", "#f23f43"];
-    let h = 0;
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-    return palette[h % palette.length];
-}
-
-export function MessagePane({channelName, subtitle, messages, members, myPeerId, onSend, avatarFor}: Props) {
+export function MessagePane({channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, avatarFor}: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
+    /** True when the user is parked at the bottom and wants to follow along.
+     *  Scrolling up to read history sets this false, so an incoming message
+     *  no longer yanks the view back down. */
+    const following = useRef(true);
 
-    // Scroll when messages change or the view swaps.
-    const [prevLen, setPrevLen] = useState(0);
-    if (messages.length !== prevLen) {
-        setPrevLen(messages.length);
-        setTimeout(() => scrollRef.current?.scrollTo({top: scrollRef.current.scrollHeight}), 0);
-    }
-    useEffectScroll(scrollRef);
+    const onScroll = () => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const slack = el.scrollHeight - el.scrollTop - el.clientHeight;
+        following.current = slack < 80;
+    };
+
+    // Follow new messages, and always jump to the bottom when the view swaps.
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (!el || !following.current) return;
+        el.scrollTo({top: el.scrollHeight});
+    }, [messages.length, channelName]);
+
+    useEffect(() => {
+        following.current = true;
+        const el = scrollRef.current;
+        el?.scrollTo({top: el.scrollHeight});
+    }, [channelName]);
 
     return (
         <div className="flex h-full flex-1 flex-col bg-[#313338]">
             <div className="flex h-12 shrink-0 items-center gap-2 border-b border-[#26272c] px-4 shadow-sm">
                 <span className="text-lg leading-none text-[#949ba4]">#</span>
                 <span className="font-semibold text-[#f2f3f5]">{channelName}</span>
-                <span className="ml-auto text-xs text-[#80848e]">{subtitle}</span>
+                <span
+                    className="ml-auto whitespace-pre-line text-xs text-[#80848e]"
+                    title={subtitleTitle}
+                >
+                    {subtitle}
+                </span>
             </div>
 
-            <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
+            <div
+                ref={scrollRef}
+                onScroll={onScroll}
+                className="flex-1 overflow-y-auto px-4 py-3"
+            >
                 {messages.map((m, i) => {
                     const firstInBlock = i === 0 || messages[i - 1].author !== m.author;
                     const mine = m.mine;
@@ -311,10 +331,4 @@ export function MessagePane({channelName, subtitle, messages, members, myPeerId,
             <MentionComposer members={members} onSend={onSend} placeholder={`Message #${channelName}`}/>
         </div>
     );
-}
-
-function useEffectScroll(ref: {current: HTMLDivElement | null}) {
-    useMemo(() => {
-        ref.current?.scrollTo({top: ref.current.scrollHeight});
-    }, []);
 }

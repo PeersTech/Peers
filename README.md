@@ -158,9 +158,10 @@ Trigger a manual build or release anytime from the **Actions** tab.
 - [ ] **M9** — Circuit Relay v2: NAT'd peers connect through always-on nodes
 - [ ] **M10** — DCUtR hole punching: upgrade relayed connections to direct P2P
 - [x] **M11** — Headless node mode (`--node`): run the backend as an always-on routing/relay node (Pi/VPS)
-- [~] **M12** — Node bootstrap (clients dial known nodes via `PEERS_NODES`/`nodes.json`; capacity caps pending)
-- [ ] **M13** — Deployment guide + public node list
+- [x] **M12** — Node bootstrap + capacity caps: `PEERS_NODES`/`nodes.json`, tiered relay budgets (`PEERS_NO_RELAY=1` opts out)
+- [x] **M13** — Deployment guide: [`docs/running-a-node.md`](docs/running-a-node.md)
 - [ ] **M14** — Custom profiles: signed display name, profile picture (DHT avatar), about me
+- [x] **M16** — Seed-phrase login: BIP39 12/24-word phrase *is* the private key (HKDF → Ed25519 + X25519)
 
 ---
 

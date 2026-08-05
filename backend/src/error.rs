@@ -15,8 +15,17 @@ pub enum PeersError {
     #[error("bad password")]
     BadPassword,
 
+    #[error("invalid recovery phrase: {0}")]
+    BadPhrase(String),
+
     #[error("keystore does not exist")]
     NoKeystore,
+
+    #[error(
+        "this identity was created by an older version of Peers and cannot be \
+         recovered with a phrase; create a new identity"
+    )]
+    StaleKeystore,
 
     #[error("message sequence already opened (replay)")]
     Replay,

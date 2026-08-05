@@ -28,8 +28,9 @@ pub struct Behaviour {
     /// always-on backbone nodes, so NAT'd peers can reach us.
     pub relay_client: relay::client::Behaviour,
     /// Circuit Relay v2 server — forwards connections between NAT'd peers.
-    /// Tiered relaying: only headless `--node` builds accept reservations
-    /// (`serve_relay`); GUI clients configure zero reservation slots.
+    /// Tiered relaying: headless `--node` builds get a full budget, GUI
+    /// clients a modest one (harmless when unreachable, useful when not),
+    /// and `PEERS_NO_RELAY=1` disables it entirely. See [`RelayCaps`].
     pub relay_server: relay::Behaviour,
     /// DCUtR — after a relayed rendezvous, hole-punches NATs to upgrade to
     /// a direct (faster) connection.
@@ -97,6 +98,75 @@ impl From<dcutr::Event> for Event {
     }
 }
 
+/// Relay capacity by tier (M12).
+///
+/// Every install is a node, so GUI clients are **not** pinned to zero: an
+/// unreachable client can advertise slots harmlessly, because nobody can dial
+/// it to use them. Reachability decides who actually carries traffic, exactly
+/// as open-port peers carry a torrent swarm. Users who turn out to be
+/// reachable (public IP, port forwarding, open IPv6) become real backbone
+/// without configuring anything; users behind CGNAT are unaffected.
+///
+/// Set `PEERS_NO_RELAY=1` to opt out and relay nothing.
+pub struct RelayCaps {
+    pub max_reservations: usize,
+    pub max_reservations_per_peer: usize,
+    pub max_circuits: usize,
+    pub max_circuits_per_peer: usize,
+    pub max_circuit_bytes: u64,
+}
+
+impl RelayCaps {
+    /// A GUI client that happens to be reachable. Modest budget: it is
+    /// someone's laptop, and chat traffic is small — but a handful of these
+    /// is what keeps the mesh from depending on dedicated nodes.
+    pub fn citizen() -> Self {
+        Self {
+            max_reservations: 8,
+            max_reservations_per_peer: 2,
+            max_circuits: 16,
+            max_circuits_per_peer: 2,
+            max_circuit_bytes: 16 * 1024 * 1024,
+        }
+    }
+
+    /// Opted out: forward nothing.
+    pub fn off() -> Self {
+        Self {
+            max_reservations: 0,
+            max_reservations_per_peer: 0,
+            max_circuits: 0,
+            max_circuits_per_peer: 0,
+            max_circuit_bytes: 0,
+        }
+    }
+
+    /// Always-on `--node` processes. The per-peer caps matter more than the
+    /// totals: they stop one busy peer consuming every slot on a shared box.
+    pub fn node() -> Self {
+        Self {
+            max_reservations: 64,
+            max_reservations_per_peer: 4,
+            max_circuits: 64,
+            max_circuits_per_peer: 8,
+            max_circuit_bytes: 128 * 1024 * 1024,
+        }
+    }
+
+    /// Picks the tier for this process. `serve_relay` is true only for
+    /// headless `--node`; everything else is a citizen unless opted out.
+    pub fn for_role(serve_relay: bool) -> Self {
+        if std::env::var("PEERS_NO_RELAY").is_ok() {
+            return Self::off();
+        }
+        if serve_relay {
+            Self::node()
+        } else {
+            Self::citizen()
+        }
+    }
+}
+
 impl Behaviour {
     pub fn new(
         key: &libp2p::identity::Keypair,
@@ -138,20 +208,17 @@ impl Behaviour {
             request_response::Config::default(),
         );
 
-        // Circuit relay v2 server. Dedicated nodes accept reservations and
-        // forward traffic (within capacity caps); GUI clients act purely as
-        // clients (tiered relaying: no reservation slots on low-end devices).
-        let mut relay_cfg = relay::Config::default();
-        if serve_relay {
-            relay_cfg.max_reservations = 64;
-            relay_cfg.max_reservations_per_peer = 4;
-            relay_cfg.max_circuits = 64;
-            relay_cfg.max_circuits_per_peer = 8;
-            relay_cfg.max_circuit_bytes = 128 * 1024 * 1024;
-        } else {
-            relay_cfg.max_reservations = 0;
-            relay_cfg.max_circuits = 0;
-        }
+        // Circuit relay v2 server. Every install can forward traffic; whether
+        // it actually does is decided by reachability, not by this config.
+        let caps = RelayCaps::for_role(serve_relay);
+        let mut relay_cfg = relay::Config {
+            max_reservations: caps.max_reservations,
+            max_reservations_per_peer: caps.max_reservations_per_peer,
+            max_circuits: caps.max_circuits,
+            max_circuits_per_peer: caps.max_circuits_per_peer,
+            max_circuit_bytes: caps.max_circuit_bytes,
+            ..Default::default()
+        };
         relay_cfg.reservation_duration = Duration::from_secs(3600);
         relay_cfg.max_circuit_duration = Duration::from_secs(3600);
         let relay_server = relay::Behaviour::new(peer_id, relay_cfg);
@@ -168,5 +235,57 @@ impl Behaviour {
             relay_server,
             dcutr,
         })
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    #[test]
+    fn opt_out_forwards_nothing() {
+        let c = RelayCaps::off();
+        assert_eq!(c.max_reservations, 0);
+        assert_eq!(c.max_circuits, 0);
+    }
+
+    /// Citizens must advertise slots — that is the whole point of "every
+    /// install is a node". Unreachable ones simply never get dialed.
+    #[test]
+    fn citizen_tier_relays_something() {
+        let c = RelayCaps::citizen();
+        assert!(c.max_reservations > 0, "clients must be able to relay");
+        assert!(c.max_circuits > 0);
+    }
+
+    #[test]
+    fn citizen_budget_is_smaller_than_a_dedicated_node() {
+        let c = RelayCaps::citizen();
+        let n = RelayCaps::node();
+        assert!(c.max_reservations < n.max_reservations);
+        assert!(c.max_circuits < n.max_circuits);
+        assert!(c.max_circuit_bytes < n.max_circuit_bytes);
+    }
+
+    #[test]
+    fn node_tier_is_bounded_for_low_end_hardware() {
+        let c = RelayCaps::node();
+        assert!(c.max_reservations > 0);
+        assert!(
+            c.max_reservations <= 128,
+            "a Pi must not accept unbounded reservations"
+        );
+        assert!(c.max_circuits_per_peer <= c.max_circuits);
+        assert!(c.max_reservations_per_peer <= c.max_reservations);
+        assert!(c.max_circuit_bytes <= 256 * 1024 * 1024);
+    }
+
+    /// Per-peer caps are what stop one busy peer eating every slot.
+    #[test]
+    fn per_peer_caps_are_strictly_smaller_than_totals() {
+        for c in [RelayCaps::citizen(), RelayCaps::node()] {
+            assert!(c.max_reservations_per_peer < c.max_reservations);
+            assert!(c.max_circuits_per_peer < c.max_circuits);
+        }
     }
 }

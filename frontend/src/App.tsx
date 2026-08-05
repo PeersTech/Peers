@@ -2,13 +2,13 @@ import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
     addMember, colorFor, contactProfiles, copyText, createInvite, createServer, dmHistory, exportSnapshot,
-    fetchBlob, getProfile, hasIdentity, importSnapshot, initIdentity, isUnlocked, joinServer, leaveServer,
-    listServers, lock, mentionsMe, onBlobFetched, onBlobParked, onJoinRequest, onNodeMessage, onPeerConnected,
-    onPeerDisconnected, onPlazaMessage, onPlazaProfile, onServerError, onServerList, onServerMessage,
-    onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish, publishChannel, publishPlaza,
-    removeMember, renameServer, rotateKey, serverHistory, setChannel, setProfile, setRole, shortId,
-    subscribe, subscribeChannel, timeFor, unlock,
-    type Contact, type IdentityInfo, type JoinNotice, type PlazaPost, type PlazaPresence,
+    fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
+    leaveServer, listServers, lock, mentionsMe, myCode, netStatus, onBlobFetched, onBlobParked, onJoinRequest,
+    onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, onServerError,
+    onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
+    publishChannel, publishPlaza, removeMember, renameServer, rotateKey, serverHistory, setChannel, setProfile,
+    setRole, shortId, subscribe, subscribeChannel, timeFor, unlock,
+    type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type SignedProfile, type UiMessage,
 } from './lib/api';
 import {ServerRail} from './components/ServerRail';
@@ -48,7 +48,14 @@ export default function App() {
     const [notice, setNotice] = useState<string | null>(null);
     const [joinRequests, setJoinRequests] = useState<JoinNotice[]>([]);
     const [password, setPassword] = useState('');
-    const [password2, setPassword2] = useState('');
+    /** Freshly generated recovery phrase, shown once during onboarding. */
+    const [newPhrase, setNewPhrase] = useState('');
+    /** Gate on the user confirming they wrote the phrase down. */
+    const [phraseSaved, setPhraseSaved] = useState(false);
+    /** Onboarding sub-mode: type an existing phrase instead of generating one. */
+    const [recovering, setRecovering] = useState(false);
+    const [net, setNet] = useState<NetStatus | null>(null);
+    const [code, setCode] = useState<string>('');
     const [busy, setBusy] = useState(false);
     const [online, setOnline] = useState<Set<string>>(new Set());
     const [plazaOpen, setPlazaOpen] = useState(false);
@@ -87,6 +94,42 @@ export default function App() {
         const t = setTimeout(() => setNotice(null), 4000);
         return () => clearTimeout(t);
     }, [notice]);
+
+    // Generate the recovery phrase as soon as onboarding starts, so the user
+    // sees it before committing to anything.
+    useEffect(() => {
+        if (phase !== 'onboarding' || recovering || newPhrase) return;
+        void generatePhrase(12)
+            .then(setNewPhrase)
+            .catch((e) => setError(String(e)));
+    }, [phase, recovering, newPhrase]);
+
+    // Poll connectivity while unlocked. Peer count also moves instantly via
+    // presence events; this fills in relay/reachability, which has no event.
+    useEffect(() => {
+        if (phase !== 'ready') return;
+        let alive = true;
+        const tick = () => {
+            if (document.hidden) return;
+            void netStatus()
+                .then((s) => alive && setNet(s))
+                .catch(() => {});
+        };
+        tick();
+        const h = setInterval(tick, 5000);
+        return () => {
+            alive = false;
+            clearInterval(h);
+        };
+    }, [phase]);
+
+    // Our short peer code, for sharing.
+    useEffect(() => {
+        if (phase !== 'ready') return;
+        void myCode()
+            .then((c) => setCode(c.formatted))
+            .catch(() => {});
+    }, [phase]);
 
     const refreshServers = async () => {
         try {
@@ -742,22 +785,27 @@ export default function App() {
 
     const submitAuth = async (e: FormEvent) => {
         e.preventDefault();
-        if (phase === 'onboarding' && password !== password2) {
-            setError('Passwords do not match');
-            return;
-        }
         setBusy(true);
         try {
             let info;
             if (phase === 'onboarding') {
-                await initIdentity(password);
-                info = await unlock(password);
+                // The phrase IS the key: either the one we just generated, or
+                // one the user is restoring from.
+                const phrase = (recovering ? password : newPhrase).trim();
+                if (!phrase) {
+                    setError('Enter your recovery phrase');
+                    setBusy(false);
+                    return;
+                }
+                info = await initFromPhrase(phrase);
             } else {
                 info = await unlock(password);
             }
             setMe(info);
             setPassword('');
-            setPassword2('');
+            setNewPhrase('');
+            setPhraseSaved(false);
+            setRecovering(false);
             setPhase('ready');
             await refreshServers();
         } catch (err) {
@@ -772,40 +820,113 @@ export default function App() {
     }
 
     if (phase !== 'ready') {
+        const onboarding = phase === 'onboarding';
         return (
             <div className="flex h-full w-full items-center justify-center bg-[#1e1f22]">
-                <form onSubmit={submitAuth} className="w-80 rounded-2xl border border-[#35373c] bg-[#1e1f22] p-6">
+                <form onSubmit={submitAuth} className="w-[26rem] rounded-2xl border border-[#35373c] bg-[#1e1f22] p-6">
                     <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-[#5865f2] text-lg font-bold text-white">P</div>
                     <h1 className="mt-3 text-xl font-bold text-[#f2f3f5]">Peers</h1>
-                    <p className="mb-4 text-xs text-[#949ba4]">
-                        {phase === 'onboarding' ? 'Create your encrypted identity — this password seals your keys locally.' : 'Enter the password you chose when you first set up Peers to unlock your identity and start the swarm.'}
-                    </p>
-                    <input
-                        type="password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="Password"
-                        minLength={phase === 'onboarding' ? 8 : undefined}
-                        autoFocus
-                        className="mb-2 w-full rounded-lg bg-[#2b2d31] px-3 py-2 text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
-                    />
-                    {phase === 'onboarding' && (
-                        <input
-                            type="password"
-                            value={password2}
-                            onChange={(e) => setPassword2(e.target.value)}
-                            placeholder="Confirm password"
-                            minLength={8}
-                            className="mb-4 w-full rounded-lg bg-[#2b2d31] px-3 py-2 text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
-                        />
+
+                    {onboarding && !recovering && (
+                        <>
+                            <p className="mb-3 text-xs text-[#949ba4]">
+                                This is your recovery phrase. It <em>is</em> your identity — these
+                                12 words generate your keys, so anyone who has them is you, and
+                                nobody (including us) can restore them if you lose them.
+                            </p>
+                            <div className="mb-2 grid grid-cols-3 gap-1.5 rounded-lg border border-[#35373c] bg-[#2b2d31] p-3">
+                                {newPhrase.split(' ').map((w, i) => (
+                                    <div key={i} className="flex items-baseline gap-1 text-sm text-[#f2f3f5]">
+                                        <span className="w-4 shrink-0 text-right text-[10px] text-[#80848e]">{i + 1}</span>
+                                        <span className="font-mono">{w}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="mb-3 flex items-center justify-between">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        void copyText(newPhrase);
+                                        setNotice('Recovery phrase copied');
+                                    }}
+                                    className="text-xs text-[#5865f2] hover:underline"
+                                >
+                                    Copy phrase
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setRecovering(true);
+                                        setPassword('');
+                                    }}
+                                    className="text-xs text-[#949ba4] hover:underline"
+                                >
+                                    I already have a phrase
+                                </button>
+                            </div>
+                            <label className="mb-4 flex cursor-pointer items-start gap-2 text-xs text-[#b5bac1]">
+                                <input
+                                    type="checkbox"
+                                    checked={phraseSaved}
+                                    onChange={(e) => setPhraseSaved(e.target.checked)}
+                                    className="mt-0.5"
+                                />
+                                I have written these words down somewhere safe. I understand that
+                                losing them means losing this identity permanently.
+                            </label>
+                        </>
                     )}
+
+                    {onboarding && recovering && (
+                        <>
+                            <p className="mb-3 text-xs text-[#949ba4]">
+                                Enter your 12- or 24-word recovery phrase. This rebuilds the same
+                                identity and peer ID on this machine.
+                            </p>
+                            <textarea
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                rows={3}
+                                autoFocus
+                                placeholder="abandon ability able about…"
+                                className="mb-2 w-full resize-none rounded-lg bg-[#2b2d31] px-3 py-2 font-mono text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setRecovering(false);
+                                    setPassword('');
+                                }}
+                                className="mb-4 text-xs text-[#949ba4] hover:underline"
+                            >
+                                ← Create a new identity instead
+                            </button>
+                        </>
+                    )}
+
+                    {!onboarding && (
+                        <>
+                            <p className="mb-4 text-xs text-[#949ba4]">
+                                Enter your recovery phrase to unlock your identity and start the swarm.
+                            </p>
+                            <textarea
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                rows={3}
+                                autoFocus
+                                placeholder="Your recovery phrase"
+                                className="mb-4 w-full resize-none rounded-lg bg-[#2b2d31] px-3 py-2 font-mono text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                            />
+                        </>
+                    )}
+
                     {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
                     <button
                         type="submit"
-                        disabled={busy}
+                        disabled={busy || (onboarding && !recovering && !phraseSaved)}
                         className="w-full rounded-lg bg-[#5865f2] px-3 py-2 text-sm font-semibold text-white hover:bg-[#4752c4] disabled:opacity-50"
                     >
-                        {busy ? '…' : phase === 'onboarding' ? 'Create identity' : 'Unlock'}
+                        {busy ? '…' : onboarding ? (recovering ? 'Recover identity' : 'Create identity') : 'Unlock'}
                     </button>
                 </form>
             </div>
@@ -844,8 +965,45 @@ export default function App() {
         : (server?.members ?? []);
     const plazaHere = plazaWho.length + (me ? 1 : 0);
 
+    /** One-line network state. Deliberately blunt about the case that breaks
+     *  cross-NAT chat, since "0 peers" alone looks like a transient hiccup. */
+    const netLabel = (): string => {
+        if (!net) return '';
+        const reach =
+            net.reachability === 'direct'
+                ? 'direct'
+                : net.reachability === 'relayed'
+                  ? 'via relay'
+                  : net.knownNodes === 0
+                    ? 'no relay node configured'
+                    : 'connecting';
+        return `${net.peers} peer${net.peers === 1 ? '' : 's'} · ${reach}`;
+    };
+    const netTitle = net
+        ? [
+              `reachability: ${net.reachability} (best guess)`,
+              `relay reservations: ${net.relayReservations}`,
+              `configured nodes: ${net.knownNodes}`,
+              net.externalAddrs.length ? `external: ${net.externalAddrs.join(', ')}` : '',
+              net.listenAddrs.length ? `listening: ${net.listenAddrs.join(', ')}` : '',
+          ]
+              .filter(Boolean)
+              .join('\n')
+        : '';
+
     return (
-        <div className="flex h-full w-full bg-[#1e1f22] text-[#f2f3f5]">
+        <div className="flex h-full w-full flex-col bg-[#1e1f22] text-[#f2f3f5]">
+            {net && net.knownNodes === 0 && net.reachability === 'unknown' && (
+                <div
+                    className="shrink-0 bg-[#3a2d12] px-4 py-1.5 text-[11px] text-[#e0b04a]"
+                    title="Two peers behind NAT cannot connect without a reachable node in between."
+                >
+                    No relay node configured — messages will only reach peers on your own network.
+                    Set <span className="font-mono">PEERS_NODES</span> to an always-on node
+                    (see docs/running-a-node.md).
+                </div>
+            )}
+            <div className="flex min-h-0 flex-1">
             <ServerRail
                 servers={serverList}
                 dms={dms}
@@ -989,19 +1147,26 @@ export default function App() {
             )}
             <MessagePane
                 channelName={paneName || '…'}
-                subtitle={plazaOpen
-                    ? `Public · ${plazaHere} here`
-                    : dm
-                      ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}`
-                      : server
-                        ? `E2E encrypted · ${onlineCount}/${server.memberCount} online`
-                        : ''}
+                subtitle={[
+                    plazaOpen
+                        ? `Public · ${plazaHere} here`
+                        : dm
+                          ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}`
+                          : server
+                            ? `E2E encrypted · ${onlineCount}/${server.memberCount} online`
+                            : '',
+                    netLabel(),
+                ]
+                    .filter(Boolean)
+                    .join('  ·  ')}
+                subtitleTitle={netTitle}
                 messages={paneMessages}
                 members={paneMembers}
                 myPeerId={me?.peerId ?? ''}
                 onSend={send}
                 avatarFor={avatarFor}
             />
+            </div>
             {settingsOpen && (
                 <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={() => setSettingsOpen(false)}>
                     <form

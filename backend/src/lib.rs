@@ -76,6 +76,11 @@ pub struct AppState {
     /// Last seen timestamp per Plaza participant (peer id → ts), for
     /// "who's here".
     plaza_seen: Mutex<HashMap<String, u64>>,
+    /// Addresses libp2p confirmed as externally observed. Non-empty means
+    /// peers can dial us without going through a relay.
+    external_addrs: Mutex<HashSet<String>>,
+    /// Relay nodes we currently hold a circuit reservation with.
+    relay_reservations: Mutex<HashSet<String>>,
 }
 
 impl Default for AppState {
@@ -95,6 +100,8 @@ impl Default for AppState {
             profiles: Mutex::new(HashMap::new()),
             plaza: Mutex::new(VecDeque::new()),
             plaza_seen: Mutex::new(HashMap::new()),
+            external_addrs: Mutex::new(HashSet::new()),
+            relay_reservations: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -130,17 +137,56 @@ fn is_unlocked(state: State<AppState>) -> bool {
     state.identity.lock().unwrap().is_some()
 }
 
-/// First-run: generate an identity and seal it with the password.
+/// Generates a fresh recovery phrase for the onboarding screen.
+///
+/// This is the one place secret material crosses the Tauri boundary: the user
+/// has to see the phrase to write it down. It is never logged or persisted in
+/// plaintext — `init_from_phrase` seals it immediately.
 #[tauri::command]
-fn init_identity(state: State<AppState>, password: String) -> Result<IdentityInfo, String> {
-    if state.keystore.exists() {
-        return Err("identity already exists".into());
+fn generate_phrase(word_count: usize) -> Result<String, String> {
+    Ok(crate::crypto::mnemonic::generate(word_count)?)
+}
+
+/// The short 12-digit code for a peer id, plus its display form. A lookup
+/// hint for finding someone, never a proof of who they are.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerCode {
+    code: String,
+    formatted: String,
+}
+
+/// Our own short peer code.
+#[tauri::command]
+fn my_code(state: State<AppState>) -> Result<PeerCode, String> {
+    let id = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    let code = crate::crypto::code::short_code(&id.peer_id);
+    Ok(PeerCode {
+        formatted: crate::crypto::code::format_code(&code),
+        code,
+    })
+}
+
+/// First run *or* recovery: derives the identity from `phrase`, seals the
+/// keystore with it, and starts the node. Passing a phrase that already has
+/// a keystore rebuilds the same identity, which is what makes a lost install
+/// recoverable.
+#[tauri::command]
+async fn init_from_phrase(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    phrase: String,
+) -> Result<IdentityInfo, String> {
+    if state.identity.lock().unwrap().is_some() {
+        return Err("already unlocked".into());
     }
-    if password.len() < 8 {
-        return Err("password must be at least 8 characters".into());
-    }
-    let id = state.keystore.create(&password)?;
-    Ok(info_for(&id)?)
+    let id = state.keystore.create_from_phrase(&phrase)?;
+    finish_unlock(state, app, id, &phrase).await
 }
 
 /// Unlock the keystore and start the node.
@@ -154,10 +200,24 @@ async fn unlock(
     if state.identity.lock().unwrap().is_some() {
         return Err("already unlocked".into());
     }
+    finish_unlock(state, app, id, &password).await
+}
 
+/// Everything that happens once we hold a decrypted identity: open the sealed
+/// state store, bring up the swarm, wire the event relay, subscribe to our
+/// topics and dial the backbone.
+///
+/// Shared by `unlock` and `init_from_phrase` so the two paths cannot drift.
+/// `secret` unseals the state store and is the phrase (or legacy password).
+async fn finish_unlock(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: Identity,
+    secret: &str,
+) -> Result<IdentityInfo, String> {
     // Unlock the sealed state store and restore servers/contacts/history
     // before the node comes up.
-    let store_handle = state.store.open(&password)?;
+    let store_handle = state.store.open(secret)?;
     let persisted = store_handle.load()?;
     let mut history = History::default();
     {
@@ -201,6 +261,24 @@ async fn unlock(
                     let st = app2.state::<AppState>();
                     st.presence.lock().unwrap().remove(peer_id);
                     let _ = app2.emit("presence://peer-disconnected", peer_id);
+                }
+                NodeEvent::ExternalAddr { addr, confirmed } => {
+                    let st = app2.state::<AppState>();
+                    let mut set = st.external_addrs.lock().unwrap();
+                    if *confirmed {
+                        set.insert(addr.clone());
+                    } else {
+                        set.remove(addr);
+                    }
+                }
+                NodeEvent::RelayReservation { relay_peer, active } => {
+                    let st = app2.state::<AppState>();
+                    let mut set = st.relay_reservations.lock().unwrap();
+                    if *active {
+                        set.insert(relay_peer.clone());
+                    } else {
+                        set.remove(relay_peer);
+                    }
                 }
                 _ => {}
             }
@@ -264,6 +342,40 @@ fn persist(state: &AppState) {
     let _ = handle.save(&persisted);
 }
 
+/// A snapshot of what the node knows about its own connectivity.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetStatus {
+    /// Peers with at least one live connection.
+    pub peers: usize,
+    pub listen_addrs: Vec<String>,
+    pub external_addrs: Vec<String>,
+    pub relay_reservations: usize,
+    /// Heuristic: "direct" | "relayed" | "unknown". Not a guarantee.
+    pub reachability: &'static str,
+    /// Whether any always-on nodes are configured. When false and
+    /// `reachability` is "unknown", cross-NAT chat will not work — see
+    /// docs/running-a-node.md.
+    pub known_nodes: usize,
+}
+
+/// Current connectivity snapshot for the UI.
+#[tauri::command]
+fn net_status(state: State<AppState>) -> Result<NetStatus, String> {
+    let listen_addrs = state.addrs.lock().unwrap().clone();
+    let external: Vec<String> = state.external_addrs.lock().unwrap().iter().cloned().collect();
+    let relay_reservations = state.relay_reservations.lock().unwrap().len();
+    let peers = state.presence.lock().unwrap().len();
+    Ok(NetStatus {
+        peers,
+        listen_addrs,
+        reachability: crate::p2p::reachability(external.len(), relay_reservations),
+        external_addrs: external,
+        relay_reservations,
+        known_nodes: crate::p2p::bootstrap::known_nodes().len(),
+    })
+}
+
 #[tauri::command]
 fn lock(state: State<AppState>) -> Result<(), String> {
     persist(&state);
@@ -278,6 +390,8 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.profiles.lock().unwrap() = HashMap::new();
     *state.plaza.lock().unwrap() = VecDeque::new();
     *state.plaza_seen.lock().unwrap() = HashMap::new();
+    *state.external_addrs.lock().unwrap() = HashSet::new();
+    *state.relay_reservations.lock().unwrap() = HashSet::new();
     Ok(())
 }
 
@@ -970,7 +1084,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             has_identity,
             is_unlocked,
-            init_identity,
+            generate_phrase,
+            init_from_phrase,
+            my_code,
+            net_status,
             unlock,
             lock,
             subscribe,
@@ -1350,4 +1467,48 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Peers");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend reads these fields by camelCase name; a rename here
+    /// silently breaks the UI, so pin the wire format.
+    #[test]
+    fn net_status_serializes_camel_case() {
+        let s = NetStatus {
+            peers: 3,
+            listen_addrs: vec!["/ip4/127.0.0.1/tcp/4001".into()],
+            external_addrs: vec![],
+            relay_reservations: 1,
+            reachability: "relayed",
+            known_nodes: 0,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"listenAddrs\""), "frontend expects camelCase");
+        assert!(json.contains("\"externalAddrs\""));
+        assert!(json.contains("\"relayReservations\""));
+        assert!(json.contains("\"knownNodes\""));
+    }
+
+    #[test]
+    fn peer_code_serializes_camel_case() {
+        let c = PeerCode {
+            code: "482711936052".into(),
+            formatted: "4827 1193 6052".into(),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"formatted\""));
+        assert!(json.contains("\"code\""));
+    }
+
+    /// A phrase must round-trip through the same call the UI makes.
+    #[test]
+    fn generated_phrase_is_usable() {
+        let phrase = generate_phrase(12).unwrap();
+        assert_eq!(phrase.split_whitespace().count(), 12);
+        assert!(crate::crypto::mnemonic::decode(&phrase).is_ok());
+        assert!(generate_phrase(13).is_err());
+    }
 }

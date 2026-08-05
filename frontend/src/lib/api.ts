@@ -154,9 +154,33 @@ export interface PlazaMessage {
     profile?: SignedProfile | null;
 }
 
+/** A snapshot of our own connectivity (net_status). */
+export interface NetStatus {
+    peers: number;
+    listenAddrs: string[];
+    externalAddrs: string[];
+    relayReservations: number;
+    /** Heuristic, not a guarantee. */
+    reachability: "direct" | "relayed" | "unknown";
+    /** How many always-on nodes are configured. 0 means cross-NAT chat
+     *  will not work — see docs/running-a-node.md. */
+    knownNodes: number;
+}
+
+/** Our short 12-digit peer code: a lookup hint, never proof of identity. */
+export interface PeerCode {
+    code: string;
+    formatted: string;
+}
+
 export const hasIdentity = () => invoke<boolean>("has_identity");
 export const isUnlocked = () => invoke<boolean>("is_unlocked");
-export const initIdentity = (password: string) => invoke<IdentityInfo>("init_identity", {password});
+export const generatePhrase = (wordCount = 12) =>
+    invoke<string>("generate_phrase", {wordCount});
+export const initFromPhrase = (phrase: string) =>
+    invoke<IdentityInfo>("init_from_phrase", {phrase});
+export const myCode = () => invoke<PeerCode>("my_code");
+export const netStatus = () => invoke<NetStatus>("net_status");
 export const unlock = (password: string) => invoke<IdentityInfo>("unlock", {password});
 export const lock = () => invoke<void>("lock");
 

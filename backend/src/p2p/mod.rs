@@ -13,7 +13,7 @@ use libp2p::request_response::{
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
 use libp2p::swarm::SwarmEvent;
-use libp2p::{gossipsub, identify, kad, ping, Multiaddr, PeerId, Swarm, SwarmBuilder};
+use libp2p::{gossipsub, identify, kad, ping, relay, Multiaddr, PeerId, Swarm, SwarmBuilder};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{broadcast, mpsc};
 
@@ -90,9 +90,38 @@ pub enum NodeEvent {
         hash: String,
         reason: String,
     },
+    /// A circuit reservation with a relay node was accepted (`active: true`)
+    /// or lost when the connection closed (`active: false`).
+    RelayReservation {
+        relay_peer: String,
+        active: bool,
+    },
+    /// libp2p confirmed (or expired) an externally observed address for us.
+    /// A confirmed one means peers can dial us without a relay.
+    ExternalAddr {
+        addr: String,
+        confirmed: bool,
+    },
     Error {
         message: String,
     },
+}
+
+/// Best-guess reachability from what libp2p has confirmed. A confirmed
+/// external address means peers can dial us directly; a relay reservation
+/// with no external address means they reach us through a relay.
+///
+/// This is a heuristic, not a measurement — it can report "direct" for an
+/// address that some networks cannot actually reach — and callers must
+/// present it as a guess.
+pub fn reachability(external_addrs: usize, relay_reservations: usize) -> &'static str {
+    if external_addrs > 0 {
+        "direct"
+    } else if relay_reservations > 0 {
+        "relayed"
+    } else {
+        "unknown"
+    }
 }
 
 /// Handle to a running node. Cloneable; commands are queued and processed
@@ -180,6 +209,12 @@ struct Node {
     announced: HashSet<BlobHash>,
     /// Addresses learned from DHT routing updates + identify.
     peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Relays we currently hold a circuit reservation with. A set, not a
+    /// counter, so a repeated accept cannot inflate it and a disconnect
+    /// removes exactly one entry.
+    relay_reservations: HashSet<PeerId>,
+    /// Addresses libp2p has confirmed as externally observed.
+    external_addrs: HashSet<Multiaddr>,
     /// Whether this node relays gossip for topics it's told about.
     relay: bool,
     events: broadcast::Sender<NodeEvent>,
@@ -200,6 +235,8 @@ impl Node {
             in_flight: HashSet::new(),
             announced: HashSet::new(),
             peer_addresses: HashMap::new(),
+            relay_reservations: HashSet::new(),
+            external_addrs: HashSet::new(),
             relay: false,
             events,
         };
@@ -370,10 +407,38 @@ impl Node {
                     peer_id: peer_id.to_string(),
                 });
             }
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
+                // Only when the last connection to this peer is gone is any
+                // reservation with it actually lost.
+                if num_established == 0 && self.relay_reservations.remove(&peer_id) {
+                    self.emit(NodeEvent::RelayReservation {
+                        relay_peer: peer_id.to_string(),
+                        active: false,
+                    });
+                }
                 self.emit(NodeEvent::PeerDisconnected {
                     peer_id: peer_id.to_string(),
                 });
+            }
+            SwarmEvent::ExternalAddrConfirmed { address } => {
+                if self.external_addrs.insert(address.clone()) {
+                    self.emit(NodeEvent::ExternalAddr {
+                        addr: address.to_string(),
+                        confirmed: true,
+                    });
+                }
+            }
+            SwarmEvent::ExternalAddrExpired { address } => {
+                if self.external_addrs.remove(&address) {
+                    self.emit(NodeEvent::ExternalAddr {
+                        addr: address.to_string(),
+                        confirmed: false,
+                    });
+                }
             }
             SwarmEvent::Behaviour(be) => self.handle_behaviour_event(be),
             _ => {}
@@ -401,7 +466,17 @@ impl Node {
                     }
                 }
             }
-            behaviour::Event::RelayClient(_) => {}
+            behaviour::Event::RelayClient(ev) => {
+                if let relay::client::Event::ReservationReqAccepted { relay_peer_id, .. } = ev {
+                    // Renewals re-fire this event; the set makes that a no-op.
+                    if self.relay_reservations.insert(relay_peer_id) {
+                        self.emit(NodeEvent::RelayReservation {
+                            relay_peer: relay_peer_id.to_string(),
+                            active: true,
+                        });
+                    }
+                }
+            }
             behaviour::Event::RelayServer(_) => {}
             behaviour::Event::Dcutr(_) => {}
             behaviour::Event::Ping(ping::Event { peer, result, .. }) => {

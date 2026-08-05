@@ -67,12 +67,16 @@ forms the backbone.
       **Done:** `peers --node` starts the backend with no webview — it listens, dials
       known nodes, bootstraps the DHT, and relays gossip for any topic clients ask
       it to. Identity is auto-generated and stored 0600 at `<config>/peers/node_identity.json`.
-- [~] **M12 — Node bootstrap + capacity caps.** ~~Clients connect to a short list
+- [x] **M12 — Node bootstrap + capacity caps.** ~~Clients connect to a short list
       of known nodes on startup; per-node concurrent-relay and bandwidth caps;
       tiered relaying (clients relay only while idle/charging).~~
-      **Partial:** bootstrap is in — clients and nodes dial `PEERS_NODES`
-      (comma-separated multiaddrs) or `<config>/peers/nodes.json` on startup.
-      Capacity caps + tiered relaying still pending.
+      **Done:** bootstrap via `PEERS_NODES` (comma-separated multiaddrs) or
+      `<config>/peers/nodes.json`. Capacity is tiered by role — `citizen`
+      (every GUI client: 8 reservations / 16 circuits / 16 MiB), `node`
+      (`--node`: 64 / 64 / 128 MiB), and `off` (`PEERS_NO_RELAY=1`). Clients
+      are *not* pinned to zero: an unreachable install advertising slots is
+      harmless because nobody can dial it, so reachability decides who carries
+      traffic — the way open-port peers carry a torrent swarm.
 
 ### Relay mesh (how the backbone relays your chat)
 
@@ -81,8 +85,13 @@ Clients publish a `{ "op": "subscribe", "topic": "<name>" }` notice on the share
 (`--node`) listen on that topic and mesh anything they're asked to, so two NAT'd
 clients who both dial the same VPS node exchange chat through it. The control
 traffic is dropped by clients (only the node in relay mode acts on it).
-- [ ] **M13 — Deployment guide + public node list.** How to stand up a node on a
-      cheap VPS/Pi, and the canonical node list clients bootstrap to.
+- [x] **M13 — Deployment guide + public node list.** ~~How to stand up a node on a
+      cheap VPS/Pi, and the canonical node list clients bootstrap to.~~
+      **Done:** [`docs/running-a-node.md`](docs/running-a-node.md) — build,
+      firewall, systemd unit, client config, verification and troubleshooting.
+      No canonical public node list ships: publishing one would make those
+      nodes a de facto central dependency, so operators distribute their own
+      `PEERS_NODES` line instead.
 - [~] **M14 — Custom profiles.** ~~Global display name, profile picture and "about
       me", all signed by the identity so they can't be impersonated. Profile
       rides alongside the peer card (member lists, join notices, DM envelopes);
@@ -95,12 +104,25 @@ traffic is dropped by clients (only the node in relay mode acts on it).
       (no invites, can't leave). Self-signed chat + profiles; "who's here" =
       verified profiles + connected peers. A community for discovery, not a
       directory.
-- [ ] **M16 — Seed-phrase login.** The login passphrase IS the private key: 8–11
+- [x] **M16 — Seed-phrase login.** ~~The login passphrase IS the private key: 8–11
       diceware words (or the private key hex) → 32 bytes → Ed25519 + X25519 keys
-      derived deterministically (wallet-style). Lost phrase = lost identity.
-- [ ] **M17 — Friend codes (peer-id sharing).** Share your peer id as a short
+      derived deterministically (wallet-style). Lost phrase = lost identity.~~
+      **Done:** BIP39 12/24-word mnemonic with checksum; entropy → HKDF-SHA256
+      with frozen domain separation (`peers/v1/seed`, `.../ed25519`,
+      `.../x25519`) → Ed25519 + X25519. The keystore is now a *cache*: the same
+      phrase rebuilds the same peer ID on any machine, so a lost install is
+      recoverable and a lost phrase is not. Keystore v1 is refused outright
+      (clean break — its random key can never be phrase-derived).
+- [~] **M17 — Friend codes (peer-id sharing).** ~~Share your peer id as a short
       code / QR; add a friend by code → DHT `find_peer` → dial → mutual accept.
-      No usernames, no registry.
+      No usernames, no registry.~~
+      **In progress:** 12-digit code derivation shipped
+      (`crypto::code::short_code`, displayed `4827 1193 6052`). The code is a
+      DHT *rendezvous key*, deliberately not a truncated peer id — 12 digits is
+      grindable in GPU-hours, so a matching code is never proof of identity.
+      Resolution yields the full peer id, which the user verifies (name,
+      avatar, fingerprint) before accepting. DHT publish/lookup, QR and the
+      mutual-accept flow are still pending.
 
 ## Identity, Plaza & usernames — finalized design
 
