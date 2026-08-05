@@ -281,7 +281,9 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
                             }`}
                         >
                             {firstInBlock && (
-                                avatarFor ? (
+                                // Plain DMs carry no authorPeer, so there is no
+                                // avatar to look up — fall back to the color dot.
+                                avatarFor && m.authorPeer ? (
                                     <div className="mt-1 h-8 w-8 shrink-0 overflow-hidden rounded-full">
                                         {avatarFor(m.authorPeer) ? (
                                             <img

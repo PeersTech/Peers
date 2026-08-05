@@ -21,7 +21,7 @@ export interface DM {
     unread: number;
 }
 
-/** Byte array → data-URL base64 (for avatars). Chunked to avoid stack limits. */
+/** Byte array → base64 (for avatars). Chunked to avoid stack limits. */
 function bytesToBase64(bytes: number[]): string {
     let bin = '';
     const CHUNK = 0x8000;
@@ -29,6 +29,12 @@ function bytesToBase64(bytes: number[]): string {
         bin += String.fromCharCode(...bytes.slice(i, i + CHUNK));
     }
     return btoa(bin);
+}
+
+/** Byte array → `data:` URL. Every <img src> for avatar bytes goes through
+ *  here; skipping the prefix renders a broken image. */
+function dataUrl(bytes: number[]): string {
+    return `data:image/png;base64,${bytesToBase64(bytes)}`;
 }
 
 type Phase = 'boot' | 'onboarding' | 'locked' | 'ready';
@@ -60,7 +66,7 @@ export default function App() {
     const [online, setOnline] = useState<Set<string>>(new Set());
     const [plazaOpen, setPlazaOpen] = useState(false);
     const [plazaPosts, setPlazaPosts] = useState<PlazaPost[]>([]);
-    const [plazaWho, setPlazaWho] = useState<PlazaPresence[]>([]);
+    const [plazaRoster, setPlazaRoster] = useState<PlazaPresence[]>([]);
     const [profiles, setProfiles] = useState<Record<string, SignedProfile>>({});
     const [myProfile, setMyProfile] = useState<SignedProfile | null>(null);
     const [blobs, setBlobs] = useState<Record<string, number[]>>({});
@@ -176,7 +182,7 @@ export default function App() {
         if (!hash) return null;
         const data = blobs[hash];
         if (!data || data.length === 0) return null;
-        return `data:image/png;base64,${bytesToBase64(data)}`;
+        return dataUrl(data);
     };
 
     const avatarFor = (peerId: string): string | null => {
@@ -235,7 +241,7 @@ export default function App() {
                     profile: d.profile,
                 })),
             );
-            setPlazaWho(who);
+            setPlazaRoster(who);
             for (const d of hist) if (d.profile?.avatarHash) ensureBlob(d.profile.avatarHash);
         } catch (e) {
             setError(String(e));
@@ -348,9 +354,10 @@ export default function App() {
                 setServers((old) => ({...old, [v.id]: v}));
                 const profs: Record<string, SignedProfile> = {};
                 for (const m of v.members) {
-                    if (m.profile?.verify) {
-                        if (m.profile.peerId === m.peerId) profs[m.peerId] = m.profile;
-                    } else if (m.profile) {
+                    // The backend verifies the signature; the frontend still
+                    // checks the profile is bound to *this* member, so a valid
+                    // profile cannot be replayed under someone else's name.
+                    if (m.profile && m.profile.peerId === m.peerId) {
                         profs[m.peerId] = m.profile;
                     }
                 }
@@ -440,7 +447,8 @@ export default function App() {
         );
         track(
             onPlazaMessage((m) => {
-                if (m.profile) setProfiles((old) => ({...old, [m.from]: m.profile}));
+                const prof = m.profile;
+                if (prof) setProfiles((old) => ({...old, [m.from]: prof}));
                 setPlazaPosts((old) => {
                     const id = `${m.from}:${m.ts}`;
                     if (old.some((p) => p.id === id)) return old;
@@ -461,9 +469,10 @@ export default function App() {
         );
         track(
             onPlazaProfile((m) => {
-                if (m.profile) {
-                    setProfiles((old) => ({...old, [m.peerId]: m.profile}));
-                    if (m.profile.avatarHash) ensureBlob(m.profile.avatarHash);
+                const prof = m.profile;
+                if (prof) {
+                    setProfiles((old) => ({...old, [m.peerId]: prof}));
+                    if (prof.avatarHash) ensureBlob(prof.avatarHash);
                 }
             }),
         );
@@ -569,7 +578,7 @@ export default function App() {
                 ...old,
                 {
                     id: crypto.randomUUID(),
-                    author: myProfile?.displayName || me?.peerIdShort ?? 'you',
+                    author: myProfile?.displayName || (me?.peerIdShort ?? 'you'),
                     authorColor: '#23a55a',
                     authorPeer: me?.peerId ?? '',
                     time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
@@ -773,7 +782,7 @@ export default function App() {
         setJoinRequests([]);
         setPlazaOpen(false);
         setPlazaPosts([]);
-        setPlazaWho([]);
+        setPlazaRoster([]);
         setProfiles({});
         setMyProfile(null);
         setActiveServer(null);
@@ -963,7 +972,7 @@ export default function App() {
     const paneMembers: Contact[] = plazaOpen || dm
         ? contactsFor()
         : (server?.members ?? []);
-    const plazaHere = plazaWho.length + (me ? 1 : 0);
+    const plazaHere = plazaRoster.length + (me ? 1 : 0);
 
     /** One-line network state. Deliberately blunt about the case that breaks
      *  cross-NAT chat, since "0 peers" alone looks like a transient hiccup. */
@@ -1028,7 +1037,7 @@ export default function App() {
                         <span className="text-[10px] text-[#80848e]">{plazaHere} here</span>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2">
-                        {plazaWho.map((p) => {
+                        {plazaRoster.map((p) => {
                             const prof = profiles[p.peerId];
                             const name = prof?.displayName || shortId(p.peerId);
                             return (
@@ -1056,7 +1065,7 @@ export default function App() {
                                 <span className="h-2 w-2 rounded-full bg-[#23a55a]"/>
                             </div>
                         )}
-                        {plazaWho.length === 0 && (
+                        {plazaRoster.length === 0 && (
                             <div className="px-2 py-4 text-xs text-[#949ba4]">
                                 No one in the Plaza right now — say hi!
                             </div>
@@ -1182,7 +1191,7 @@ export default function App() {
                             <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full text-sm font-bold text-black"
                                  style={{background: avatarBytes || myProfile?.avatarHash ? 'transparent' : '#23a55a'}}>
                                 {avatarBytes ? (
-                                    <img src={bytesToBase64(avatarBytes)} alt="" className="h-full w-full object-cover"/>
+                                    <img src={dataUrl(avatarBytes)} alt="" className="h-full w-full object-cover"/>
                                 ) : myProfile?.avatarHash && blobUrl(myProfile.avatarHash) ? (
                                     <img src={blobUrl(myProfile.avatarHash) as string} alt="" className="h-full w-full object-cover"/>
                                 ) : (

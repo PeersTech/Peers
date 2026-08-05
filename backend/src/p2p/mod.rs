@@ -635,3 +635,28 @@ impl Node {
         }
     }
 }
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    /// A confirmed external address beats a reservation: if peers can dial us
+    /// directly, the relay is only a fallback.
+    #[test]
+    fn reachability_prefers_direct() {
+        assert_eq!(reachability(1, 0), "direct");
+        assert_eq!(reachability(1, 3), "direct");
+    }
+
+    #[test]
+    fn reachability_is_relayed_when_only_reservations() {
+        assert_eq!(reachability(0, 1), "relayed");
+    }
+
+    /// "unknown" is not "offline" — it means libp2p has not confirmed
+    /// anything yet, which is the normal state right after startup.
+    #[test]
+    fn reachability_unknown_when_nothing_known() {
+        assert_eq!(reachability(0, 0), "unknown");
+    }
+}
