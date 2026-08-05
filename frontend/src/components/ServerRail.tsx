@@ -14,12 +14,13 @@ interface Props {
     youFull: string;
     onCopyYou: () => void;
     onOpenSettings: () => void;
+    onAddFriend: () => void;
 }
 
 const roleColor = (role: string) =>
     role === "owner" ? THEME.online : role === "admin" ? THEME.accent : THEME.muted;
 
-export function ServerRail({servers, dms, activeServer, activeDm, plazaActive, onSelect, onCreate, onJoin, serverHasUnread, you, youFull, onCopyYou, onOpenSettings}: Props) {
+export function ServerRail({servers, dms, activeServer, activeDm, plazaActive, onSelect, onCreate, onJoin, serverHasUnread, you, youFull, onCopyYou, onOpenSettings, onAddFriend}: Props) {
     const dmActive = activeDm !== null;
     const dmUnread = dms.reduce((n, d) => n + d.unread, 0);
 
@@ -71,6 +72,15 @@ export function ServerRail({servers, dms, activeServer, activeDm, plazaActive, o
                 );
             })}
             <div className="mt-auto flex flex-col items-center gap-2">
+                <button
+                    onClick={onAddFriend}
+                    className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-2 text-accent hover:rounded-xl hover:bg-surface-3"
+                    title="Add a friend by code"
+                >
+                    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+                        <path d="M15 14c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4zm0-2a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5 10V7H3v3H0v2h3v3h2v-3h3v-2H5z"/>
+                    </svg>
+                </button>
                 <button
                     onClick={onCreate}
                     className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-2 text-2xl font-light text-online hover:rounded-xl"

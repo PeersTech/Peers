@@ -58,6 +58,10 @@ pub enum NodeCommand {
     ParkBlob(Vec<u8>),
     /// Look up DHT providers for a hash and request the blob from them.
     FetchBlob(BlobHash),
+    /// Publish our peer id under our friend-code's DHT key, so others can find us.
+    PublishCode,
+    /// Look up a friend code on the DHT, resolve to a peer id.
+    LookupCode(String),
 }
 
 /// Events emitted by the node, relayed to the frontend as Tauri events.
@@ -101,6 +105,17 @@ pub enum NodeEvent {
     ExternalAddr {
         addr: String,
         confirmed: bool,
+    },
+    /// A DCUtR hole-punch attempt finished. `direct: false` is not a failure
+    /// worth surfacing loudly — the connection stays relayed and still works.
+    HolePunch {
+        peer_id: String,
+        direct: bool,
+    },
+    /// A peer code resolved (or failed to resolve) to a peer id via the DHT.
+    CodeResolved {
+        code: String,
+        peer_id: Option<String>,
     },
     Error {
         message: String,
@@ -201,6 +216,8 @@ struct Node {
     topics: HashMap<String, Sha256Topic>,
     /// Blob hash per active DHT provider lookup.
     pending_fetches: HashMap<kad::QueryId, BlobHash>,
+    /// Friend code per active DHT code lookup.
+    pending_codes: HashMap<kad::QueryId, String>,
     /// Blob hash per in-flight request-response request.
     fetch_requests: HashMap<OutboundRequestId, BlobHash>,
     /// Hashes with an active (or completed) blob request, to avoid dupes.
@@ -231,6 +248,7 @@ impl Node {
             blobs: BlobStore::new(),
             topics: HashMap::new(),
             pending_fetches: HashMap::new(),
+            pending_codes: HashMap::new(),
             fetch_requests: HashMap::new(),
             in_flight: HashSet::new(),
             announced: HashSet::new(),
@@ -392,6 +410,34 @@ impl Node {
                     .get_providers(kad::RecordKey::new(&hash));
                 self.pending_fetches.insert(qid, hash);
             }
+            NodeCommand::PublishCode => {
+                // Announce ourselves as the provider of our own code's DHT key.
+                // This is the same provider machinery blobs use — a code is
+                // just a well-known key that maps to whoever claims it.
+                let me = *self.swarm.local_peer_id();
+                let code = crate::crypto::code::short_code(&me);
+                let key = crate::crypto::code::code_key(&code);
+                match self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .start_providing(kad::RecordKey::new(&key))
+                {
+                    Ok(_) => {}
+                    Err(e) => self.emit(NodeEvent::Error {
+                        message: format!("publish code: {e}"),
+                    }),
+                }
+            }
+            NodeCommand::LookupCode(code) => {
+                let key = crate::crypto::code::code_key(&code);
+                let qid = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .get_providers(kad::RecordKey::new(&key));
+                self.pending_codes.insert(qid, code);
+            }
         }
     }
 
@@ -478,7 +524,15 @@ impl Node {
                 }
             }
             behaviour::Event::RelayServer(_) => {}
-            behaviour::Event::Dcutr(_) => {}
+            behaviour::Event::Dcutr(ev) => {
+                // DCUtR upgrades a relayed connection to a direct hole-punched
+                // one. Failure is not an error worth alarming the user about —
+                // the connection stays relayed and chat keeps working.
+                self.emit(NodeEvent::HolePunch {
+                    peer_id: ev.remote_peer_id.to_string(),
+                    direct: ev.result.is_ok(),
+                });
+            }
             behaviour::Event::Ping(ping::Event { peer, result, .. }) => {
                 if let Err(e) = result {
                     self.emit(NodeEvent::Error {
@@ -584,6 +638,39 @@ impl Node {
     fn handle_query_progress(&mut self, id: kad::QueryId, result: kad::QueryResult) {
         match result {
             kad::QueryResult::GetProviders(res) => {
+                // A code lookup and a blob fetch both ride the provider
+                // machinery; the query id tells us which this is.
+                if let Some(code) = self.pending_codes.get(&id).cloned() {
+                    match res {
+                        Ok(kad::GetProvidersOk::FoundProviders { providers, .. }) => {
+                            if let Some(peer) = providers.into_iter().next() {
+                                self.pending_codes.remove(&id);
+                                // The code only *locates* a peer. Whoever answers
+                                // still has to prove who they are before the user
+                                // accepts them — see crypto::code.
+                                self.emit(NodeEvent::CodeResolved {
+                                    code,
+                                    peer_id: Some(peer.to_string()),
+                                });
+                            }
+                        }
+                        Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. }) => {
+                            self.pending_codes.remove(&id);
+                            self.emit(NodeEvent::CodeResolved {
+                                code,
+                                peer_id: None,
+                            });
+                        }
+                        Err(_) => {
+                            self.pending_codes.remove(&id);
+                            self.emit(NodeEvent::CodeResolved {
+                                code,
+                                peer_id: None,
+                            });
+                        }
+                    }
+                    return;
+                }
                 let Some(&hash) = self.pending_fetches.get(&id) else {
                     return;
                 };

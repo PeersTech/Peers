@@ -172,6 +172,44 @@ fn my_code(state: State<AppState>) -> Result<PeerCode, String> {
     })
 }
 
+/// Starts a DHT lookup for `code`. Resolution is asynchronous: the answer
+/// arrives as a `code://resolved` event carrying the peer id, or `null` when
+/// nobody is providing that code.
+///
+/// A resolved peer id is *not* proof of identity — the code is only a
+/// rendezvous key, and 12 digits is grindable. The UI must show the peer's
+/// profile and fingerprint and let the user accept before trusting them.
+#[tauri::command]
+async fn lookup_code(state: State<'_, AppState>, code: String) -> Result<String, String> {
+    let normalized = crate::crypto::code::normalize_code(&code)
+        .ok_or("a peer code is 12 digits, e.g. 4827 1193 6052")?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::LookupCode(normalized.clone()))
+        .await?;
+    Ok(normalized)
+}
+
+/// Adds a resolved peer as a DM contact: subscribes to their topic so their
+/// messages reach us, and dials them so ours reach them.
+#[tauri::command]
+async fn add_contact(state: State<'_, AppState>, peer_id: String) -> Result<(), String> {
+    let peer: PeerId = peer_id
+        .parse()
+        .map_err(|_| "that is not a valid peer id".to_string())?;
+    let me = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    if peer == me.peer_id {
+        return Err("that is your own peer code".into());
+    }
+    // Their DM topic is their peer id; subscribing is how we receive from them.
+    subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
+    Ok(())
+}
+
 /// First run *or* recovery: derives the identity from `phrase`, seals the
 /// keystore with it, and starts the node. Passing a phrase that already has
 /// a keystore rebuilds the same identity, which is what makes a lost install
@@ -280,6 +318,18 @@ async fn finish_unlock(
                         set.remove(relay_peer);
                     }
                 }
+                NodeEvent::CodeResolved { code, peer_id } => {
+                    let _ = app2.emit(
+                        "code://resolved",
+                        serde_json::json!({ "code": code, "peerId": peer_id }),
+                    );
+                }
+                NodeEvent::HolePunch { peer_id, direct } => {
+                    let _ = app2.emit(
+                        "net://hole-punch",
+                        serde_json::json!({ "peerId": peer_id, "direct": direct }),
+                    );
+                }
                 _ => {}
             }
             let _ = app2.emit("node://event", &ev);
@@ -298,6 +348,8 @@ async fn finish_unlock(
     // Auto-join the global Plaza (no invites, can't leave).
     let _ = subscribe_with_relay(&state, PLAZA_TOPIC.to_string()).await;
     announce_plaza_profile(&state).await;
+    // Announce our friend code on the DHT so people who have it can find us.
+    let _ = handle.send(NodeCommand::PublishCode).await;
     // Re-subscribe to every server control topic we know about.
     let records = state.servers.lock().unwrap().records();
     for rec in records {
@@ -1054,9 +1106,23 @@ fn plaza_who(state: State<'_, AppState>) -> Result<Vec<PlazaPresence>, String> {
 
 /// Parks bytes (sealed envelope or media chunk) and announces them on the
 /// DHT so other peers can fetch them while we're offline.
+///
+/// Caps at 512 KiB: avatars are 20–30 KB after downscaling; large message
+/// attachments will need chunking (not yet implemented).
 #[tauri::command]
-async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, String> {    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, String> {
+    const MAX_BLOB: usize = 512 * 1024;
+    if data.len() > MAX_BLOB {
+        return Err(format!(
+            "blob too large: {} bytes (max {})",
+            data.len(),
+            MAX_BLOB
+        ));
+    }
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::ParkBlob(data)).await?;
+    Ok("queued".into())
+}
     Ok("queued".into())
 }
 
@@ -1087,6 +1153,8 @@ pub fn run() {
             generate_phrase,
             init_from_phrase,
             my_code,
+            lookup_code,
+            add_contact,
             net_status,
             unlock,
             lock,

@@ -180,7 +180,20 @@ export const generatePhrase = (wordCount = 12) =>
 export const initFromPhrase = (phrase: string) =>
     invoke<IdentityInfo>("init_from_phrase", {phrase});
 export const myCode = () => invoke<PeerCode>("my_code");
+/** Starts an async DHT lookup; the answer arrives via onCodeResolved. */
+export const lookupCode = (code: string) => invoke<string>("lookup_code", {code});
+/** Subscribes to a peer's DM topic so we can exchange messages. */
+export const addContact = (peerId: string) => invoke<void>("add_contact", {peerId});
 export const netStatus = () => invoke<NetStatus>("net_status");
+
+/** A friend code resolved (or failed to) via the DHT. `peerId` is null when
+ *  nobody is providing that code. A match is a *location*, not an identity —
+ *  verify the profile before trusting it. */
+export const onCodeResolved = (cb: (e: {code: string; peerId: string | null}) => void) =>
+    listen<{code: string; peerId: string | null}>("code://resolved", (e) => cb(e.payload));
+/** A relayed connection upgraded to direct (or failed to, and stays relayed). */
+export const onHolePunch = (cb: (e: {peerId: string; direct: boolean}) => void) =>
+    listen<{peerId: string; direct: boolean}>("net://hole-punch", (e) => cb(e.payload));
 export const unlock = (password: string) => invoke<IdentityInfo>("unlock", {password});
 export const lock = () => invoke<void>("lock");
 

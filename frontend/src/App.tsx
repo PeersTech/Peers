@@ -1,11 +1,11 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, colorFor, contactProfiles, copyText, createInvite, createServer, dmHistory, exportSnapshot,
+    addMember, addContact, colorFor, contactProfiles, copyText, createInvite, createServer, dmHistory, exportSnapshot,
     fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
-    leaveServer, listServers, lock, mentionsMe, myCode, netStatus, onBlobFetched, onBlobParked, onJoinRequest,
-    onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, onServerError,
-    onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
+    leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobParked, onCodeResolved,
+    onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
+    onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
     publishChannel, publishPlaza, removeMember, renameServer, rotateKey, serverHistory, setChannel, setProfile,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
@@ -14,6 +14,7 @@ import {
 import {ServerRail} from './components/ServerRail';
 import {ChannelList} from './components/ChannelList';
 import {MessagePane} from './components/MessagePane';
+import {qrDataUrl} from './lib/qr';
 
 export interface DM {
     id: string;
@@ -62,6 +63,11 @@ export default function App() {
     const [recovering, setRecovering] = useState(false);
     const [net, setNet] = useState<NetStatus | null>(null);
     const [code, setCode] = useState<string>('');
+    /** "Add friend" modal: the code being typed, and what it resolved to. */
+    const [addOpen, setAddOpen] = useState(false);
+    const [codeInput, setCodeInput] = useState('');
+    const [resolving, setResolving] = useState(false);
+    const [resolved, setResolved] = useState<{code: string; peerId: string | null} | null>(null);
     const [busy, setBusy] = useState(false);
     const [online, setOnline] = useState<Set<string>>(new Set());
     const [plazaOpen, setPlazaOpen] = useState(false);
@@ -257,9 +263,48 @@ export default function App() {
         void loadPlaza();
     };
 
+    /** Downscales an image to a square PNG no larger than `AVATAR_PX`.
+     *
+     *  Avatars ride the DHT, where every peer that displays you fetches a
+     *  copy — so a 4 MB phone photo is not just slow, it is inconsiderate to
+     *  the low-end nodes this project targets. 128px lands around 20-30 KB.
+     */
+    const AVATAR_PX = 128;
+    const downscaleAvatar = (file: File): Promise<number[]> =>
+        new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                const canvas = document.createElement('canvas');
+                canvas.width = AVATAR_PX;
+                canvas.height = AVATAR_PX;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) return reject(new Error('canvas unavailable'));
+                // Center-crop to a square so portraits are not squashed.
+                const side = Math.min(img.width, img.height);
+                ctx.drawImage(
+                    img,
+                    (img.width - side) / 2, (img.height - side) / 2, side, side,
+                    0, 0, AVATAR_PX, AVATAR_PX,
+                );
+                canvas.toBlob((blob) => {
+                    if (!blob) return reject(new Error('could not encode avatar'));
+                    blob.arrayBuffer()
+                        .then((b) => resolve(Array.from(new Uint8Array(b))))
+                        .catch(reject);
+                }, 'image/png');
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error('that file is not an image we can read'));
+            };
+            img.src = url;
+        });
+
     const onAvatarFile = async (file: File) => {
         try {
-            const buf = Array.from(new Uint8Array(await file.arrayBuffer()));
+            const buf = await downscaleAvatar(file);
             setAvatarBytes(buf);
             setPendingHash(null);
             await parkBlob(buf);
@@ -481,6 +526,20 @@ export default function App() {
         );
         track(
             onBlobParked((e) => setPendingHash((h) => h ?? e.hash)),
+        );
+        track(
+            onCodeResolved((e) => {
+                setResolving(false);
+                setResolved(e);
+                if (!e.peerId) setError(`No one is using the code ${e.code}`);
+            }),
+        );
+        track(
+            onHolePunch((e) => {
+                // Only worth saying when it succeeds — a failed punch just
+                // means the connection stays relayed, which still works.
+                if (e.direct) setNotice(`Direct connection established with ${shortId(e.peerId)}`);
+            }),
         );
         return () => {
             cancelled = true;
@@ -760,6 +819,51 @@ export default function App() {
         setNotice('Copied your peer id');
     };
 
+    const openAddFriend = () => {
+        setCodeInput('');
+        setResolved(null);
+        setResolving(false);
+        setAddOpen(true);
+    };
+
+    /** Kicks off the DHT lookup; the answer lands in onCodeResolved. */
+    const submitCode = async (e: FormEvent) => {
+        e.preventDefault();
+        setResolved(null);
+        setResolving(true);
+        try {
+            await lookupCode(codeInput);
+        } catch (err) {
+            setResolving(false);
+            setError(String(err));
+        }
+    };
+
+    /** Accepts a resolved peer: opens a DM channel with them. The user has
+     *  seen who answered before this runs — that acceptance is what makes a
+     *  grindable 12-digit code safe to use as a lookup key. */
+    const acceptResolved = async () => {
+        const peerId = resolved?.peerId;
+        if (!peerId) return;
+        try {
+            await addContact(peerId);
+            setDms((old) =>
+                old.some((d) => d.id === peerId)
+                    ? old
+                    : [...old, {id: peerId, name: shortId(peerId), unread: 0}],
+            );
+            setAddOpen(false);
+            setPlazaOpen(false);
+            setDmOpen(true);
+            setActiveServer(null);
+            setActiveDm(peerId);
+            void loadDmHistory(peerId);
+            setNotice('Contact added — say hi');
+        } catch (err) {
+            setError(String(err));
+        }
+    };
+
     const openSettings = () => {
         setProfileName(myProfile?.displayName || me?.defaultName || me?.peerIdShort || '');
         setProfileAbout(myProfile?.about || '');
@@ -1029,6 +1133,7 @@ export default function App() {
                 youFull={me?.peerId ?? ''}
                 onCopyYou={copyMyId}
                 onOpenSettings={openSettings}
+                onAddFriend={openAddFriend}
             />
             {plazaOpen ? (
                 <div className="flex h-full w-[248px] flex-col bg-surface-2">
@@ -1176,6 +1281,111 @@ export default function App() {
                 avatarFor={avatarFor}
             />
             </div>
+            {addOpen && (
+                <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={() => setAddOpen(false)}>
+                    <div onClick={(e) => e.stopPropagation()} className="w-[28rem] rounded-2xl border border-surface-3 bg-surface-2 p-5">
+                        <div className="mb-4 flex items-center justify-between">
+                            <h2 className="text-lg font-bold text-ink">Add a friend</h2>
+                            <button type="button" onClick={() => setAddOpen(false)} className="text-muted hover:text-ink">✕</button>
+                        </div>
+
+                        <p className="mb-2 text-xs text-muted">Your code — share it however you like.</p>
+                        <div className="mb-4 flex items-center gap-4 rounded-lg bg-surface-1 p-3">
+                            {code && (
+                                <img
+                                    src={qrDataUrl(code.replace(/\s/g, ''), 3, 2)}
+                                    alt="Your peer code as a QR code"
+                                    className="h-24 w-24 shrink-0 rounded"
+                                />
+                            )}
+                            <div className="min-w-0">
+                                <div className="selectable font-mono text-lg tracking-wide text-accent">{code || '…'}</div>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        void copyText(code.replace(/\s/g, ''));
+                                        setNotice('Code copied');
+                                    }}
+                                    className="mt-1 text-xs text-muted hover:text-ink hover:underline"
+                                >
+                                    Copy code
+                                </button>
+                            </div>
+                        </div>
+
+                        <form onSubmit={(e) => void submitCode(e)}>
+                            <label className="mb-1 block text-xs text-muted">Enter their 12-digit code</label>
+                            <div className="flex gap-2">
+                                <input
+                                    value={codeInput}
+                                    onChange={(e) => setCodeInput(e.target.value)}
+                                    placeholder="4827 1193 6052"
+                                    autoFocus
+                                    className="flex-1 rounded-lg bg-surface-1 px-3 py-2 font-mono text-sm text-ink placeholder-faint outline-none focus:ring-1 focus:ring-accent/50"
+                                />
+                                <button
+                                    type="submit"
+                                    disabled={resolving}
+                                    className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+                                >
+                                    {resolving ? 'Searching…' : 'Find'}
+                                </button>
+                            </div>
+                        </form>
+
+                        {resolving && (
+                            <p className="mt-3 text-xs text-muted">
+                                Searching the DHT — this can take a few seconds.
+                            </p>
+                        )}
+
+                        {resolved?.peerId && (
+                            <div className="mt-4 rounded-lg border border-surface-3 bg-surface-1 p-3">
+                                <div className="mb-2 flex items-center gap-2">
+                                    <span
+                                        className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full text-xs font-bold text-black"
+                                        style={{background: colorFor(resolved.peerId)}}
+                                    >
+                                        {avatarFor(resolved.peerId) ? (
+                                            <img src={avatarFor(resolved.peerId) as string} alt="" className="h-full w-full object-cover"/>
+                                        ) : (
+                                            (profiles[resolved.peerId]?.displayName || resolved.peerId)[0].toUpperCase()
+                                        )}
+                                    </span>
+                                    <div className="min-w-0">
+                                        <div className="truncate text-sm font-semibold text-ink">
+                                            {profiles[resolved.peerId]?.displayName || shortId(resolved.peerId)}
+                                        </div>
+                                        <div className="selectable truncate font-mono text-[10px] text-faint">
+                                            {resolved.peerId}
+                                        </div>
+                                    </div>
+                                </div>
+                                <p className="mb-3 text-[11px] text-warn">
+                                    A code only locates someone — it is not proof of who they are.
+                                    Check this peer id matches what your friend told you before accepting.
+                                </p>
+                                <div className="flex justify-end gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setResolved(null)}
+                                        className="rounded-lg px-3 py-2 text-sm text-muted hover:bg-surface-3"
+                                    >
+                                        Not them
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => void acceptResolved()}
+                                        className="rounded-lg bg-online px-4 py-2 text-sm font-semibold text-black hover:opacity-90"
+                                    >
+                                        Add contact
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
             {settingsOpen && (
                 <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={() => setSettingsOpen(false)}>
                     <form
@@ -1229,6 +1439,13 @@ export default function App() {
                             className="mb-4 w-full resize-none rounded-lg bg-surface-1 px-3 py-2 text-sm text-ink outline-none focus:ring-1 focus:ring-accent/50"
                             placeholder="A short bio…"
                         />
+                        <div className="mb-4 rounded-lg bg-surface-1 p-3">
+                            <div className="mb-1 text-xs text-muted">Your peer code</div>
+                            <div className="selectable font-mono text-base tracking-wide text-accent">{code || '…'}</div>
+                            <div className="selectable mt-1 break-all font-mono text-[10px] text-faint">
+                                {me?.peerId}
+                            </div>
+                        </div>
                         <div className="flex justify-end gap-2">
                             <button type="button" onClick={() => setSettingsOpen(false)} className="rounded-lg px-3 py-2 text-sm text-muted hover:bg-surface-3">
                                 Cancel
