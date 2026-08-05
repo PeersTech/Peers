@@ -227,6 +227,12 @@ impl SessionDir {
         }
     }
 
+    /// The X25519 key we can encrypt to for a specific peer id, if we have
+    /// a validated card for them. `None` means we've never exchanged keys.
+    pub fn recipient_key(&self, peer_id: &str) -> Option<[u8; 32]> {
+        self.contacts.get(peer_id).copied()
+    }
+
     /// All X25519 keys we can currently encrypt to.
     pub fn recipient_keys(&self) -> Vec<[u8; 32]> {
         self.contacts.values().copied().collect()
@@ -327,6 +333,13 @@ fn card_contact_key(card: &PeerCard) -> String {
     // Stable pseudo-peer-id: "k" + base32 of the ed25519 key. The real peer
     // id (multihash) is not derivable from the raw key without extra deps.
     base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &card.ed_pub)
+}
+
+/// Parses (not verifies) the sender's identity card from a sealed envelope,
+/// without decrypting, so callers can cache the contact under the real peer
+/// id they know from the gossipsub message source.
+pub fn card_from_envelope(payload: &[u8]) -> Result<PeerCard> {
+    parse_card(payload)
 }
 
 fn parse_card(payload: &[u8]) -> Result<PeerCard> {
