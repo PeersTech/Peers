@@ -318,8 +318,34 @@ export function mentionsMe(text: string, myPeerId: string): boolean {
     return text.includes(`@${myPeerId}`);
 }
 
+/** Theme colours needed as runtime values (inline styles, canvas, derived
+ *  colours) rather than Tailwind classes. Keep in sync with the `@theme`
+ *  block in style.css — these are the only duplicates of those tokens. */
+export const THEME = {
+    accent: "#e8863c",
+    online: "#7bb08a",
+    danger: "#d9614f",
+    warn: "#e0b04a",
+    muted: "#8f8574",
+} as const;
+
+/** Stable per-peer identity colour. Warm hues chosen to sit on the Ember
+ *  surfaces and stay distinguishable from each other; this is the one place
+ *  colours are literals rather than theme tokens, because the value is
+ *  derived at runtime from a peer id rather than chosen by a designer. */
 export const colorFor = (s: string) => {
-    const palette = ["#5865f2", "#23a55a", "#eb459e", "#f0b232", "#faa61a", "#b18cff", "#1abc9c", "#f23f43", "#3ba55d", "#e91e63"];
+    const palette = [
+        "#e8863c", // ember
+        "#7bb08a", // sage
+        "#d98f6a", // clay
+        "#c9a227", // brass
+        "#b5836b", // terracotta
+        "#8fa87b", // moss
+        "#d97b6c", // rust
+        "#a89170", // bronze
+        "#e0b04a", // amber
+        "#9c8f6d", // olive
+    ];
     let h = 0;
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
     return palette[h % palette.length];

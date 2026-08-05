@@ -7,7 +7,7 @@ import {
     onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, onServerError,
     onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
     publishChannel, publishPlaza, removeMember, renameServer, rotateKey, serverHistory, setChannel, setProfile,
-    setRole, shortId, subscribe, subscribeChannel, timeFor, unlock,
+    setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type SignedProfile, type UiMessage,
 } from './lib/api';
@@ -299,7 +299,7 @@ export default function App() {
             const list: UiMessage[] = msgs.map((d, i) => ({
                 id: `${d.peer}:${d.ts}:${i}`,
                 author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(peer),
-                authorColor: d.mine ? '#23a55a' : colorFor(peer),
+                authorColor: d.mine ? THEME.online : colorFor(peer),
                 time: timeFor(d.ts),
                 text: d.text,
                 mine: d.mine,
@@ -560,7 +560,7 @@ export default function App() {
         const msg: UiMessage = {
             id: crypto.randomUUID(),
             author: me?.peerIdShort ?? 'you',
-            authorColor: '#23a55a',
+            authorColor: THEME.online,
             time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
             text: t,
             mine: true,
@@ -579,7 +579,7 @@ export default function App() {
                 {
                     id: crypto.randomUUID(),
                     author: myProfile?.displayName || (me?.peerIdShort ?? 'you'),
-                    authorColor: '#23a55a',
+                    authorColor: THEME.online,
                     authorPeer: me?.peerId ?? '',
                     time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
                     text: t,
@@ -825,28 +825,28 @@ export default function App() {
     };
 
     if (phase === 'boot') {
-        return <div className="flex h-full w-full items-center justify-center bg-[#1e1f22]"/>;
+        return <div className="flex h-full w-full items-center justify-center bg-surface-1"/>;
     }
 
     if (phase !== 'ready') {
         const onboarding = phase === 'onboarding';
         return (
-            <div className="flex h-full w-full items-center justify-center bg-[#1e1f22]">
-                <form onSubmit={submitAuth} className="w-[26rem] rounded-2xl border border-[#35373c] bg-[#1e1f22] p-6">
-                    <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-[#5865f2] text-lg font-bold text-white">P</div>
-                    <h1 className="mt-3 text-xl font-bold text-[#f2f3f5]">Peers</h1>
+            <div className="flex h-full w-full items-center justify-center bg-surface-1">
+                <form onSubmit={submitAuth} className="w-[26rem] rounded-2xl border border-surface-3 bg-surface-1 p-6">
+                    <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-accent text-lg font-bold text-white">P</div>
+                    <h1 className="mt-3 text-xl font-bold text-ink">Peers</h1>
 
                     {onboarding && !recovering && (
                         <>
-                            <p className="mb-3 text-xs text-[#949ba4]">
+                            <p className="mb-3 text-xs text-muted">
                                 This is your recovery phrase. It <em>is</em> your identity — these
                                 12 words generate your keys, so anyone who has them is you, and
                                 nobody (including us) can restore them if you lose them.
                             </p>
-                            <div className="mb-2 grid grid-cols-3 gap-1.5 rounded-lg border border-[#35373c] bg-[#2b2d31] p-3">
+                            <div className="mb-2 grid grid-cols-3 gap-1.5 rounded-lg border border-surface-3 bg-surface-2 p-3">
                                 {newPhrase.split(' ').map((w, i) => (
-                                    <div key={i} className="flex items-baseline gap-1 text-sm text-[#f2f3f5]">
-                                        <span className="w-4 shrink-0 text-right text-[10px] text-[#80848e]">{i + 1}</span>
+                                    <div key={i} className="flex items-baseline gap-1 text-sm text-ink">
+                                        <span className="w-4 shrink-0 text-right text-[10px] text-faint">{i + 1}</span>
                                         <span className="font-mono">{w}</span>
                                     </div>
                                 ))}
@@ -858,7 +858,7 @@ export default function App() {
                                         void copyText(newPhrase);
                                         setNotice('Recovery phrase copied');
                                     }}
-                                    className="text-xs text-[#5865f2] hover:underline"
+                                    className="text-xs text-accent hover:underline"
                                 >
                                     Copy phrase
                                 </button>
@@ -868,12 +868,12 @@ export default function App() {
                                         setRecovering(true);
                                         setPassword('');
                                     }}
-                                    className="text-xs text-[#949ba4] hover:underline"
+                                    className="text-xs text-muted hover:underline"
                                 >
                                     I already have a phrase
                                 </button>
                             </div>
-                            <label className="mb-4 flex cursor-pointer items-start gap-2 text-xs text-[#b5bac1]">
+                            <label className="mb-4 flex cursor-pointer items-start gap-2 text-xs text-ink-dim">
                                 <input
                                     type="checkbox"
                                     checked={phraseSaved}
@@ -888,7 +888,7 @@ export default function App() {
 
                     {onboarding && recovering && (
                         <>
-                            <p className="mb-3 text-xs text-[#949ba4]">
+                            <p className="mb-3 text-xs text-muted">
                                 Enter your 12- or 24-word recovery phrase. This rebuilds the same
                                 identity and peer ID on this machine.
                             </p>
@@ -898,7 +898,7 @@ export default function App() {
                                 rows={3}
                                 autoFocus
                                 placeholder="abandon ability able about…"
-                                className="mb-2 w-full resize-none rounded-lg bg-[#2b2d31] px-3 py-2 font-mono text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                                className="mb-2 w-full resize-none rounded-lg bg-surface-2 px-3 py-2 font-mono text-sm text-ink placeholder-faint outline-none focus:ring-1 focus:ring-accent/50"
                             />
                             <button
                                 type="button"
@@ -906,7 +906,7 @@ export default function App() {
                                     setRecovering(false);
                                     setPassword('');
                                 }}
-                                className="mb-4 text-xs text-[#949ba4] hover:underline"
+                                className="mb-4 text-xs text-muted hover:underline"
                             >
                                 ← Create a new identity instead
                             </button>
@@ -915,7 +915,7 @@ export default function App() {
 
                     {!onboarding && (
                         <>
-                            <p className="mb-4 text-xs text-[#949ba4]">
+                            <p className="mb-4 text-xs text-muted">
                                 Enter your recovery phrase to unlock your identity and start the swarm.
                             </p>
                             <textarea
@@ -924,7 +924,7 @@ export default function App() {
                                 rows={3}
                                 autoFocus
                                 placeholder="Your recovery phrase"
-                                className="mb-4 w-full resize-none rounded-lg bg-[#2b2d31] px-3 py-2 font-mono text-sm text-[#f2f3f5] placeholder-[#80848e] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                                className="mb-4 w-full resize-none rounded-lg bg-surface-2 px-3 py-2 font-mono text-sm text-ink placeholder-faint outline-none focus:ring-1 focus:ring-accent/50"
                             />
                         </>
                     )}
@@ -933,7 +933,7 @@ export default function App() {
                     <button
                         type="submit"
                         disabled={busy || (onboarding && !recovering && !phraseSaved)}
-                        className="w-full rounded-lg bg-[#5865f2] px-3 py-2 text-sm font-semibold text-white hover:bg-[#4752c4] disabled:opacity-50"
+                        className="w-full rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
                     >
                         {busy ? '…' : onboarding ? (recovering ? 'Recover identity' : 'Create identity') : 'Unlock'}
                     </button>
@@ -1001,10 +1001,10 @@ export default function App() {
         : '';
 
     return (
-        <div className="flex h-full w-full flex-col bg-[#1e1f22] text-[#f2f3f5]">
+        <div className="flex h-full w-full flex-col bg-surface-1 text-ink">
             {net && net.knownNodes === 0 && net.reachability === 'unknown' && (
                 <div
-                    className="shrink-0 bg-[#3a2d12] px-4 py-1.5 text-[11px] text-[#e0b04a]"
+                    className="shrink-0 bg-accent-soft px-4 py-1.5 text-[11px] text-warn"
                     title="Two peers behind NAT cannot connect without a reachable node in between."
                 >
                     No relay node configured — messages will only reach peers on your own network.
@@ -1031,17 +1031,17 @@ export default function App() {
                 onOpenSettings={openSettings}
             />
             {plazaOpen ? (
-                <div className="flex h-full w-[248px] flex-col bg-[#2b2d31]">
-                    <div className="flex h-12 shrink-0 items-center justify-between border-b border-[#1e1f22] px-4">
+                <div className="flex h-full w-[248px] flex-col bg-surface-2">
+                    <div className="flex h-12 shrink-0 items-center justify-between border-b border-surface-1 px-4">
                         <span className="font-semibold">Plaza</span>
-                        <span className="text-[10px] text-[#80848e]">{plazaHere} here</span>
+                        <span className="text-[10px] text-faint">{plazaHere} here</span>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2">
                         {plazaRoster.map((p) => {
                             const prof = profiles[p.peerId];
                             const name = prof?.displayName || shortId(p.peerId);
                             return (
-                                <div key={p.peerId} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-[#b5bac1]">
+                                <div key={p.peerId} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-ink-dim">
                                     <span
                                         className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-black"
                                         style={{background: colorFor(p.peerId)}}
@@ -1049,44 +1049,44 @@ export default function App() {
                                         {name[0].toUpperCase()}
                                     </span>
                                     <span className="flex-1 truncate">{name}</span>
-                                    <span className="h-2 w-2 rounded-full bg-[#23a55a]"/>
+                                    <span className="h-2 w-2 rounded-full bg-online"/>
                                 </div>
                             );
                         })}
                         {me && (
-                            <div className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-[#b5bac1]">
+                            <div className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-ink-dim">
                                 <span
                                     className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-black"
-                                    style={{background: '#23a55a'}}
+                                    style={{background: THEME.online}}
                                 >
                                     {(myProfile?.displayName || me.peerIdShort)[0].toUpperCase()}
                                 </span>
                                 <span className="flex-1 truncate">{myProfile?.displayName || me.peerIdShort}</span>
-                                <span className="h-2 w-2 rounded-full bg-[#23a55a]"/>
+                                <span className="h-2 w-2 rounded-full bg-online"/>
                             </div>
                         )}
                         {plazaRoster.length === 0 && (
-                            <div className="px-2 py-4 text-xs text-[#949ba4]">
+                            <div className="px-2 py-4 text-xs text-muted">
                                 No one in the Plaza right now — say hi!
                             </div>
                         )}
                     </div>
                 </div>
             ) : dmOpen ? (
-                <div className="flex h-full w-[248px] flex-col bg-[#2b2d31]">
-                    <div className="flex h-12 shrink-0 items-center justify-between border-b border-[#1e1f22] px-4">
+                <div className="flex h-full w-[248px] flex-col bg-surface-2">
+                    <div className="flex h-12 shrink-0 items-center justify-between border-b border-surface-1 px-4">
                         <span className="font-semibold">Direct messages</span>
                         <button
                             onClick={() => void addDm()}
                             title="Message a peer by ID"
-                            className="flex h-6 w-6 items-center justify-center rounded text-lg font-light text-[#23a55a] hover:bg-[#35373c]"
+                            className="flex h-6 w-6 items-center justify-center rounded text-lg font-light text-online hover:bg-surface-3"
                         >
                             +
                         </button>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2">
                         {dms.length === 0 && (
-                            <div className="px-2 py-4 text-xs text-[#949ba4]">
+                            <div className="px-2 py-4 text-xs text-muted">
                                 No DMs yet — add a peer ID to start an encrypted channel.
                             </div>
                         )}
@@ -1100,7 +1100,7 @@ export default function App() {
                                     void loadDmHistory(d.id);
                                 }}
                                 className={`relative flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
-                                    d.id === activeDm ? 'bg-[#404249] text-[#f2f3f5]' : 'text-[#b5bac1] hover:bg-[#35373c]'
+                                    d.id === activeDm ? 'bg-surface-4 text-ink' : 'text-ink-dim hover:bg-surface-3'
                                 }`}
                             >
                                 <span
@@ -1114,11 +1114,11 @@ export default function App() {
                                     )}
                                 </span>
                                 {online.has(d.id) && (
-                                    <span className="absolute left-[22px] top-[22px] h-2.5 w-2.5 rounded-full border-2 border-[#2b2d31] bg-[#23a55a]"/>
+                                    <span className="absolute left-[22px] top-[22px] h-2.5 w-2.5 rounded-full border-2 border-surface-2 bg-online"/>
                                 )}
                                 <span className="flex-1 truncate">{profiles[d.id]?.displayName || d.name}</span>
                                 {d.unread > 0 && (
-                                    <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#f23f43] px-1 text-[10px] font-bold text-white">
+                                    <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-[10px] font-bold text-white">
                                         {d.unread}
                                     </span>
                                 )}
@@ -1150,7 +1150,7 @@ export default function App() {
                     onCopyMyId={copyMyId}
                 />
             ) : (
-                <div className="flex h-full w-[248px] items-center justify-center bg-[#2b2d31] px-4 text-center text-xs text-[#949ba4]">
+                <div className="flex h-full w-[248px] items-center justify-center bg-surface-2 px-4 text-center text-xs text-muted">
                     No server selected
                 </div>
             )}
@@ -1181,15 +1181,15 @@ export default function App() {
                     <form
                         onSubmit={(e) => void saveProfile(e)}
                         onClick={(e) => e.stopPropagation()}
-                        className="w-96 rounded-2xl border border-[#35373c] bg-[#2b2d31] p-5"
+                        className="w-96 rounded-2xl border border-surface-3 bg-surface-2 p-5"
                     >
                         <div className="mb-4 flex items-center justify-between">
-                            <h2 className="text-lg font-bold text-[#f2f3f5]">Your profile</h2>
-                            <button type="button" onClick={() => setSettingsOpen(false)} className="text-[#949ba4] hover:text-[#f2f3f5]">✕</button>
+                            <h2 className="text-lg font-bold text-ink">Your profile</h2>
+                            <button type="button" onClick={() => setSettingsOpen(false)} className="text-muted hover:text-ink">✕</button>
                         </div>
                         <div className="mb-4 flex items-center gap-4">
                             <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full text-sm font-bold text-black"
-                                 style={{background: avatarBytes || myProfile?.avatarHash ? 'transparent' : '#23a55a'}}>
+                                 style={{background: avatarBytes || myProfile?.avatarHash ? 'transparent' : THEME.online}}>
                                 {avatarBytes ? (
                                     <img src={dataUrl(avatarBytes)} alt="" className="h-full w-full object-cover"/>
                                 ) : myProfile?.avatarHash && blobUrl(myProfile.avatarHash) ? (
@@ -1198,7 +1198,7 @@ export default function App() {
                                     (myProfile?.displayName || me?.peerIdShort || '?')[0].toUpperCase()
                                 )}
                             </div>
-                            <label className="cursor-pointer rounded-md bg-[#35373c] px-3 py-1.5 text-sm text-[#f2f3f5] hover:bg-[#404249]">
+                            <label className="cursor-pointer rounded-md bg-surface-3 px-3 py-1.5 text-sm text-ink hover:bg-surface-4">
                                 Upload avatar
                                 <input
                                     type="file"
@@ -1210,30 +1210,30 @@ export default function App() {
                                     }}
                                 />
                             </label>
-                            <span className="text-[10px] text-[#80848e]">
+                            <span className="text-[10px] text-faint">
                                 {myProfile?.avatarHash ? 'Avatar shared across servers' : 'No avatar yet'}
                             </span>
                         </div>
-                        <label className="mb-1 block text-xs text-[#949ba4]">Display name</label>
+                        <label className="mb-1 block text-xs text-muted">Display name</label>
                         <input
                             value={profileName}
                             onChange={(e) => setProfileName(e.target.value)}
-                            className="mb-3 w-full rounded-lg bg-[#1e1f22] px-3 py-2 text-sm text-[#f2f3f5] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                            className="mb-3 w-full rounded-lg bg-surface-1 px-3 py-2 text-sm text-ink outline-none focus:ring-1 focus:ring-accent/50"
                             placeholder="Display name"
                         />
-                        <label className="mb-1 block text-xs text-[#949ba4]">About</label>
+                        <label className="mb-1 block text-xs text-muted">About</label>
                         <textarea
                             value={profileAbout}
                             onChange={(e) => setProfileAbout(e.target.value)}
                             rows={2}
-                            className="mb-4 w-full resize-none rounded-lg bg-[#1e1f22] px-3 py-2 text-sm text-[#f2f3f5] outline-none focus:ring-1 focus:ring-[#5865f2]/50"
+                            className="mb-4 w-full resize-none rounded-lg bg-surface-1 px-3 py-2 text-sm text-ink outline-none focus:ring-1 focus:ring-accent/50"
                             placeholder="A short bio…"
                         />
                         <div className="flex justify-end gap-2">
-                            <button type="button" onClick={() => setSettingsOpen(false)} className="rounded-lg px-3 py-2 text-sm text-[#949ba4] hover:bg-[#35373c]">
+                            <button type="button" onClick={() => setSettingsOpen(false)} className="rounded-lg px-3 py-2 text-sm text-muted hover:bg-surface-3">
                                 Cancel
                             </button>
-                            <button type="submit" className="rounded-lg bg-[#5865f2] px-4 py-2 text-sm font-semibold text-white hover:bg-[#4752c4]">
+                            <button type="submit" className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover">
                                 Save
                             </button>
                         </div>
@@ -1242,7 +1242,7 @@ export default function App() {
             )}
             {notice && (
                 <div
-                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-[#1e3d2a] bg-[#12231a] px-3 py-2 text-xs text-[#23a55a]"
+                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-online/30 bg-surface-3 px-3 py-2 text-xs text-online"
                     onClick={() => setNotice(null)}
                     title="Dismiss"
                 >
@@ -1251,7 +1251,7 @@ export default function App() {
             )}
             {error && (
                 <div
-                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-[#4a2224] bg-[#2b1214] px-3 py-2 text-xs text-[#f23f43]"
+                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-danger/30 bg-surface-3 px-3 py-2 text-xs text-danger"
                     onClick={() => setError(null)}
                     title="Dismiss"
                 >

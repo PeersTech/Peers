@@ -1,22 +1,61 @@
 @import "tailwindcss";
 
+/* ── Ember ────────────────────────────────────────────────────────────────
+   Warm-dominant dark theme: soot-brown surfaces, ember-orange accent, sage
+   for presence and success. Sans-serif UI; monospace only where character
+   precision matters (peer ids, hashes, multiaddrs, recovery phrases).
+
+   Every colour lives here. Components reference tokens (`bg-surface-2`),
+   never literals — that is what makes a reskin a one-file change.
+   ──────────────────────────────────────────────────────────────────────── */
+@theme {
+    --color-surface-0: #100e0a;  /* icon rail, deepest wells */
+    --color-surface-1: #17150f;  /* message pane */
+    --color-surface-2: #1c1912;  /* channel sidebar, member list */
+    --color-surface-3: #241f16;  /* composer, raised cards, hover */
+    --color-surface-4: #2b2619;  /* active channel row, pressed */
+
+    --color-edge: #221e16;       /* hairline rules, dividers */
+
+    --color-accent: #e8863c;     /* active state, own messages, primary */
+    --color-accent-hover: #f09a55;
+    --color-accent-soft: #2b1f12; /* accent-tinted background wash */
+
+    --color-online: #7bb08a;     /* presence dots, success */
+    --color-danger: #d9614f;     /* errors, destructive, unread badges */
+    --color-warn: #e0b04a;       /* mentions, degraded connectivity */
+
+    --color-ink: #f0e6d2;        /* primary text (parchment) */
+    --color-ink-dim: #d6cdb9;    /* message body */
+    --color-muted: #8f8574;      /* secondary text, inactive channels */
+    --color-faint: #6b6354;      /* timestamps, placeholders, # glyphs */
+
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
 html, body, #root {
     height: 100%;
     margin: 0;
-    background: #1e1f22;
+    background: var(--color-surface-1);
     overflow: hidden;
     user-select: none;
 }
 
 body {
-    font-family: 'gg sans', 'Nunito', 'Nunito Sans', 'Helvetica Neue', 'Noto Sans', system-ui, -apple-system, sans-serif;
-    color: #dbdee1;
+    font-family: 'Inter', 'Nunito Sans', 'Helvetica Neue', system-ui, -apple-system, sans-serif;
+    color: var(--color-ink-dim);
     -webkit-font-smoothing: antialiased;
+}
+
+/* Message text and inputs get read and copied — let them be selectable
+   even though the app chrome is not. */
+input, textarea, .selectable {
+    user-select: text;
 }
 
 * {
     scrollbar-width: thin;
-    scrollbar-color: #4e5058 transparent;
+    scrollbar-color: var(--color-surface-4) transparent;
 }
 
 ::-webkit-scrollbar {
@@ -25,8 +64,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: #4e5058;
+    background: var(--color-surface-4);
     border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--color-faint);
 }
 
 ::-webkit-scrollbar-track {

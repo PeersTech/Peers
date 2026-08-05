@@ -32,11 +32,11 @@ function splitText(text: string, mentions: Mention[]) {
 function MentionPill({peerId, member, dim}: {peerId: string; member?: Contact; dim?: boolean}) {
     if (!member || dim) {
         return (
-            <span className="rounded bg-[#4f545c]/50 px-1 text-[#b5bac1]">@{shortId(peerId)}</span>
+            <span className="rounded bg-surface-4/50 px-1 text-ink-dim">@{shortId(peerId)}</span>
         );
     }
     return (
-        <span className="rounded bg-[#5865f2]/30 px-1 text-[#c0c7ff]">
+        <span className="rounded bg-accent/30 px-1 text-accent">
             @{memberName(member)}
         </span>
     );
@@ -159,14 +159,14 @@ function MentionComposer({
 
     return (
         <div className="relative shrink-0 px-4 pb-4 pt-1">
-            <div className="relative rounded-lg bg-[#383a40] focus-within:ring-1 focus-within:ring-[#5865f2]/50">
+            <div className="relative rounded-lg bg-surface-3 focus-within:ring-1 focus-within:ring-accent/50">
                 {/* Back layer: the visual text with inline blue mention pills. */}
                 <div
                     aria-hidden
-                    className="pointer-events-none absolute inset-0 overflow-hidden px-3 py-1.5 text-sm leading-5 text-[#f2f3f5]"
+                    className="pointer-events-none absolute inset-0 overflow-hidden px-3 py-1.5 text-sm leading-5 text-ink"
                 >
                     {value.length === 0 ? (
-                        <span className="text-[#80848e]">{placeholder}</span>
+                        <span className="text-faint">{placeholder}</span>
                     ) : (
                         segs.map((s, i) =>
                             s.mention ? (
@@ -192,20 +192,20 @@ function MentionComposer({
                 />
             </div>
             <div className="mt-1 flex items-center justify-between">
-                <span className="text-[10px] text-[#80848e]">@ for mention · ctrl+k</span>
-                <button onClick={submit} className="rounded-md bg-[#5865f2] px-3 py-1 text-sm font-semibold text-white hover:bg-[#4752c4]">
+                <span className="text-[10px] text-faint">@ for mention · ctrl+k</span>
+                <button onClick={submit} className="rounded-md bg-accent px-3 py-1 text-sm font-semibold text-white hover:bg-accent-hover">
                     Send
                 </button>
             </div>
             {query && candidates.length > 0 && (
-                <div className="absolute bottom-full left-4 right-4 mb-2 max-h-48 overflow-y-auto rounded-lg border border-[#1e1f22] bg-[#2b2d31] p-1 shadow-xl">
+                <div className="absolute bottom-full left-4 right-4 mb-2 max-h-48 overflow-y-auto rounded-lg border border-surface-1 bg-surface-2 p-1 shadow-xl">
                     {candidates.map((m, i) => (
                         <button
                             key={m.peerId}
                             onClick={() => insertMention(m.peerId)}
                             onMouseEnter={() => setSel(i)}
                             className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm ${
-                                i === sel ? "bg-[#404249]" : ""
+                                i === sel ? "bg-surface-4" : ""
                             }`}
                         >
                             <span
@@ -214,8 +214,8 @@ function MentionComposer({
                             >
                                 {memberName(m)[0].toUpperCase()}
                             </span>
-                            <span className="flex-1 truncate text-[#f2f3f5]">{memberName(m)}</span>
-                            <span className="text-[10px] text-[#80848e]">{shortId(m.peerId)}</span>
+                            <span className="flex-1 truncate text-ink">{memberName(m)}</span>
+                            <span className="text-[10px] text-faint">{shortId(m.peerId)}</span>
                         </button>
                     ))}
                 </div>
@@ -252,12 +252,12 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
     }, [channelName]);
 
     return (
-        <div className="flex h-full flex-1 flex-col bg-[#313338]">
-            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-[#26272c] px-4 shadow-sm">
-                <span className="text-lg leading-none text-[#949ba4]">#</span>
-                <span className="font-semibold text-[#f2f3f5]">{channelName}</span>
+        <div className="flex h-full flex-1 flex-col bg-surface-1">
+            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-edge px-4 shadow-sm">
+                <span className="text-lg leading-none text-muted">#</span>
+                <span className="font-semibold text-ink">{channelName}</span>
                 <span
-                    className="ml-auto whitespace-pre-line text-xs text-[#80848e]"
+                    className="ml-auto whitespace-pre-line text-xs text-faint"
                     title={subtitleTitle}
                 >
                     {subtitle}
@@ -277,7 +277,7 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
                         <div
                             key={m.id}
                             className={`mb-1 flex gap-3 ${mine ? "flex-row-reverse" : ""} ${
-                                pinged ? "rounded-lg border-l-2 border-[#f0b232] bg-[#5865f2]/10 px-1" : ""
+                                pinged ? "rounded-lg border-l-2 border-warn bg-accent/10 px-1" : ""
                             }`}
                         >
                             {firstInBlock && (
@@ -310,12 +310,12 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
                                 {firstInBlock && (
                                     <div className="mb-0.5 flex items-baseline gap-2">
                                         <span className="text-sm font-semibold" style={{color: m.authorColor}}>{m.author}</span>
-                                        <span className="text-[10px] text-[#80848e]">{m.time}</span>
-                                        {pinged && <span className="text-[10px] font-bold text-[#f0b232]">@ you</span>}
+                                        <span className="text-[10px] text-faint">{m.time}</span>
+                                        {pinged && <span className="text-[10px] font-bold text-warn">@ you</span>}
                                     </div>
                                 )}
                                 <div className={`inline-block rounded-lg px-3 py-1.5 text-left text-sm ${
-                                    mine ? "bg-[#5865f2] text-white" : "bg-[#383a40] text-[#f2f3f5]"
+                                    mine ? "bg-accent text-white" : "bg-surface-3 text-ink"
                                 }`}>
                                     {mine ? <MentionText text={m.text} members={members} dim/> : <MentionText text={m.text} members={members}/>}
                                 </div>
@@ -324,7 +324,7 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
                     );
                 })}
                 {messages.length === 0 && (
-                    <div className="flex h-full items-center justify-center text-xs text-[#80848e]">
+                    <div className="flex h-full items-center justify-center text-xs text-faint">
                         No messages yet — say hi with a {channelName ? `#${channelName}` : "channel"} ping.
                     </div>
                 )}
