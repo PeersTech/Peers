@@ -844,15 +844,30 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
+    // The DM topic for a peer is `peers/v1/ch/<their peer id>`; that full
+    // topic string is also the AEAD binding the recipient uses to open the
+    // envelope, so seal and publish must share it.
+    let topic = format!("peers/v1/ch/{channel}");
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
-        let recipients = dir.recipient_keys();
-        dir.seal(&identity, &recipients, channel.as_bytes(), text.as_bytes())?
+        let rcpt = dir.recipient_key(&channel).ok_or_else(|| {
+            PeersError::Crypto(
+                "no encryption key for this peer yet — meet them on a server or the Plaza first"
+                    .into(),
+            )
+        })?;
+        // Encrypt only to the intended recipient (not every contact), so the
+        // envelope cannot be opened by anyone else subscribed to this topic.
+        dir.seal(&identity, &[rcpt], topic.as_bytes(), text.as_bytes())?
     };
+    // Subscribe (and ask relay nodes to mesh) first: a DM whose entry was
+    // auto-created by an incoming message never had `subscribe()` called for
+    // it, and gossipsub refuses to publish to an unsubscribed topic.
+    subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Publish {
-        topic: format!("peers/v1/ch/{channel}"),
+        topic,
         data: payload,
     })
     .await?;
@@ -1044,7 +1059,8 @@ async fn announce_plaza_profile(state: &AppState) {
     let Some(identity) = state.identity.lock().unwrap().clone() else { return };
     let Some(node) = state.node.lock().unwrap().clone() else { return };
     let Some(profile) = state.profile.lock().unwrap().clone() else { return };
-    let Ok(msg) = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_PROFILE, "", Some(profile)) else { return };
+    let Ok(card) = PeerCard::sign(&identity) else { return };
+    let Ok(msg) = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_PROFILE, "", Some(profile), Some(card)) else { return };
     if let Ok(data) = serde_json::to_vec(&msg) {
         let _ = node
             .send(NodeCommand::Publish {
@@ -1068,7 +1084,8 @@ async fn publish_plaza(state: State<'_, AppState>, text: String) -> Result<(), S
     if text.is_empty() {
         return Ok(());
     }
-    let msg = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_CHAT, &text, None)?;
+    let card = PeerCard::sign(&identity)?;
+    let msg = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_CHAT, &text, None, Some(card))?;
     let data = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Publish {
@@ -1426,6 +1443,26 @@ pub fn run() {
                             if msg.verify().is_ok() {
                                 let state = app_handle.state::<AppState>();
                                 push_plaza(&state, msg.clone());
+                                // Any verified plaza post carries the sender's
+                                // X25519 card, so meeting someone here is enough
+                                // to start an encrypted DM with them.
+                                let fresh = {
+                                    let mut dir = state.dir.lock().unwrap();
+                                    match dir.as_mut() {
+                                        Some(dir) => match &msg.card {
+                                            Some(card) => {
+                                                let known = dir.recipient_key(&msg.from);
+                                                dir.remember_contact(&msg.from, card);
+                                                known != Some(card.x25519_pub)
+                                            }
+                                            None => false,
+                                        },
+                                        None => false,
+                                    }
+                                };
+                                if fresh {
+                                    persist(&state);
+                                }
                                 if msg.kind == PlazaMessage::KIND_PROFILE {
                                     if let Some(profile) = &msg.profile {
                                         state
@@ -1476,6 +1513,15 @@ pub fn run() {
                     match result {
                         Ok(plaintext) => {
                             let text = String::from_utf8_lossy(&plaintext).to_string();
+                            // Cache the sender's identity card under their real
+                            // peer id (open() internalizes it under a pseudo
+                            // key) so a reply can be encrypted to them.
+                            if let Ok(card) = crate::crypto::card::card_from_envelope(&data) {
+                                let mut dir = state.dir.lock().unwrap();
+                                if let Some(dir) = dir.as_mut() {
+                                    dir.remember_contact(&from, &card);
+                                }
+                            }
                             {
                                 let mut history = state.history.lock().unwrap();
                                 history.push_dm(
@@ -1502,6 +1548,13 @@ pub fn run() {
                             );
                         }
                         Err(e) => {
+                            // We subscribe to a contact's DM topic to send
+                            // them messages, which also surfaces other people's
+                            // envelopes addressed to that same peer. Those are
+                            // none of our business, not errors worth showing.
+                            if matches!(e, PeersError::NotAddressed) {
+                                return;
+                            }
                             let _ = app_handle.emit(
                                 "node://message",
                                 serde_json::json!({

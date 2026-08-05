@@ -693,6 +693,10 @@ pub struct PlazaMessage {
     pub text: String,
     #[serde(default)]
     pub profile: Option<SignedProfile>,
+    /// The sender's X25519 identity card, so someone who meets them here can
+    /// immediately start an encrypted DM — no server membership needed.
+    #[serde(default)]
+    pub card: Option<PeerCard>,
     pub sig: String,
 }
 
@@ -705,6 +709,7 @@ impl PlazaMessage {
         kind: &str,
         text: &str,
         profile: Option<SignedProfile>,
+        card: Option<PeerCard>,
     ) -> Result<Self> {
         let mut msg = Self {
             version: 1,
@@ -722,6 +727,7 @@ impl PlazaMessage {
                 .unwrap_or(0),
             text: text.to_string(),
             profile,
+            card,
             sig: String::new(),
         };
         let bytes = serde_json::to_vec(&msg).map_err(PeersError::Serde)?;
@@ -733,7 +739,8 @@ impl PlazaMessage {
     }
 
     /// Verifies the signature and that the embedded key matches `from`'s
-    /// peer id. If a profile rides along, it must verify and match too.
+    /// peer id. If a profile or a card rides along, those must verify and
+    /// be bound to the same sender too.
     pub fn verify(&self) -> Result<()> {
         let pk = ed25519::PublicKey::try_from_bytes(&self.pubkey)
             .map_err(|_| PeersError::SnapshotCorrupt)?;
@@ -753,6 +760,12 @@ impl PlazaMessage {
         if let Some(profile) = &self.profile {
             profile.verify()?;
             if profile.peer_id != self.from {
+                return Err(PeersError::SnapshotCorrupt);
+            }
+        }
+        if let Some(card) = &self.card {
+            card.verify()?;
+            if card.ed_pub != self.pubkey {
                 return Err(PeersError::SnapshotCorrupt);
             }
         }
