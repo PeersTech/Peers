@@ -74,6 +74,11 @@ The binary lands at `backend/target/release/peers`.
 > Build on a bigger machine with the same architecture and `scp` the binary
 > across, or add swap.
 
+> **Running on Pterodactyl?** There is a ready-made egg at
+> [PeersTech/ptero-egg](https://github.com/PeersTech/ptero-egg) that does all of
+> this for you, including the public-address handling in step 3. Note that it
+> needs a custom Docker image — the reasons are in that repo's README.
+
 ### 2. Open the firewall
 
 The node listens on a TCP and a QUIC (UDP) port — 4001 by default. Allow both
