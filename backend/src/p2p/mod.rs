@@ -36,8 +36,18 @@ pub enum NodeCommand {
     /// Turn the node into an always-on relay: subscribes to
     /// [`RELAY_CONTROL_TOPIC`] and meshes any topic it's asked to relay.
     Relay(bool),
-    /// Listen for connections on all interfaces.
-    Listen,
+    /// Listen for connections on all interfaces, on `port` for both TCP and
+    /// QUIC. Port 0 lets the OS pick (fine for GUI clients, which are dialed
+    /// over a relay circuit rather than by address); a node needs a fixed port
+    /// so the address it hands out stays valid across restarts.
+    Listen {
+        port: u16,
+    },
+    /// Declare publicly reachable addresses the swarm can't observe itself —
+    /// on a cloud VM the NIC only carries the private address. Each is added
+    /// via `add_external_address`, so it's advertised over identify and the
+    /// DHT immediately instead of after the first inbound connection.
+    Announce(Vec<Multiaddr>),
     /// Dial bootstrap multiaddrs, seed the DHT routing table, bootstrap.
     Bootstrap(Vec<Multiaddr>),
     /// Dial a single peer directly (e.g. the owner behind an invite).
@@ -294,8 +304,11 @@ impl Node {
                     }
                 }
             }
-            NodeCommand::Listen => {
-                for addr in ["/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"] {
+            NodeCommand::Listen { port } => {
+                for addr in [
+                    format!("/ip4/0.0.0.0/tcp/{port}"),
+                    format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
+                ] {
                     match addr.parse::<Multiaddr>() {
                         Ok(ma) => {
                             let _ = self.swarm.listen_on(ma);
@@ -304,6 +317,11 @@ impl Node {
                             message: format!("bad listen addr {addr}: {e}"),
                         }),
                     }
+                }
+            }
+            NodeCommand::Announce(addrs) => {
+                for ma in addrs {
+                    self.swarm.add_external_address(ma);
                 }
             }
             NodeCommand::Bootstrap(addrs) => {

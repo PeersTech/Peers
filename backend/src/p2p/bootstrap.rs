@@ -42,6 +42,62 @@ pub fn known_nodes() -> Vec<Multiaddr> {
     out
 }
 
+/// TCP/QUIC port to bind, from the `PEERS_PORT` env var.
+///
+/// `default` is what the caller wants when the var is absent or unparseable:
+/// `--node` passes 4001 (the port `docs/running-a-node.md` tells operators to
+/// open in the firewall), GUI clients pass 0 to keep an ephemeral port, since
+/// nobody dials a client by address — they're reached over a relay circuit.
+///
+/// A node's port has to be stable across restarts: clients hold it in
+/// `nodes.json`, and an OS-assigned port silently invalidates every one of
+/// those configs on each restart even though the peer id is unchanged.
+pub fn listen_port(default: u16) -> u16 {
+    match std::env::var("PEERS_PORT") {
+        Ok(v) => parse_port(&v, default),
+        Err(_) => default,
+    }
+}
+
+/// Split out from [`listen_port`] so it can be tested without mutating the
+/// process-global environment, which races across parallel test threads.
+fn parse_port(raw: &str, default: u16) -> u16 {
+    raw.trim().parse::<u16>().unwrap_or(default)
+}
+
+/// Publicly reachable addresses declared by the operator via `PEERS_ANNOUNCE`
+/// (comma-separated, e.g. `/ip4/203.0.113.7/tcp/4001`).
+///
+/// On a cloud VM the NIC only carries the *private* address — the public one
+/// lives on the provider's NAT — so the swarm's own listen addresses are
+/// useless to a remote client. libp2p can learn the real address from
+/// identify's `observed_addr`, but only once an outside peer has connected,
+/// which is exactly what an unadvertised node can't get. Declaring it breaks
+/// that circle.
+///
+/// Entries carry no `/p2p/<id>` suffix; the node appends its own peer id when
+/// printing them.
+pub fn announce_addrs() -> Vec<Multiaddr> {
+    match std::env::var("PEERS_ANNOUNCE") {
+        Ok(v) => parse_announce(&v),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Split out from [`announce_addrs`] for the same reason as [`parse_port`].
+fn parse_announce(raw: &str) -> Vec<Multiaddr> {
+    raw.split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                None
+            } else {
+                part.parse::<Multiaddr>().ok()
+            }
+        })
+        .collect()
+}
+
 /// Resolves the well-known IPFS public libp2p bootstrap nodes via
 /// `_dnsaddr.bootstrap.libp2p.io` TXT records (magnet-style discovery).
 ///
@@ -76,6 +132,39 @@ pub async fn resolve_public_bootstrap() -> Vec<Multiaddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_override_wins_over_default() {
+        assert_eq!(parse_port("4001", 0), 4001);
+        assert_eq!(parse_port("  4001  ", 0), 4001);
+    }
+
+    /// Garbage must not silently drop the node onto an ephemeral port — that
+    /// is the failure this whole setting exists to prevent, so it falls back
+    /// to the caller's stable default instead.
+    #[test]
+    fn unparseable_port_falls_back_to_default() {
+        assert_eq!(parse_port("", 4001), 4001);
+        assert_eq!(parse_port("http", 4001), 4001);
+        assert_eq!(parse_port("70000", 4001), 4001); // > u16::MAX
+        assert_eq!(parse_port("-1", 4001), 4001);
+    }
+
+    #[test]
+    fn announce_splits_on_commas_and_trims() {
+        let addrs = parse_announce("/ip4/203.0.113.7/tcp/4001, /ip4/203.0.113.7/udp/4001/quic-v1");
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(addrs[0].to_string(), "/ip4/203.0.113.7/tcp/4001");
+        assert_eq!(addrs[1].to_string(), "/ip4/203.0.113.7/udp/4001/quic-v1");
+    }
+
+    #[test]
+    fn announce_drops_invalid_and_empty_entries() {
+        let addrs = parse_announce("not-a-multiaddr,,/ip4/203.0.113.7/tcp/4001,   ");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].to_string(), "/ip4/203.0.113.7/tcp/4001");
+        assert!(parse_announce("").is_empty());
+    }
 
     #[tokio::test]
     #[ignore = "requires network access; run manually or in CI"]

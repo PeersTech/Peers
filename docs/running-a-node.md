@@ -76,13 +76,15 @@ The binary lands at `backend/target/release/peers`.
 
 ### 2. Open the firewall
 
-The node listens on a TCP and a QUIC (UDP) port. Pick one port and allow both
+The node listens on a TCP and a QUIC (UDP) port — 4001 by default. Allow both
 protocols:
 
 ```sh
 sudo ufw allow 4001/tcp
 sudo ufw allow 4001/udp
 ```
+
+If you set `PEERS_PORT` (below), open that port instead.
 
 On a VPS, do the same in the provider's own firewall/security-group console —
 that one is separate from `ufw` and is the usual reason a node looks up but is
@@ -114,6 +116,45 @@ Copy the `PEERS_NODES=` line that shows a **public** address. Lines marked
 The node's identity is generated on first run and stored `0600` at
 `<config>/peers/node_identity.json`. **Keep that file.** Deleting it changes the
 node's peer ID, and every client pointing at the old ID stops connecting.
+
+#### On a cloud VM (AWS, GCP, Azure, Hetzner…)
+
+Most cloud instances do not have their public IP on the network interface — the
+provider NATs it. The node can only see the private address, so it will print
+something like `/ip4/172.31.4.9/tcp/4001` and never mention your real address.
+**Handing that line to a client cannot work.**
+
+Tell the node its public address with `PEERS_ANNOUNCE`:
+
+```sh
+PEERS_ANNOUNCE=/ip4/203.0.113.7/tcp/4001 ./peers --node
+```
+
+It then prints the address clients actually need, and advertises it to the DHT
+straight away instead of waiting to learn it from the first inbound connection:
+
+```
+announcing: /ip4/203.0.113.7/tcp/4001/p2p/12D3KooW…
+  → PEERS_NODES=/ip4/203.0.113.7/tcp/4001/p2p/12D3KooW…
+```
+
+With `PEERS_ANNOUNCE` set, private listener addresses are demoted to
+`local only`, so there is only one line to copy.
+
+#### Node environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PEERS_PORT` | `4001` | TCP and QUIC port to bind. Must stay fixed — clients store it. |
+| `PEERS_ANNOUNCE` | — | Comma-separated public multiaddrs, **without** `/p2p/<id>`. Required on NAT'd/cloud hosts. |
+| `PEERS_NODES` | — | Other nodes to dial and reserve relay slots on, so nodes can chain. |
+| `PEERS_NO_RELAY` | — | Presence disables relaying entirely. Overrides `--node`; don't set it on a node. |
+
+To announce both transports, pass both:
+
+```sh
+PEERS_ANNOUNCE=/ip4/203.0.113.7/tcp/4001,/ip4/203.0.113.7/udp/4001/quic-v1
+```
 
 ### 4. Point your clients at it
 
@@ -178,6 +219,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=peers
+Environment=PEERS_PORT=4001
+# On a cloud VM, uncomment with your public IP — the instance cannot see it.
+#Environment=PEERS_ANNOUNCE=/ip4/203.0.113.7/tcp/4001
 ExecStart=/usr/local/bin/peers --node
 Restart=always
 RestartSec=10
@@ -227,6 +271,12 @@ nothing.
 
 ## Troubleshooting
 
+**The node only prints private addresses (`10.x`, `172.16–31.x`, `192.168.x`).**
+It is behind NAT — almost always a cloud VM whose public IP lives on the
+provider's edge, not on the instance's interface. The node cannot discover this
+by itself. Set `PEERS_ANNOUNCE=/ip4/<public-ip>/tcp/4001` and restart. Do not
+hand the private line to a remote client; it can never work.
+
 **Client still says `no relay node configured`.**
 `PEERS_NODES` was not visible to the app. If you launched Peers from a desktop
 icon it will not see a shell `export` — use `nodes.json` instead.
@@ -241,8 +291,9 @@ Both clients must point at the *same* node for it to bridge them. Confirm the
 peer ID in both configs matches the node's.
 
 **It worked, then stopped after a reboot.**
-`node_identity.json` was lost, so the node has a new peer ID. Restore the file
-or redistribute the new `PEERS_NODES` line.
+Either `node_identity.json` was lost, so the node has a new peer ID — restore
+the file or redistribute the new `PEERS_NODES` line. Or the port moved: pin it
+with `PEERS_PORT=4001` so it survives restarts.
 
 **Stuck on `via relay`, never `direct`.**
 Normal. DCUtR cannot punch through every NAT combination — symmetric NAT on

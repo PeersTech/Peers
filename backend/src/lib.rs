@@ -336,8 +336,14 @@ async fn finish_unlock(
         }
     });
 
-    // Listen + bootstrap against the public IPFS testnet.
-    let _ = handle.send(NodeCommand::Listen).await;
+    // Listen + bootstrap against the public IPFS testnet. Port 0 (ephemeral)
+    // is right for a GUI client: peers reach it over a relay circuit, not by
+    // address, so there's nothing to keep stable across restarts.
+    let _ = handle
+        .send(NodeCommand::Listen {
+            port: crate::p2p::bootstrap::listen_port(0),
+        })
+        .await;
     // The relay-control topic is how we register with (and reach) the
     // always-on backbone nodes; we must subscribe to publish on it.
     let _ = handle
