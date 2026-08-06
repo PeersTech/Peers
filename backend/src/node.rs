@@ -120,6 +120,19 @@ pub async fn run_headless() -> Result<()> {
                 NodeEvent::ExternalAddr { addr, confirmed } if *confirmed => {
                     println!("external address confirmed: {addr}/p2p/{peer}");
                 }
+                // AutoNAT dial-back result. On a node this is the single most
+                // useful line in the log: "private" means clients cannot reach
+                // it however healthy the process looks, and that is otherwise
+                // invisible until someone reports that chat does not work.
+                NodeEvent::NatStatus { status } => match status.as_str() {
+                    "public" => println!("reachability: public (peers dialed us successfully)"),
+                    "private" => eprintln!(
+                        "reachability: PRIVATE — peers tried to dial this node and could not \
+                         reach it. Check the firewall and the provider's security group, and \
+                         set PEERS_ANNOUNCE if this machine is behind NAT."
+                    ),
+                    _ => println!("reachability: unknown (not enough peers to probe with yet)"),
+                },
                 NodeEvent::Error { message } => eprintln!("node error: {message}"),
                 _ => {}
             }

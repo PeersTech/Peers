@@ -81,6 +81,9 @@ pub struct AppState {
     external_addrs: Mutex<HashSet<String>>,
     /// Relay nodes we currently hold a circuit reservation with.
     relay_reservations: Mutex<HashSet<String>>,
+    /// AutoNAT's measured verdict on whether peers can dial us. Unlike
+    /// `external_addrs` this is a dial-back test, not a peer's claim.
+    nat: Mutex<crate::p2p::Nat>,
 }
 
 impl Default for AppState {
@@ -102,6 +105,7 @@ impl Default for AppState {
             plaza_seen: Mutex::new(HashMap::new()),
             external_addrs: Mutex::new(HashSet::new()),
             relay_reservations: Mutex::new(HashSet::new()),
+            nat: Mutex::new(crate::p2p::Nat::Unknown),
         }
     }
 }
@@ -318,6 +322,14 @@ async fn finish_unlock(
                         set.remove(relay_peer);
                     }
                 }
+                NodeEvent::NatStatus { status } => {
+                    let st = app2.state::<AppState>();
+                    *st.nat.lock().unwrap() = match status.as_str() {
+                        "public" => crate::p2p::Nat::Public,
+                        "private" => crate::p2p::Nat::Private,
+                        _ => crate::p2p::Nat::Unknown,
+                    };
+                }
                 NodeEvent::CodeResolved { code, peer_id } => {
                     let _ = app2.emit(
                         "code://resolved",
@@ -409,8 +421,12 @@ pub struct NetStatus {
     pub listen_addrs: Vec<String>,
     pub external_addrs: Vec<String>,
     pub relay_reservations: usize,
-    /// Heuristic: "direct" | "relayed" | "unknown". Not a guarantee.
+    /// "direct" | "relayed" | "unreachable" | "unknown". Backed by an AutoNAT
+    /// dial-back test once one has completed; a heuristic until then.
     pub reachability: &'static str,
+    /// True once AutoNAT has actually measured reachability, so the UI can
+    /// stop hedging. False means `reachability` is still inferred.
+    pub reachability_measured: bool,
     /// Whether any always-on nodes are configured. When false and
     /// `reachability` is "unknown", cross-NAT chat will not work — see
     /// docs/running-a-node.md.
@@ -424,10 +440,12 @@ fn net_status(state: State<AppState>) -> Result<NetStatus, String> {
     let external: Vec<String> = state.external_addrs.lock().unwrap().iter().cloned().collect();
     let relay_reservations = state.relay_reservations.lock().unwrap().len();
     let peers = state.presence.lock().unwrap().len();
+    let nat = *state.nat.lock().unwrap();
     Ok(NetStatus {
         peers,
         listen_addrs,
-        reachability: crate::p2p::reachability(external.len(), relay_reservations),
+        reachability: crate::p2p::reachability(external.len(), relay_reservations, nat),
+        reachability_measured: nat != crate::p2p::Nat::Unknown,
         external_addrs: external,
         relay_reservations,
         known_nodes: crate::p2p::bootstrap::known_nodes().len(),
@@ -450,6 +468,9 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.plaza_seen.lock().unwrap() = HashMap::new();
     *state.external_addrs.lock().unwrap() = HashSet::new();
     *state.relay_reservations.lock().unwrap() = HashSet::new();
+    // The next unlock starts a fresh swarm, so the old verdict says nothing
+    // about it — and a stale "unreachable" would be read as a live diagnosis.
+    *state.nat.lock().unwrap() = crate::p2p::Nat::Unknown;
     Ok(())
 }
 
@@ -1610,12 +1631,14 @@ mod tests {
             external_addrs: vec![],
             relay_reservations: 1,
             reachability: "relayed",
+            reachability_measured: false,
             known_nodes: 0,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"listenAddrs\""), "frontend expects camelCase");
         assert!(json.contains("\"externalAddrs\""));
         assert!(json.contains("\"relayReservations\""));
+        assert!(json.contains("\"reachabilityMeasured\""));
         assert!(json.contains("\"knownNodes\""));
     }
 

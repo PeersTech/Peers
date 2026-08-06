@@ -160,8 +160,11 @@ export interface NetStatus {
     listenAddrs: string[];
     externalAddrs: string[];
     relayReservations: number;
-    /** Heuristic, not a guarantee. */
-    reachability: "direct" | "relayed" | "unknown";
+    /** Measured by an AutoNAT dial-back once `reachabilityMeasured` is true;
+     *  inferred from observed addresses until then. */
+    reachability: "direct" | "relayed" | "unreachable" | "unknown";
+    /** True once AutoNAT has actually probed us, so the UI can stop hedging. */
+    reachabilityMeasured: boolean;
     /** How many always-on nodes are configured. 0 means cross-NAT chat
      *  will not work — see docs/running-a-node.md. */
     knownNodes: number;

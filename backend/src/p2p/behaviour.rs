@@ -2,7 +2,8 @@ use crate::p2p::blobs::{BlobCodec, BLOB_PROTOCOL};
 use libp2p::kad::store::MemoryStore;
 use libp2p::request_response;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{dcutr, gossipsub, identify, kad, ping, relay};
+use libp2p::{autonat, connection_limits, dcutr, gossipsub, identify, kad, ping, relay};
+use std::convert::Infallible;
 use std::time::Duration;
 
 /// The full set of protocols the Peers node speaks. The `NetworkBehaviour`
@@ -11,6 +12,10 @@ use std::time::Duration;
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "Event")]
 pub struct Behaviour {
+    /// Hard caps on raw connections. **Must stay the first field**: the derive
+    /// consults behaviours in declaration order, so this one gets to refuse a
+    /// connection before any protocol below it allocates state for it.
+    pub connection_limits: connection_limits::Behaviour,
     /// `/ipfs/id/1.0.0` — lets peers announce listen addresses so the DHT
     /// routing table can be populated (kad does NOT hook into identify
     /// automatically; we do it in the event loop).
@@ -35,6 +40,11 @@ pub struct Behaviour {
     /// DCUtR — after a relayed rendezvous, hole-punches NATs to upgrade to
     /// a direct (faster) connection.
     pub dcutr: dcutr::Behaviour,
+    /// AutoNAT v1 — asks other peers to dial us back on the addresses we
+    /// believe are ours, and reports whether they succeeded. This is a
+    /// *measurement*, unlike identify's `observed_addr`, which is only the
+    /// remote's claim about what it saw and which a peer can simply lie about.
+    pub autonat: autonat::Behaviour,
 }
 
 /// One variant per sub-behaviour; the swarm loop matches on these.
@@ -48,6 +58,7 @@ pub enum Event {
     RelayClient(relay::client::Event),
     RelayServer(relay::Event),
     Dcutr(dcutr::Event),
+    Autonat(autonat::Event),
 }
 
 impl From<identify::Event> for Event {
@@ -95,6 +106,91 @@ impl From<relay::Event> for Event {
 impl From<dcutr::Event> for Event {
     fn from(event: dcutr::Event) -> Self {
         Self::Dcutr(event)
+    }
+}
+
+impl From<autonat::Event> for Event {
+    fn from(event: autonat::Event) -> Self {
+        Self::Autonat(event)
+    }
+}
+
+/// `connection_limits::Behaviour` never emits anything — it works purely by
+/// refusing connections — so its `ToSwarm` is the never type. The derive still
+/// funnels it through `Event::from`, hence this impl; the `match` has no arms
+/// because there is no value to match on.
+impl From<Infallible> for Event {
+    fn from(never: Infallible) -> Self {
+        match never {}
+    }
+}
+
+/// Hard caps on raw connections, deliberately **separate** from [`RelayCaps`].
+///
+/// Relay caps bound *circuits* — connections we have already accepted and are
+/// then asked to forward. They say nothing about the connection itself, so a
+/// peer that never requests a circuit can still open sockets until the process
+/// runs out of file descriptors or memory. On the 1 GB VPS this project tells
+/// people to deploy on, that is the cheapest way to take a node down, and it
+/// requires no protocol-level misbehaviour at all.
+///
+/// These are not folded into `RelayCaps` because the two answer different
+/// questions. `PEERS_NO_RELAY=1` means "forward nothing", not "accept
+/// nothing" — an opted-out client still needs its own connections to hold its
+/// own conversations, so it keeps the client tier here.
+pub struct ConnCaps {
+    pub max_pending_incoming: u32,
+    pub max_pending_outgoing: u32,
+    pub max_established_incoming: u32,
+    pub max_established_outgoing: u32,
+    pub max_established_per_peer: u32,
+}
+
+impl ConnCaps {
+    /// A GUI client. Outgoing is the larger budget: a client dials relays,
+    /// bootstrap nodes and DHT peers, but very little dials it.
+    pub fn client() -> Self {
+        Self {
+            max_pending_incoming: 16,
+            max_pending_outgoing: 32,
+            max_established_incoming: 64,
+            max_established_outgoing: 128,
+            max_established_per_peer: 8,
+        }
+    }
+
+    /// An always-on `--node`. Inbound is the large budget here — being dialed
+    /// is the entire job — but it is still bounded, which is the point.
+    ///
+    /// Sized well above [`RelayCaps::node`]'s 64 reservations so the relay
+    /// tier stays the binding constraint. A connection cap that bites first
+    /// would show up as connections refused at random rather than as
+    /// reservations declined, which is far harder to diagnose.
+    pub fn node() -> Self {
+        Self {
+            max_pending_incoming: 64,
+            max_pending_outgoing: 64,
+            max_established_incoming: 512,
+            max_established_outgoing: 256,
+            max_established_per_peer: 8,
+        }
+    }
+
+    pub fn for_role(serve_relay: bool) -> Self {
+        if serve_relay {
+            Self::node()
+        } else {
+            Self::client()
+        }
+    }
+
+    fn to_limits(&self) -> connection_limits::ConnectionLimits {
+        connection_limits::ConnectionLimits::default()
+            .with_max_pending_incoming(Some(self.max_pending_incoming))
+            .with_max_pending_outgoing(Some(self.max_pending_outgoing))
+            .with_max_established_incoming(Some(self.max_established_incoming))
+            .with_max_established_outgoing(Some(self.max_established_outgoing))
+            .with_max_established_per_peer(Some(self.max_established_per_peer))
     }
 }
 
@@ -225,7 +321,26 @@ impl Behaviour {
 
         let dcutr = dcutr::Behaviour::new(peer_id);
 
+        let connection_limits =
+            connection_limits::Behaviour::new(ConnCaps::for_role(serve_relay).to_limits());
+
+        // AutoNAT probes cost a dial on whoever answers, so a node — which
+        // has more peers asking it for things — probes less often than a
+        // client that actually needs the answer to decide whether to hold a
+        // relay reservation.
+        let autonat = autonat::Behaviour::new(
+            peer_id,
+            autonat::Config {
+                retry_interval: Duration::from_secs(if serve_relay { 300 } else { 90 }),
+                refresh_interval: Duration::from_secs(if serve_relay { 900 } else { 600 }),
+                boot_delay: Duration::from_secs(10),
+                throttle_server_period: Duration::from_secs(90),
+                ..Default::default()
+            },
+        );
+
         Ok(Self {
+            connection_limits,
             identify,
             ping,
             kademlia,
@@ -234,6 +349,7 @@ impl Behaviour {
             relay_client,
             relay_server,
             dcutr,
+            autonat,
         })
     }
 }
@@ -287,5 +403,60 @@ mod cap_tests {
             assert!(c.max_reservations_per_peer < c.max_reservations);
             assert!(c.max_circuits_per_peer < c.max_circuits);
         }
+    }
+
+    /// Every tier must cap raw connections. An unbounded one is the cheapest
+    /// way to exhaust a small VPS, and it needs no protocol misbehaviour —
+    /// just sockets.
+    #[test]
+    fn every_tier_bounds_connections() {
+        for c in [ConnCaps::client(), ConnCaps::node()] {
+            assert!(c.max_established_incoming > 0);
+            assert!(c.max_established_outgoing > 0);
+            assert!(c.max_pending_incoming > 0);
+            assert!(c.max_established_per_peer > 0);
+        }
+    }
+
+    /// The relay budget must bite before the connection budget does. If it
+    /// were the other way round, a busy node would refuse connections at
+    /// random instead of declining reservations, which looks like a network
+    /// fault rather than a node at capacity.
+    #[test]
+    fn connection_cap_leaves_room_for_every_reservation() {
+        let conns = ConnCaps::node();
+        let relay = RelayCaps::node();
+        assert!(
+            conns.max_established_incoming as usize > relay.max_reservations,
+            "connection cap must not be the binding constraint on a node"
+        );
+    }
+
+    /// A node exists to be dialed; a client mostly dials out. If these were
+    /// reversed the node would turn peers away while idle.
+    #[test]
+    fn node_accepts_more_inbound_than_a_client() {
+        assert!(
+            ConnCaps::node().max_established_incoming > ConnCaps::client().max_established_incoming
+        );
+    }
+
+    /// One peer must never be able to occupy the whole inbound budget by
+    /// itself — that is a single-peer denial of service.
+    #[test]
+    fn no_single_peer_can_exhaust_the_budget() {
+        for c in [ConnCaps::client(), ConnCaps::node()] {
+            assert!(c.max_established_per_peer < c.max_established_incoming);
+            assert!(c.max_established_per_peer < c.max_established_outgoing);
+        }
+    }
+
+    /// `PEERS_NO_RELAY=1` means "forward nothing", not "accept nothing" — an
+    /// opted-out client still needs connections for its own conversations.
+    #[test]
+    fn opting_out_of_relaying_does_not_disconnect_you() {
+        let c = ConnCaps::for_role(false);
+        assert!(c.max_established_outgoing > 0);
+        assert!(c.max_established_incoming > 0);
     }
 }

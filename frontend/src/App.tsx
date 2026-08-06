@@ -1087,14 +1087,18 @@ export default function App() {
                 ? 'direct'
                 : net.reachability === 'relayed'
                   ? 'via relay'
-                  : net.knownNodes === 0
-                    ? 'no relay node configured'
-                    : 'connecting';
+                  : net.reachability === 'unreachable'
+                    ? 'unreachable'
+                    : net.knownNodes === 0
+                      ? 'no relay node configured'
+                      : 'connecting';
         return `${net.peers} peer${net.peers === 1 ? '' : 's'} · ${reach}`;
     };
     const netTitle = net
         ? [
-              `reachability: ${net.reachability} (best guess)`,
+              // Say which of the two it is. "best guess" on a measured result
+              // undersells it; dropping the caveat on an inferred one oversells it.
+              `reachability: ${net.reachability}${net.reachabilityMeasured ? ' (measured)' : ' (best guess)'}`,
               `relay reservations: ${net.relayReservations}`,
               `configured nodes: ${net.knownNodes}`,
               net.externalAddrs.length ? `external: ${net.externalAddrs.join(', ')}` : '',
@@ -1106,7 +1110,7 @@ export default function App() {
 
     return (
         <div className="flex h-full w-full flex-col bg-surface-1 text-ink">
-            {net && net.knownNodes === 0 && net.reachability === 'unknown' && (
+            {net && net.knownNodes === 0 && net.reachability !== 'direct' && (
                 <div
                     className="shrink-0 bg-accent-soft px-4 py-1.5 text-[11px] text-warn"
                     title="Two peers behind NAT cannot connect without a reachable node in between."

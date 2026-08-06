@@ -13,9 +13,36 @@ use libp2p::request_response::{
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
 use libp2p::swarm::SwarmEvent;
-use libp2p::{gossipsub, identify, kad, ping, relay, Multiaddr, PeerId, Swarm, SwarmBuilder};
+use libp2p::{
+    autonat, gossipsub, identify, kad, ping, relay, Multiaddr, PeerId, Swarm, SwarmBuilder,
+};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
+
+/// How often the node re-checks that its relay reservations are still up.
+const TICK: Duration = Duration::from_secs(10);
+
+/// Ticks between DHT re-bootstraps (5 minutes). Kademlia refreshes buckets on
+/// its own, but a laptop that suspends overnight comes back with a routing
+/// table full of peers that have long since gone.
+const REBOOTSTRAP_TICKS: u64 = 30;
+
+/// Backoff ceiling, in ticks (5 minutes).
+const MAX_BACKOFF_TICKS: u32 = 30;
+
+/// How many *distinct* peers must independently report the same address for
+/// us before we believe it and start advertising it.
+///
+/// identify's `observed_addr` is a claim, not a measurement: a single peer can
+/// report whatever it likes, and `add_external_address` takes it at face
+/// value. One peer should not be able to make us advertise a bogus address to
+/// the DHT — or make us report "direct" reachability we do not have.
+const OBSERVED_CONFIRMATIONS: usize = 3;
+
+/// Cap on distinct claimed addresses tracked at once, so a peer inventing a
+/// new address on every identify exchange cannot grow the map without bound.
+const MAX_OBSERVED_TRACKED: usize = 32;
 
 /// Gossip topic shared by relay nodes and clients. Clients publish tiny
 /// "please mesh topic X for me" notices on it so always-on relay nodes
@@ -127,25 +154,67 @@ pub enum NodeEvent {
         code: String,
         peer_id: Option<String>,
     },
+    /// AutoNAT reached (or revised) a verdict on whether peers can dial us.
+    /// `"public"`, `"private"` or `"unknown"`.
+    NatStatus {
+        status: String,
+    },
     Error {
         message: String,
     },
 }
 
-/// Best-guess reachability from what libp2p has confirmed. A confirmed
-/// external address means peers can dial us directly; a relay reservation
-/// with no external address means they reach us through a relay.
+/// What AutoNAT has determined about our reachability, if anything.
 ///
-/// This is a heuristic, not a measurement — it can report "direct" for an
-/// address that some networks cannot actually reach — and callers must
-/// present it as a guess.
-pub fn reachability(external_addrs: usize, relay_reservations: usize) -> &'static str {
-    if external_addrs > 0 {
-        "direct"
-    } else if relay_reservations > 0 {
-        "relayed"
-    } else {
-        "unknown"
+/// This is a measurement, not a guess: AutoNAT asks other peers to dial us
+/// back on the addresses we believe are ours and reports whether they
+/// actually got through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nat {
+    /// AutoNAT has not reached a verdict yet — the normal state at startup,
+    /// and the permanent state if too few peers are around to probe with.
+    Unknown,
+    /// Peers dialed us successfully. We are directly reachable.
+    Public,
+    /// Peers tried and failed. We are behind a NAT and need a relay.
+    Private,
+}
+
+/// Reachability, preferring AutoNAT's measurement over inference.
+///
+/// `external_addrs` and `relay_reservations` remain the fallback for the
+/// window before AutoNAT reports (and for peers with too few AutoNAT servers
+/// around to get an answer). They are weaker evidence: an external address is
+/// only an address some peer *claimed* to see, which is not the same as one
+/// that anybody can actually reach.
+///
+/// The disagreement case is the interesting one. When AutoNAT says `Private`
+/// but we hold external addresses, AutoNAT wins — it tried to dial and
+/// failed, which is dispositive; the address was observed through a NAT
+/// mapping that does not accept unsolicited inbound. Reporting "direct" there
+/// is how a user ends up told that cross-NAT chat should work while it
+/// silently does not.
+pub fn reachability(external_addrs: usize, relay_reservations: usize, nat: Nat) -> &'static str {
+    match nat {
+        Nat::Public => "direct",
+        Nat::Private => {
+            if relay_reservations > 0 {
+                "relayed"
+            } else {
+                // Confirmed unreachable and holding no relay: peers cannot
+                // get to us at all. Not "unknown" — we know, and it is bad.
+                "unreachable"
+            }
+        }
+        Nat::Unknown => {
+            if external_addrs > 0 {
+                "direct"
+            } else if relay_reservations > 0 {
+                "relayed"
+            } else {
+                "unknown"
+            }
+        }
     }
 }
 
@@ -242,9 +311,62 @@ struct Node {
     relay_reservations: HashSet<PeerId>,
     /// Addresses libp2p has confirmed as externally observed.
     external_addrs: HashSet<Multiaddr>,
+    /// Distinct peers who have claimed each address as ours, via identify.
+    /// An address is only believed once [`OBSERVED_CONFIRMATIONS`] separate
+    /// peers agree — see that constant for why one is not enough.
+    observed_by: HashMap<Multiaddr, HashSet<PeerId>>,
+    /// Relay nodes we were told to hold a reservation with, and the state of
+    /// our attempts to get one. Kept for the lifetime of the process: a node
+    /// that is down now is exactly the one we must keep retrying.
+    relay_targets: HashMap<Multiaddr, Retry>,
+    /// AutoNAT's verdict on whether peers can dial us.
+    nat: Nat,
+    /// Ticks elapsed, for scheduling the periodic DHT re-bootstrap.
+    ticks: u64,
     /// Whether this node relays gossip for topics it's told about.
     relay: bool,
     events: broadcast::Sender<NodeEvent>,
+}
+
+/// Retry bookkeeping for one relay target.
+struct Retry {
+    /// The relay's peer id, learned once we have connected to it. Until then
+    /// we only know an address, which is not enough to tell whether the
+    /// reservation we are holding is with *this* target.
+    peer: Option<PeerId>,
+    /// Ticks remaining before the next attempt.
+    wait: u32,
+    /// Current backoff, doubling on each failure.
+    backoff: u32,
+}
+
+impl Retry {
+    fn new() -> Self {
+        // First attempt fires on the next tick rather than immediately: the
+        // initial dial has already been issued by the caller.
+        Self {
+            peer: None,
+            wait: 1,
+            backoff: 1,
+        }
+    }
+
+    /// Called when an attempt failed or the reservation was lost. Doubles the
+    /// wait, capped, so a node that is down for an hour is not hammered every
+    /// ten seconds by every client that has it configured.
+    fn failed(&mut self) {
+        self.backoff = (self.backoff * 2).min(MAX_BACKOFF_TICKS);
+        self.wait = self.backoff;
+    }
+
+    /// Called when a reservation is confirmed. Resets the backoff so the
+    /// *next* outage retries promptly instead of inheriting the delay earned
+    /// by the previous one.
+    fn succeeded(&mut self, peer: PeerId) {
+        self.peer = Some(peer);
+        self.backoff = 1;
+        self.wait = 0;
+    }
 }
 
 impl Node {
@@ -265,9 +387,18 @@ impl Node {
             peer_addresses: HashMap::new(),
             relay_reservations: HashSet::new(),
             external_addrs: HashSet::new(),
+            observed_by: HashMap::new(),
+            relay_targets: HashMap::new(),
+            nat: Nat::Unknown,
+            ticks: 0,
             relay: false,
             events,
         };
+
+        // A steady tick rather than a timer per target: the work is a handful
+        // of counter decrements, and one timer keeps the select arm simple.
+        let mut tick = tokio::time::interval(TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -279,12 +410,91 @@ impl Node {
                     None => break,
                     Some(ev) => node.handle_swarm_event(ev),
                 },
+                _ = tick.tick() => node.on_tick(),
             }
         }
     }
 
+    /// Periodic upkeep: re-establish lost relay reservations, and refresh the
+    /// DHT routing table.
+    ///
+    /// Without this, `Dial` is fire-and-forget — if a relay node restarts, the
+    /// reservation is gone and nothing ever asks for another one. The client
+    /// stays silently unreachable until the user restarts the app, which is
+    /// indistinguishable from the network being broken.
+    fn on_tick(&mut self) {
+        self.ticks = self.ticks.wrapping_add(1);
+
+        // Collect first: `retry_relay` borrows the swarm mutably.
+        let mut due: Vec<Multiaddr> = Vec::new();
+        for (addr, retry) in self.relay_targets.iter_mut() {
+            // Already holding a reservation with this relay — nothing to do.
+            if retry.peer.is_some_and(|p| self.relay_reservations.contains(&p)) {
+                retry.wait = 0;
+                continue;
+            }
+            if retry.wait > 0 {
+                retry.wait -= 1;
+                continue;
+            }
+            due.push(addr.clone());
+        }
+
+        for addr in due {
+            self.retry_relay(&addr);
+            if let Some(retry) = self.relay_targets.get_mut(&addr) {
+                retry.failed();
+            }
+        }
+
+        if self.ticks % REBOOTSTRAP_TICKS == 0 {
+            // Fails harmlessly when the routing table is empty, which is the
+            // case we would most like it to succeed in — but there is nobody
+            // to ask, so there is nothing to do about it.
+            let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
+        }
+    }
+
+    /// Re-dial a relay and ask for a circuit slot again.
+    fn retry_relay(&mut self, addr: &Multiaddr) {
+        let _ = self.swarm.dial(addr.clone());
+        let mut circuit = addr.clone();
+        circuit.push(Protocol::P2pCircuit);
+        // An error here is expected while the relay is down; reporting it every
+        // ten seconds would bury real errors in the log, and the backoff
+        // already communicates the state.
+        let _ = self.swarm.listen_on(circuit);
+    }
+
     fn emit(&self, ev: NodeEvent) {
         let _ = self.events.send(ev);
+    }
+
+    /// Records that `peer` claims `addr` is ours, and adopts the address once
+    /// enough distinct peers independently agree.
+    ///
+    /// `add_external_address` is what makes us advertise an address over
+    /// identify and the DHT, and what drives the "direct" reachability
+    /// reading. Calling it on a single peer's say-so lets that one peer
+    /// choose what we advertise about ourselves — so we require a quorum.
+    fn note_observed(&mut self, peer: PeerId, addr: Multiaddr) {
+        // Already adopted; nothing further to count.
+        if self.external_addrs.contains(&addr) {
+            return;
+        }
+        // Bound the map so a peer inventing a fresh address on every identify
+        // exchange cannot grow it without limit. Dropping new candidates is
+        // the safe direction: worst case we take longer to learn a real
+        // address, which the AutoNAT probe covers anyway.
+        if !self.observed_by.contains_key(&addr) && self.observed_by.len() >= MAX_OBSERVED_TRACKED {
+            return;
+        }
+        let voters = self.observed_by.entry(addr.clone()).or_default();
+        voters.insert(peer);
+        if voters.len() >= OBSERVED_CONFIRMATIONS {
+            self.observed_by.remove(&addr);
+            self.swarm.add_external_address(addr);
+        }
     }
 
     fn handle_command(&mut self, cmd: NodeCommand) {
@@ -346,6 +556,22 @@ impl Node {
                 let _ = self.swarm.dial(addr);
             }
             NodeCommand::ListenOnRelay(addr) => {
+                // Remembered so the tick loop can re-establish the reservation
+                // if the relay restarts. Without this the slot is lost for the
+                // lifetime of the process.
+                self.relay_targets.entry(addr.clone()).or_insert_with(Retry::new);
+
+                // A relay is a known-good AutoNAT server: it is reachable by
+                // definition, and it has already seen us dial in.
+                if let Some(Protocol::P2p(peer)) = addr.iter().last() {
+                    let mut base = addr.clone();
+                    base.pop();
+                    self.swarm
+                        .behaviour_mut()
+                        .autonat
+                        .add_server(peer, Some(base));
+                }
+
                 let mut ma = addr.clone();
                 ma.push(Protocol::P2pCircuit);
                 match self.swarm.listen_on(ma) {
@@ -524,9 +750,11 @@ impl Node {
                     self.peer_addresses.insert(peer, addrs);
                     // The address the relay/router observed for us is our best
                     // external (NAT-mapped) address — a DCUtR hole-punch
-                    // candidate.
+                    // candidate. It is only a *claim*, though, so we wait for
+                    // several independent peers to say the same thing before
+                    // acting on it. See OBSERVED_CONFIRMATIONS.
                     if let Some(observed) = info.observed_addr.clone() {
-                        self.swarm.add_external_address(observed);
+                        self.note_observed(peer, observed);
                     }
                 }
             }
@@ -539,6 +767,28 @@ impl Node {
                             active: true,
                         });
                     }
+                    // Bind the target to its peer id and clear the backoff, so
+                    // a future outage retries promptly rather than inheriting
+                    // the delay this one earned.
+                    for (addr, retry) in self.relay_targets.iter_mut() {
+                        if matches!(addr.iter().last(), Some(Protocol::P2p(p)) if p == relay_peer_id)
+                        {
+                            retry.succeeded(relay_peer_id);
+                        }
+                    }
+                }
+            }
+            behaviour::Event::Autonat(ev) => {
+                if let autonat::Event::StatusChanged { new, .. } = ev {
+                    let (nat, label) = match new {
+                        autonat::NatStatus::Public(_) => (Nat::Public, "public"),
+                        autonat::NatStatus::Private => (Nat::Private, "private"),
+                        autonat::NatStatus::Unknown => (Nat::Unknown, "unknown"),
+                    };
+                    self.nat = nat;
+                    self.emit(NodeEvent::NatStatus {
+                        status: label.to_string(),
+                    });
                 }
             }
             behaviour::Event::RelayServer(_) => {}
@@ -749,19 +999,98 @@ mod status_tests {
     /// directly, the relay is only a fallback.
     #[test]
     fn reachability_prefers_direct() {
-        assert_eq!(reachability(1, 0), "direct");
-        assert_eq!(reachability(1, 3), "direct");
+        assert_eq!(reachability(1, 0, Nat::Unknown), "direct");
+        assert_eq!(reachability(1, 3, Nat::Unknown), "direct");
     }
 
     #[test]
     fn reachability_is_relayed_when_only_reservations() {
-        assert_eq!(reachability(0, 1), "relayed");
+        assert_eq!(reachability(0, 1, Nat::Unknown), "relayed");
     }
 
-    /// "unknown" is not "offline" — it means libp2p has not confirmed
-    /// anything yet, which is the normal state right after startup.
+    /// "unknown" is not "offline" — it means nothing has been confirmed
+    /// yet, which is the normal state right after startup.
     #[test]
     fn reachability_unknown_when_nothing_known() {
-        assert_eq!(reachability(0, 0), "unknown");
+        assert_eq!(reachability(0, 0, Nat::Unknown), "unknown");
+    }
+
+    /// AutoNAT actually dialed us and got through, so this is not a guess.
+    #[test]
+    fn autonat_public_reports_direct() {
+        assert_eq!(reachability(0, 0, Nat::Public), "direct");
+        assert_eq!(reachability(0, 5, Nat::Public), "direct");
+    }
+
+    /// The case the old heuristic got wrong. An observed address means some
+    /// peer saw a NAT mapping, not that anyone can dial it. When AutoNAT has
+    /// tried and failed, the measurement wins — otherwise the UI promises
+    /// direct connectivity that does not exist.
+    #[test]
+    fn autonat_private_overrides_observed_addresses() {
+        assert_eq!(reachability(3, 1, Nat::Private), "relayed");
+    }
+
+    /// Private with no relay is a known-bad state, distinct from "we have not
+    /// worked it out yet". Collapsing the two hides the one case the user has
+    /// to act on.
+    #[test]
+    fn private_without_a_relay_is_unreachable_not_unknown() {
+        assert_eq!(reachability(0, 0, Nat::Private), "unreachable");
+        assert_eq!(reachability(2, 0, Nat::Private), "unreachable");
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_then_saturates() {
+        let mut r = Retry::new();
+        assert_eq!(r.wait, 1, "first retry should be prompt");
+
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            r.failed();
+            seen.push(r.wait);
+        }
+        assert_eq!(&seen[..4], &[2, 4, 8, 16]);
+        assert!(
+            seen.iter().all(|w| *w <= MAX_BACKOFF_TICKS),
+            "backoff must be capped, got {seen:?}"
+        );
+        assert_eq!(*seen.last().unwrap(), MAX_BACKOFF_TICKS);
+    }
+
+    /// A relay that flaps must not accumulate an ever-longer delay. Without
+    /// this reset, a client that has been up for a day takes five minutes to
+    /// notice its relay came back.
+    #[test]
+    fn success_clears_the_backoff_earned_by_the_last_outage() {
+        let mut r = Retry::new();
+        for _ in 0..10 {
+            r.failed();
+        }
+        assert_eq!(r.wait, MAX_BACKOFF_TICKS);
+
+        r.succeeded(PeerId::random());
+        assert_eq!(r.wait, 0);
+        assert!(r.peer.is_some());
+
+        // The next outage retries promptly again.
+        r.failed();
+        assert_eq!(r.wait, 2);
+    }
+
+    /// The whole point of the tick loop: worst-case time to notice a relay is
+    /// back has to stay in minutes, not hours.
+    #[test]
+    fn worst_case_retry_interval_is_bounded() {
+        let worst = TICK * MAX_BACKOFF_TICKS;
+        assert!(
+            worst <= Duration::from_secs(600),
+            "a returning relay must be picked up within minutes, not {worst:?}"
+        );
     }
 }

@@ -198,11 +198,37 @@ On the node, watch for:
 ```
 peer connected: 12D3KooW…
 relay reservation granted to 12D3KooW…
+reachability: public (peers dialed us successfully)
 ```
 
 One line per client. If you see `peer connected` but never
 `relay reservation granted`, the client reached the node but could not reserve a
 slot — check that the node was started with `--node` and is not at capacity.
+
+The `reachability:` line is an **AutoNAT** result: other peers were asked to dial
+this node back, and it reports whether they got through. This is a measurement,
+not a guess — unlike an address some peer merely claimed to observe. A node that
+prints
+
+```
+reachability: PRIVATE — peers tried to dial this node and could not reach it.
+```
+
+is not reachable from the outside no matter how healthy the process looks, and
+no client will ever be able to use it. That is a firewall, a security group, or
+a missing `PEERS_ANNOUNCE`. `unknown` is not a failure: it means too few peers
+were around to probe with yet.
+
+### Recovering from restarts
+
+Clients re-establish relay reservations automatically. If a node goes down, each
+client retries with an exponential backoff — starting at 10 seconds and capping
+at 5 minutes — so a node that comes back is picked up within minutes without
+anyone restarting an app, while a node that stays down is not hammered by every
+client that has it configured.
+
+This means you can restart a node freely, **as long as its peer ID and port do
+not change**. Keep `node_identity.json` and pin `PEERS_PORT`.
 
 ---
 
@@ -255,6 +281,8 @@ reachability, not configuration: an unreachable client can advertise slots
 harmlessly, because nobody can dial it to use them. This is how open-port peers
 carry a torrent swarm without being asked.
 
+**Circuit relay slots** (how many clients can reserve circuits through this node):
+
 | Tier | Reservations | Circuits | Per circuit | Who |
 |---|---|---|---|---|
 | `citizen` | 8 (2/peer) | 16 (2/peer) | 16 MiB | Every GUI client |
@@ -266,6 +294,22 @@ consuming every slot on a shared box.
 
 Set `PEERS_NO_RELAY=1` on a metered or battery-powered machine to forward
 nothing.
+
+**Raw connection limits** (how many TCP/QUIC sockets the node holds):
+
+| Tier | Pending in/out | Established in/out | Per peer | Who |
+|---|---|---|---|---|
+| `client` | 16 / 32 | 64 / 128 | 8 | GUI clients |
+| `node` | 64 / 64 | 512 / 256 | 8 | `--node` |
+
+Why these exist: relay caps bound *circuits* — connections already accepted and
+then forwarded. A peer that opens sockets but never asks for a circuit can
+exhaust file descriptors or memory without touching the relay tier at all. This
+is the cheapest way to take down a small VPS, and it needs no protocol
+misbehaviour — just `nc` in a loop. These caps are deliberately higher than the
+relay tier (512 inbound > 64 reservations), so the relay budget stays the
+binding constraint. If it were reversed, a busy node would refuse connections at
+random instead of declining reservations, which is much harder to diagnose.
 
 ---
 
@@ -298,3 +342,22 @@ with `PEERS_PORT=4001` so it survives restarts.
 **Stuck on `via relay`, never `direct`.**
 Normal. DCUtR cannot punch through every NAT combination — symmetric NAT on
 both ends defeats it. Chat still works; it just stays relayed.
+
+**The node logs `reachability: PRIVATE`.**
+AutoNAT asked other peers to dial this node and none of them got through. The
+process is fine; the packets are not arriving. In order of likelihood: the
+provider's security group or firewall is closed (check it separately from
+`ufw`), the node is behind NAT and needs `PEERS_ANNOUNCE`, or the announced port
+does not match `PEERS_PORT`. No client can use the node until this reads
+`public`.
+
+**Reachability says `unreachable` in the client UI.**
+AutoNAT confirmed the client cannot be dialed *and* it holds no relay
+reservation — so nothing can reach it at all. Configure `PEERS_NODES`; this is
+the state the whole relay mechanism exists to fix.
+
+**Clients keep reconnecting to the node every few seconds.**
+They should not: retries back off exponentially to a 5-minute ceiling. Rapid
+reconnects mean the reservation is being *granted and then lost*, which usually
+means the node is at capacity (raise the tier or add a second node) or an
+intermediate firewall is dropping idle connections.
