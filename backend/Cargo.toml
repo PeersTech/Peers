@@ -35,7 +35,6 @@ libp2p = { version = "0.56", features = [
     "relay",
     "dcutr",
     "autonat",
-    "connection-limits",
     "macros",
 ] }
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }

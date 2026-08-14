@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, addContact, colorFor, contactProfiles, copyText, createInvite, createServer, dmHistory, exportSnapshot,
+    addMember, addContact, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
     fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobParked, onCodeResolved,
     onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
@@ -14,7 +14,15 @@ import {
 import {ServerRail} from './components/ServerRail';
 import {ChannelList} from './components/ChannelList';
 import {MessagePane} from './components/MessagePane';
+import {DialogHost} from './components/DialogHost';
 import {qrDataUrl} from './lib/qr';
+import {useDialog} from './hooks/useDialog';
+import {
+    validateChannelName,
+    validateJson,
+    validatePeerId,
+    validateRequired,
+} from './lib/dialogs';
 
 export interface DM {
     id: string;
@@ -22,25 +30,15 @@ export interface DM {
     unread: number;
 }
 
-/** Byte array → base64 (for avatars). Chunked to avoid stack limits. */
-function bytesToBase64(bytes: number[]): string {
-    let bin = '';
-    const CHUNK = 0x8000;
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-        bin += String.fromCharCode(...bytes.slice(i, i + CHUNK));
-    }
-    return btoa(bin);
-}
-
-/** Byte array → `data:` URL. Every <img src> for avatar bytes goes through
- *  here; skipping the prefix renders a broken image. */
-function dataUrl(bytes: number[]): string {
-    return `data:image/png;base64,${bytesToBase64(bytes)}`;
-}
-
 type Phase = 'boot' | 'onboarding' | 'locked' | 'ready';
 
 export default function App() {
+    const {
+        controller: dialogController,
+        confirm: confirmDialog,
+        prompt: promptDialog,
+        showText,
+    } = useDialog();
     const [phase, setPhase] = useState<Phase>('boot');
     const [me, setMe] = useState<IdentityInfo | null>(null);
     const [servers, setServers] = useState<Record<string, ServerView>>({});
@@ -96,16 +94,24 @@ export default function App() {
     }, [activeServer, activeChannel, activeDm]);
 
     useEffect(() => {
-        if (!error) return;
-        const t = setTimeout(() => setError(null), 6000);
-        return () => clearTimeout(t);
-    }, [error]);
-
-    useEffect(() => {
         if (!notice) return;
         const t = setTimeout(() => setNotice(null), 4000);
         return () => clearTimeout(t);
     }, [notice]);
+
+    /** Use the system clipboard when available and an in-app selectable
+     *  fallback otherwise. Browser-native prompts are never used. */
+    const copyOrShow = async (value: string, title: string, successMessage: string) => {
+        if (await copyText(value)) {
+            setNotice(successMessage);
+            return;
+        }
+        await showText({
+            title,
+            body: 'Clipboard access is unavailable. Select and copy the text below.',
+            value,
+        });
+    };
 
     // Generate the recovery phrase as soon as onboarding starts, so the user
     // sees it before committing to anything.
@@ -597,21 +603,30 @@ export default function App() {
         const onKey = (e: KeyboardEvent) => {
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
-                const name = prompt('Jump to channel: /general');
-                if (!name) return;
-                const q = name.replace('/', '');
-                for (const v of Object.values(live.current.servers)) {
-                    const c = v.channels.find((ch) => ch.name === q);
-                    if (c) {
-                        jumpTo(v.id, c.name);
-                        return;
+                if (dialogController.getCurrent()) return;
+                void promptDialog({
+                    title: 'Jump to a channel',
+                    body: 'Enter the channel name. Peers will search across your servers.',
+                    label: 'Channel',
+                    placeholder: 'general',
+                    validate: validateRequired('Channel', 32),
+                }).then((name) => {
+                    if (!name) return;
+                    const query = name.trim().replace(/^#?\/?/, '').toLowerCase();
+                    for (const serverView of Object.values(live.current.servers)) {
+                        const channel = serverView.channels.find((item) => item.name.toLowerCase() === query);
+                        if (channel) {
+                            jumpTo(serverView.id, channel.name);
+                            return;
+                        }
                     }
-                }
+                    setError(`No channel named #${query} was found`);
+                });
             }
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, []);
+    }, [dialogController, promptDialog]);
 
     const send = (text: string) => {
         const t = text.trim();
@@ -651,8 +666,15 @@ export default function App() {
     };
 
     const createSrv = async () => {
-        const name = prompt('Server name');
-        if (!name?.trim()) return;
+        const name = await promptDialog({
+            title: 'Create a server',
+            body: 'Servers are encrypted communities stored by their members — no central host required.',
+            label: 'Server name',
+            placeholder: 'Weekend crew',
+            confirmLabel: 'Create server',
+            validate: validateRequired('Server name', 80),
+        });
+        if (!name) return;
         try {
             const v = await createServer(name.trim());
             setServers((old) => ({...old, [v.id]: v}));
@@ -663,11 +685,29 @@ export default function App() {
     };
 
     const join = async () => {
-        const j = prompt('Paste the invite JSON');
-        if (!j?.trim()) return;
-        const name = prompt('Your display name in this server')?.trim() || 'guest';
+        const invite = await promptDialog({
+            title: 'Join a server',
+            body: 'Paste the signed invite you received from the server owner.',
+            label: 'Invite JSON',
+            placeholder: '{\n  "payload": { ... }\n}',
+            confirmLabel: 'Continue',
+            multiline: true,
+            mono: true,
+            validate: validateJson('Invite'),
+        });
+        if (!invite) return;
+        const name = await promptDialog({
+            title: 'Choose your server name',
+            body: 'This local server nickname is shown until members receive your signed global profile.',
+            label: 'Display name',
+            initial: myProfile?.displayName || me?.defaultName || '',
+            placeholder: 'JuicyPear',
+            confirmLabel: 'Join server',
+            validate: validateRequired('Display name', 80),
+        });
+        if (!name) return;
         try {
-            const v = await joinServer(j.trim(), name);
+            const v = await joinServer(invite.trim(), name.trim());
             setServers((old) => ({...old, [v.id]: v}));
             await selectServer(v.id);
         } catch (e) {
@@ -678,19 +718,22 @@ export default function App() {
     const copyInvite = async (serverId: string) => {
         try {
             const json = await createInvite(serverId);
-            try {
-                await navigator.clipboard.writeText(json);
-            } catch {
-                window.prompt('Invite JSON (copy manually):', json);
-            }
+            await copyOrShow(json, 'Copy server invite', 'Invite copied');
         } catch (e) {
             setError(String(e));
         }
     };
 
     const addChannel = async (serverId: string) => {
-        const name = prompt('Channel name');
-        if (!name?.trim()) return;
+        const name = await promptDialog({
+            title: 'Create a channel',
+            body: 'Everyone in the server can read and post in this channel by default.',
+            label: 'Channel name',
+            placeholder: 'general',
+            confirmLabel: 'Create channel',
+            validate: validateChannelName,
+        });
+        if (!name) return;
         try {
             const v = await setChannel(serverId, name.trim(), '', 'member', 'member');
             setServers((old) => ({...old, [v.id]: v}));
@@ -700,12 +743,26 @@ export default function App() {
     };
 
     const addMemberUi = async (serverId: string) => {
-        const peerId = prompt('Member peer ID');
-        if (!peerId?.trim()) return;
-        const name = prompt('Display name')?.trim() || shortId(peerId.trim());
-        const role = prompt('Role (member / admin)')?.trim() === 'admin' ? 'admin' : 'member';
+        const peerId = await promptDialog({
+            title: 'Add a server member',
+            body: 'Paste the full peer ID. New members start with the member role and can be promoted later.',
+            label: 'Peer ID',
+            placeholder: '12D3KooW…',
+            confirmLabel: 'Continue',
+            mono: true,
+            validate: validatePeerId,
+        });
+        if (!peerId) return;
+        const name = await promptDialog({
+            title: 'Name this member',
+            label: 'Display name',
+            initial: profiles[peerId.trim()]?.displayName || shortId(peerId.trim()),
+            confirmLabel: 'Add member',
+            validate: validateRequired('Display name', 80),
+        });
+        if (!name) return;
         try {
-            const v = await addMember(serverId, peerId.trim(), name, role);
+            const v = await addMember(serverId, peerId.trim(), name.trim(), 'member');
             setServers((old) => ({...old, [v.id]: v}));
         } catch (e) {
             setError(String(e));
@@ -738,18 +795,37 @@ export default function App() {
     };
 
     const renameSrv = async (serverId: string) => {
-        const name = prompt('New server name');
-        if (!name?.trim()) return;
+        const name = await promptDialog({
+            title: 'Rename server',
+            label: 'Server name',
+            initial: servers[serverId]?.name ?? '',
+            confirmLabel: 'Rename',
+            validate: validateRequired('Server name', 80),
+        });
+        if (!name) return;
         await applyServerUpdate(renameServer(serverId, name.trim()));
     };
 
     const rotateKeyUi = async (serverId: string) => {
-        if (!confirm('Rotate the server signing key? The member list is re-signed immediately.')) return;
+        const accepted = await confirmDialog({
+            title: 'Rotate the server signing key?',
+            body: 'The member list will be re-signed immediately. Existing members receive the new key through the signed rotation chain.',
+            confirmLabel: 'Rotate key',
+            destructive: true,
+        });
+        if (!accepted) return;
         await applyServerUpdate(rotateKey(serverId));
+        setNotice('Server signing key rotated');
     };
 
     const kickMember = async (serverId: string, peerId: string) => {
-        if (!confirm('Remove this member from the server?')) return;
+        const accepted = await confirmDialog({
+            title: `Remove ${contactName(peerId)}?`,
+            body: 'They will be removed from the signed member list and lose access to future server messages.',
+            confirmLabel: 'Remove member',
+            destructive: true,
+        });
+        if (!accepted) return;
         await applyServerUpdate(removeMember(serverId, peerId));
     };
 
@@ -760,19 +836,24 @@ export default function App() {
     const exportSnapshotUi = async (serverId: string) => {
         try {
             const json = await exportSnapshot(serverId);
-            try {
-                await navigator.clipboard.writeText(json);
-            } catch {
-                window.prompt('Snapshot JSON (copy manually):', json);
-            }
+            await copyOrShow(json, 'Export signed snapshot', 'Snapshot copied');
         } catch (e) {
             setError(String(e));
         }
     };
 
     const importSnapshotUi = async (serverId: string) => {
-        const json = prompt('Paste a signed snapshot JSON');
-        if (!json?.trim()) return;
+        const json = await promptDialog({
+            title: 'Import a signed snapshot',
+            body: 'Peers verifies the owner signature before merging any new messages.',
+            label: 'Snapshot JSON',
+            placeholder: '{\n  "serverId": "…"\n}',
+            confirmLabel: 'Verify and import',
+            multiline: true,
+            mono: true,
+            validate: validateJson('Snapshot'),
+        });
+        if (!json) return;
         try {
             const n = await importSnapshot(serverId, json.trim());
             setNotice(`${n} message(s) imported from snapshot`);
@@ -782,7 +863,13 @@ export default function App() {
     };
 
     const leave = async (serverId: string) => {
-        if (!confirm('Leave this server?')) return;
+        const accepted = await confirmDialog({
+            title: `Leave ${servers[serverId]?.name ?? 'this server'}?`,
+            body: 'This removes the local server record and unsubscribes this device. You will need a new invite to return.',
+            confirmLabel: 'Leave server',
+            destructive: true,
+        });
+        if (!accepted) return;
         try {
             await leaveServer(serverId);
             setServers((old) => {
@@ -798,8 +885,16 @@ export default function App() {
     };
 
     const addDm = async () => {
-        const id = prompt('Peer ID to message (e.g. 12D3KooW…)');
-        if (!id?.trim()) return;
+        const id = await promptDialog({
+            title: 'Start a direct message',
+            body: 'Use a full peer ID for a direct encrypted channel, or add a friend by short code from the server rail.',
+            label: 'Peer ID',
+            placeholder: '12D3KooW…',
+            confirmLabel: 'Open DM',
+            mono: true,
+            validate: validatePeerId,
+        });
+        if (!id) return;
         const chan = id.trim();
         try {
             await subscribe(chan);
@@ -815,8 +910,7 @@ export default function App() {
 
     const copyMyId = () => {
         if (!me) return;
-        void copyText(me.peerId);
-        setNotice('Copied your peer id');
+        void copyOrShow(me.peerId, 'Your peer ID', 'Peer ID copied');
     };
 
     const openAddFriend = () => {
@@ -935,8 +1029,9 @@ export default function App() {
     if (phase !== 'ready') {
         const onboarding = phase === 'onboarding';
         return (
-            <div className="flex h-full w-full items-center justify-center bg-surface-1">
-                <form onSubmit={submitAuth} className="w-[26rem] rounded-2xl border border-surface-3 bg-surface-1 p-6">
+            <>
+                <div className="flex h-full w-full items-center justify-center bg-surface-1">
+                    <form onSubmit={submitAuth} className="w-[26rem] rounded-lg border border-surface-3 bg-surface-1 p-6">
                     <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-accent text-lg font-bold text-white">P</div>
                     <h1 className="mt-3 text-xl font-bold text-ink">Peers</h1>
 
@@ -959,8 +1054,7 @@ export default function App() {
                                 <button
                                     type="button"
                                     onClick={() => {
-                                        void copyText(newPhrase);
-                                        setNotice('Recovery phrase copied');
+                                        void copyOrShow(newPhrase, 'Recovery phrase', 'Recovery phrase copied');
                                     }}
                                     className="text-xs text-accent hover:underline"
                                 >
@@ -1041,8 +1135,10 @@ export default function App() {
                     >
                         {busy ? '…' : onboarding ? (recovering ? 'Recover identity' : 'Create identity') : 'Unlock'}
                     </button>
-                </form>
-            </div>
+                    </form>
+                </div>
+                <DialogHost controller={dialogController}/>
+            </>
         );
     }
 
@@ -1307,8 +1403,11 @@ export default function App() {
                                 <button
                                     type="button"
                                     onClick={() => {
-                                        void copyText(code.replace(/\s/g, ''));
-                                        setNotice('Code copied');
+                                        void copyOrShow(
+                                            code.replace(/\s/g, ''),
+                                            'Your friend code',
+                                            'Code copied',
+                                        );
                                     }}
                                     className="mt-1 text-xs text-muted hover:text-ink hover:underline"
                                 >
@@ -1461,6 +1560,7 @@ export default function App() {
                     </form>
                 </div>
             )}
+            <DialogHost controller={dialogController}/>
             {notice && (
                 <div
                     className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-online/30 bg-surface-3 px-3 py-2 text-xs text-online"

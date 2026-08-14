@@ -276,12 +276,27 @@ export const onPeerDisconnected = (cb: (peerId: string) => void) =>
 
 export const shortId = (id: string) => (id.length > 13 ? `${id.slice(0, 12)}…` : id);
 
-/** Copies `text` to the clipboard, falling back to a copyable prompt. */
-export async function copyText(text: string) {
+/** Byte array → base64, chunked to avoid argument limits on larger blobs. */
+export function bytesToBase64(bytes: number[]): string {
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+        binary += String.fromCharCode(...bytes.slice(index, index + chunkSize));
+    }
+    return btoa(binary);
+}
+
+/** Byte array → an image data URL suitable for avatar `<img>` elements. */
+export const dataUrl = (bytes: number[]): string =>
+    `data:image/png;base64,${bytesToBase64(bytes)}`;
+
+/** Copies `text`; false lets the caller present a selectable in-app fallback. */
+export async function copyText(text: string): Promise<boolean> {
     try {
         await navigator.clipboard.writeText(text);
+        return true;
     } catch {
-        window.prompt("Copy manually:", text);
+        return false;
     }
 }
 
