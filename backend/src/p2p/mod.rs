@@ -348,6 +348,31 @@ struct Node {
     events: broadcast::Sender<NodeEvent>,
 }
 
+/// Checks whether the device has enough power to relay for others.
+/// Returns `true` when on AC power, fully charged, or battery is above 20%.
+/// On desktops (no battery), always returns `true`. This is a best-effort
+/// heuristic — the caller should re-check periodically.
+pub fn battery_relay_ok() -> bool {
+    match battery::Manager::new() {
+        Ok(mgr) => match mgr.batteries() {
+            Ok(mut bats) => {
+                if let Some(Ok(bat)) = bats.next() {
+                    let on_ac = bat.state() == battery::State::Charging
+                        || bat.state() == battery::State::Full;
+                    let enough = bat.energy_remaining()
+                        .map(|r| r.get::<battery::units::energy::watt_hour>() > 2.0)
+                        .unwrap_or(true);
+                    on_ac || enough
+                } else {
+                    true // No battery = desktop
+                }
+            }
+            Err(_) => true,
+        },
+        Err(_) => true,
+    }
+}
+
 /// Retry bookkeeping for one relay target.
 struct Retry {
     /// The relay's peer id, learned once we have connected to it. Until then
