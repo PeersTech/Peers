@@ -1255,11 +1255,12 @@ fn plaza_who(state: State<'_, AppState>) -> Result<Vec<PlazaPresence>, String> {
 /// Parks bytes (sealed envelope or media chunk) and announces them on the
 /// DHT so other peers can fetch them while we're offline.
 ///
-/// Caps at 512 KiB: avatars are 20–30 KB after downscaling; large message
-/// attachments will need chunking (not yet implemented).
+/// Caps at 64 KiB to match the wire codec limit. Avatars are 20–30 KB
+/// after downscaling; larger attachments will need chunking (not yet
+/// implemented).
 #[tauri::command]
 async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, String> {
-    const MAX_BLOB: usize = 512 * 1024;
+    const MAX_BLOB: usize = 64 * 1024;
     if data.len() > MAX_BLOB {
         return Err(format!(
             "blob too large: {} bytes (max {})",
