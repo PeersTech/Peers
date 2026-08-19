@@ -50,11 +50,25 @@ const MAX_OBSERVED_TRACKED: usize = 32;
 /// relay) for clients that only meet through them.
 pub const RELAY_CONTROL_TOPIC: &str = "peers/v1/relay";
 
+/// Per-peer topic for incoming friend requests. When Alice adds Bob, she
+/// publishes a signed request to `peers/v1/fr/<bob>`. Bob subscribes to
+/// his own request topic at startup, receives the request, and can accept
+/// or decline. Accepting subscribes both sides to each other's DM topics.
+pub const FRIEND_REQUEST_TOPIC_PREFIX: &str = "peers/v1/fr/";
+
 /// A relay-control notice: `{ "op": "subscribe", "topic": "<name>" }`.
 #[derive(serde::Deserialize)]
 struct RelayControl {
     op: String,
     topic: String,
+}
+
+/// A friend request envelope published to `peers/v1/fr/<target_peer_id>`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FriendRequestEnvelope {
+    display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar_hash: Option<String>,
 }
 
 /// Commands sent from the app layer into the swarm loop.
@@ -153,6 +167,12 @@ pub enum NodeEvent {
     CodeResolved {
         code: String,
         peer_id: Option<String>,
+    },
+    /// An incoming friend request from a peer who scanned our code.
+    FriendRequest {
+        from_peer: String,
+        from_name: String,
+        from_avatar: Option<String>,
     },
     /// AutoNAT reached (or revised) a verdict on whether peers can dial us.
     /// `"public"`, `"private"` or `"unknown"`.
@@ -845,9 +865,26 @@ impl Node {
                     if message.topic == control_hash {
                         return;
                     }
+                    let topic_str = message.topic.to_string();
+                    // Friend requests are parsed and surfaced as a dedicated
+                    // event so the app layer doesn't need to re-parse them.
+                    if let Some(_target) = topic_str.strip_prefix(FRIEND_REQUEST_TOPIC_PREFIX) {
+                        if let Some(from) = message.source {
+                            if let Ok(req) =
+                                serde_json::from_slice::<FriendRequestEnvelope>(&message.data)
+                            {
+                                self.emit(NodeEvent::FriendRequest {
+                                    from_peer: from.to_string(),
+                                    from_name: req.display_name,
+                                    from_avatar: req.avatar_hash,
+                                });
+                            }
+                        }
+                        return;
+                    }
                     if let Some(from) = message.source {
                         self.emit(NodeEvent::Message {
-                            topic: message.topic.to_string(),
+                            topic: topic_str,
                             from: from.to_string(),
                             data: message.data,
                         });

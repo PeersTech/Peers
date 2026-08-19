@@ -1,12 +1,12 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, addContact, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
+    addMember, addContact, acceptFriend, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
     fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobParked, onCodeResolved,
-    onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
+    onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    publishChannel, publishPlaza, removeMember, renameServer, rotateKey, serverHistory, setChannel, setProfile,
+    publishChannel, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type SignedProfile, type UiMessage,
@@ -79,6 +79,8 @@ export default function App() {
     const [profileAbout, setProfileAbout] = useState('');
     const [avatarBytes, setAvatarBytes] = useState<number[] | null>(null);
     const [pendingHash, setPendingHash] = useState<string | null>(null);
+    /** Incoming friend requests from peers who scanned our code. */
+    const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
@@ -547,6 +549,16 @@ export default function App() {
                 if (e.direct) setNotice(`Direct connection established with ${shortId(e.peerId)}`);
             }),
         );
+        track(
+            onFriendRequest((e) => {
+                setFriendRequests((prev) => {
+                    // Dedupe by peer ID.
+                    if (prev.some((r) => r.peerId === e.peerId)) return prev;
+                    return [...prev, e];
+                });
+                setNotice(`Friend request from ${e.displayName || shortId(e.peerId)}`);
+            }),
+        );
         return () => {
             cancelled = true;
             offs.forEach((u) => u());
@@ -933,14 +945,14 @@ export default function App() {
         }
     };
 
-    /** Accepts a resolved peer: opens a DM channel with them. The user has
-     *  seen who answered before this runs — that acceptance is what makes a
-     *  grindable 12-digit code safe to use as a lookup key. */
+    /** Sends a friend request to a resolved peer. The user has seen who
+     *  answered before this runs — that acceptance is what makes a grindable
+     *  12-digit code safe to use as a lookup key. */
     const acceptResolved = async () => {
         const peerId = resolved?.peerId;
         if (!peerId) return;
         try {
-            await addContact(peerId);
+            await sendFriendRequest(peerId);
             setDms((old) =>
                 old.some((d) => d.id === peerId)
                     ? old
@@ -952,10 +964,32 @@ export default function App() {
             setActiveServer(null);
             setActiveDm(peerId);
             void loadDmHistory(peerId);
-            setNotice('Contact added — say hi');
+            setNotice('Friend request sent — say hi');
         } catch (err) {
             setError(String(err));
         }
+    };
+
+    /** Accepts an incoming friend request: subscribes to their DM topic and
+     *  removes them from the pending list. */
+    const doAcceptFriend = async (peerId: string) => {
+        try {
+            await acceptFriend(peerId);
+            setFriendRequests((prev) => prev.filter((r) => r.peerId !== peerId));
+            setDms((old) =>
+                old.some((d) => d.id === peerId)
+                    ? old
+                    : [...old, {id: peerId, name: shortId(peerId), unread: 0}],
+            );
+            setNotice('Friend added — say hi');
+        } catch (err) {
+            setError(String(err));
+        }
+    };
+
+    /** Declines an incoming friend request. */
+    const doDeclineFriend = (peerId: string) => {
+        setFriendRequests((prev) => prev.filter((r) => r.peerId !== peerId));
     };
 
     const openSettings = () => {
@@ -1290,7 +1324,39 @@ export default function App() {
                         </button>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2">
-                        {dms.length === 0 && (
+                        {friendRequests.length > 0 && (
+                            <div className="mb-2 rounded-lg border border-surface-3 bg-surface-1 p-2">
+                                <div className="mb-1 text-[10px] font-semibold uppercase text-muted">
+                                    Friend requests
+                                </div>
+                                {friendRequests.map((r) => (
+                                    <div key={r.peerId} className="flex items-center gap-2 py-1">
+                                        <span
+                                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-black"
+                                            style={{background: colorFor(r.peerId)}}
+                                        >
+                                            {(r.displayName || shortId(r.peerId))[0].toUpperCase()}
+                                        </span>
+                                        <span className="flex-1 truncate text-xs text-ink">
+                                            {r.displayName || shortId(r.peerId)}
+                                        </span>
+                                        <button
+                                            onClick={() => void doAcceptFriend(r.peerId)}
+                                            className="rounded bg-online px-1.5 py-0.5 text-[10px] font-bold text-black hover:bg-online/80"
+                                        >
+                                            ✓
+                                        </button>
+                                        <button
+                                            onClick={() => doDeclineFriend(r.peerId)}
+                                            className="rounded bg-surface-3 px-1.5 py-0.5 text-[10px] font-bold text-muted hover:bg-surface-4"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {dms.length === 0 && friendRequests.length === 0 && (
                             <div className="px-2 py-4 text-xs text-muted">
                                 No DMs yet — add a peer ID to start an encrypted channel.
                             </div>

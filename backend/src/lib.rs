@@ -30,6 +30,9 @@ use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 /// they subscribe to. Mirrors `p2p::RELAY_CONTROL_TOPIC`.
 const RELAY_CONTROL_TOPIC: &str = "peers/v1/relay";
 
+/// Friend request topic prefix. Mirrors `p2p::FRIEND_REQUEST_TOPIC_PREFIX`.
+const FRIEND_REQUEST_TOPIC_PREFIX: &str = "peers/v1/fr/";
+
 /// How many recent Plaza messages we keep in memory for new views.
 const PLAZA_HISTORY_LIMIT: usize = 200;
 
@@ -214,6 +217,87 @@ async fn add_contact(state: State<'_, AppState>, peer_id: String) -> Result<(), 
     Ok(())
 }
 
+/// Sends a friend request to a peer. The request carries our display name
+/// and optional avatar hash so the recipient knows who is asking. We also
+/// subscribe to their DM topic so we receive their messages once they accept.
+#[tauri::command]
+async fn send_friend_request(
+    state: State<'_, AppState>,
+    peer_id: String,
+) -> Result<(), String> {
+    let peer: PeerId = peer_id
+        .parse()
+        .map_err(|_| "that is not a valid peer id".to_string())?;
+    let me = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    if peer == me.peer_id {
+        return Err("cannot send a friend request to yourself".into());
+    }
+    // Include our profile in the request so the recipient knows who we are.
+    let profile = state.profile.lock().unwrap();
+    let envelope = crate::p2p::FriendRequestEnvelope {
+        display_name: profile
+            .as_ref()
+            .map(|p| p.display_name.clone())
+            .unwrap_or_default(),
+        avatar_hash: profile.as_ref().and_then(|p| p.avatar_hash.clone()),
+    };
+    let payload = serde_json::to_vec(&envelope)
+        .map_err(|e| format!("failed to serialize friend request: {e}"))?;
+    // Publish to the target's friend-request topic.
+    let topic = format!("{FRIEND_REQUEST_TOPIC_PREFIX}{peer}");
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload })
+        .await?;
+    // Also subscribe to their DM topic so we get their reply once they accept.
+    subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
+    Ok(())
+}
+
+/// Accepts an incoming friend request: subscribes to the requester's DM topic
+/// so we receive their messages, and sends a confirmation back.
+#[tauri::command]
+async fn accept_friend(state: State<'_, AppState>, peer_id: String) -> Result<(), String> {
+    let peer: PeerId = peer_id
+        .parse()
+        .map_err(|_| "that is not a valid peer id".to_string())?;
+    let me = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    if peer == me.peer_id {
+        return Err("cannot accept a friend request from yourself".into());
+    }
+    // Subscribe to the requester's DM topic so we receive their messages.
+    subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
+    // Send a confirmation back to the requester's request topic so they know
+    // we accepted and should also subscribe to our DM topic (they likely
+    // already did when sending the request, but this closes the loop).
+    let profile = state.profile.lock().unwrap();
+    let envelope = crate::p2p::FriendRequestEnvelope {
+        display_name: profile
+            .as_ref()
+            .map(|p| p.display_name.clone())
+            .unwrap_or_default(),
+        avatar_hash: profile.as_ref().and_then(|p| p.avatar_hash.clone()),
+    };
+    let payload = serde_json::to_vec(&envelope)
+        .map_err(|e| format!("failed to serialize friend accept: {e}"))?;
+    let topic = format!("{FRIEND_REQUEST_TOPIC_PREFIX}{peer}");
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload })
+        .await?;
+    Ok(())
+}
+
 /// First run *or* recovery: derives the identity from `phrase`, seals the
 /// keystore with it, and starts the node. Passing a phrase that already has
 /// a keystore rebuilds the same identity, which is what makes a lost install
@@ -342,6 +426,20 @@ async fn finish_unlock(
                         serde_json::json!({ "peerId": peer_id, "direct": direct }),
                     );
                 }
+                NodeEvent::FriendRequest {
+                    from_peer,
+                    from_name,
+                    from_avatar,
+                } => {
+                    let _ = app2.emit(
+                        "friend://request",
+                        serde_json::json!({
+                            "peerId": from_peer,
+                            "displayName": from_name,
+                            "avatarHash": from_avatar,
+                        }),
+                    );
+                }
                 _ => {}
             }
             let _ = app2.emit("node://event", &ev);
@@ -363,6 +461,12 @@ async fn finish_unlock(
         .await;
     // Receive DMs addressed to us: our own peer id is our DM topic.
     let _ = subscribe_with_relay(&state, format!("peers/v1/ch/{}", id.peer_id)).await;
+    // Listen for incoming friend requests on our per-peer request topic.
+    let _ = subscribe_with_relay(
+        &state,
+        format!("{FRIEND_REQUEST_TOPIC_PREFIX}{}", id.peer_id),
+    )
+    .await;
     // Auto-join the global Plaza (no invites, can't leave).
     let _ = subscribe_with_relay(&state, PLAZA_TOPIC.to_string()).await;
     announce_plaza_profile(&state).await;
@@ -1167,8 +1271,6 @@ async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, 
     node.send(NodeCommand::ParkBlob(data)).await?;
     Ok("queued".into())
 }
-    Ok("queued".into())
-}
 
 #[tauri::command]
 async fn fetch_blob(state: State<'_, AppState>, hash: String) -> Result<(), String> {
@@ -1199,6 +1301,8 @@ pub fn run() {
             my_code,
             lookup_code,
             add_contact,
+            send_friend_request,
+            accept_friend,
             net_status,
             unlock,
             lock,

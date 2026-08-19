@@ -187,6 +187,15 @@ export const myCode = () => invoke<PeerCode>("my_code");
 export const lookupCode = (code: string) => invoke<string>("lookup_code", {code});
 /** Subscribes to a peer's DM topic so we can exchange messages. */
 export const addContact = (peerId: string) => invoke<void>("add_contact", {peerId});
+/** Sends a friend request to a peer. The request carries our profile so the
+ *  recipient knows who is asking. Also subscribes to their DM topic so we
+ *  receive their messages once they accept. */
+export const sendFriendRequest = (peerId: string) =>
+    invoke<void>("send_friend_request", {peerId});
+/** Accepts an incoming friend request: subscribes to the requester's DM topic
+ *  and sends a confirmation back. */
+export const acceptFriend = (peerId: string) =>
+    invoke<void>("accept_friend", {peerId});
 export const netStatus = () => invoke<NetStatus>("net_status");
 
 /** A friend code resolved (or failed to) via the DHT. `peerId` is null when
@@ -197,6 +206,9 @@ export const onCodeResolved = (cb: (e: {code: string; peerId: string | null}) =>
 /** A relayed connection upgraded to direct (or failed to, and stays relayed). */
 export const onHolePunch = (cb: (e: {peerId: string; direct: boolean}) => void) =>
     listen<{peerId: string; direct: boolean}>("net://hole-punch", (e) => cb(e.payload));
+/** An incoming friend request from a peer who scanned our code. */
+export const onFriendRequest = (cb: (e: {peerId: string; displayName: string; avatarHash: string | null}) => void) =>
+    listen<{peerId: string; displayName: string; avatarHash: string | null}>("friend://request", (e) => cb(e.payload));
 export const unlock = (password: string) => invoke<IdentityInfo>("unlock", {password});
 export const lock = () => invoke<void>("lock");
 
