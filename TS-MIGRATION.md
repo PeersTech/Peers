@@ -45,13 +45,23 @@ WebSocket). Three adapters = a real seam.
     v1 refusal, no plaintext on disk)
   - owner-signed member lists with rotating signing keys, invites,
     snapshots, channel ACLs, join/profile notices, plaza messages
-- **86/86 tests green · tsc clean · eslint clean**
+- **@peers/node tracer bullet** — `createPeersNode()` factory (TCP+noise+
+  yamux, identify, gossipsub) with deterministic identity; integration test
+  dials two real loopback nodes and exchanges a gossip message. Peer-id
+  derivation cross-checked against js-libp2p's own.
+- **87/87 tests green · tsc clean · eslint clean**
+
+### Stack pin (important)
+
+gossipsub@14 still targets `@libp2p/interface@^2`, so libp2p v3 is
+unusable for us yet. Aligned on the v2-era set: `libp2p@~2.10`,
+`tcp@^10`, `identify@^3`, `noise@^16`, `yamux@^7`, `kad-dht@^15`,
+`crypto@5.1.5` (root `overrides` forces one copy). Revisit when a
+v3-compatible gossipsub ships.
 
 ## Next (in order)
 
-1. **@peers/node tracer bullet** — `createPeersNode({core, config})`:
-   TCP(+QUIC later), noise, yamux, identify, gossipsub; integration test =
-   two loopback nodes exchange a gossip message.
+1. ~~@peers/node tracer bullet~~ ✅
 2. **DHT blobs** — kad provide/get + request-response transfer, 64 KiB cap;
    park/fetch round trip between two nodes in tests.
 3. **Friend codes end-to-end (M8/M17)** — publish code key → DHT lookup →
