@@ -49,7 +49,19 @@ WebSocket). Three adapters = a real seam.
   yamux, identify, gossipsub) with deterministic identity; integration test
   dials two real loopback nodes and exchanges a gossip message. Peer-id
   derivation cross-checked against js-libp2p's own.
-- **87/87 tests green · tsc clean · eslint clean**
+- **@peers/node DHT blobs** — `BlobStore` + `BLOB_PROTOCOL` (`/peers/blob/1.0.0`)
+  via `it-length-prefixed-stream` (varint framing, clean break from Rust's
+  4-byte BE), 64 KiB cap, CID-wrapped SHA-256 provider keys, `kadDHT` in
+  server mode with `passthroughMapper` (so loopback 127.0.0.1 survives the
+  default `removePrivateAddressesMapper`), `ping` added for DHT deps, bounded
+  `provide`/`findProviders` (1.5 s abort, dedup set, direct-connection
+  fallback for cold routing tables), hash-verified fetch. `PeersNode` is the
+  deep module: `parkBlob(data): hex` / `fetchBlob(hex): Uint8Array` hide
+  CID math, provider iteration, stream framing, and verification — two methods
+  buy the whole cycle (locality: cap/CID/corruption in one place). Tests:
+  park/fetch round trip between two nodes, cap rejection, missing blob,
+  dedup — plus gossip now waits 1.2 s for DHT mesh. `91/91 tests green`.
+- **91/91 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 
@@ -62,7 +74,7 @@ v3-compatible gossipsub ships.
 ## Next (in order)
 
 1. ~~@peers/node tracer bullet~~ ✅
-2. **DHT blobs** — kad provide/get + request-response transfer, 64 KiB cap;
+2. ~~DHT blobs~~ ✅ — kad provide/get + request-response transfer, 64 KiB cap;
    park/fetch round trip between two nodes in tests.
 3. **Friend codes end-to-end (M8/M17)** — publish code key → DHT lookup →
    dial → mutual accept handshake.

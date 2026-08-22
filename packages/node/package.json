@@ -13,10 +13,14 @@
     "@libp2p/crypto": "^5.0.0",
     "@libp2p/identify": "^3.0.39",
     "@libp2p/kad-dht": "^15.1.11",
+    "@libp2p/ping": "^2.0.37",
     "@libp2p/tcp": "^10.1.19",
     "@multiformats/multiaddr": "^12.5.1",
     "@peers/api": "*",
     "@peers/core": "*",
-    "libp2p": "~2.10.0"
+    "it-length-prefixed-stream": "^2.0.1",
+    "libp2p": "~2.10.0",
+    "multiformats": "^13.4.2",
+    "uint8arraylist": "^2.4.8"
   }
 }
