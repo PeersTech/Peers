@@ -1,5 +1,8 @@
 import {describe, expect, it} from 'vitest';
-import {Identity} from '@peers/core';
+import {mkdtemp, rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {Identity, TEST_KDF} from '@peers/core';
 import type {EventName} from '@peers/api';
 import {startWebHost} from './server.js';
 import WebSocket from 'ws';
@@ -90,8 +93,10 @@ describe('web host — HTTP + WS bridge of @peers/api', () => {
     const aWeb = await startWebHost({identity: Identity.random()});
     const bWeb = await startWebHost({identity: Identity.random()});
     try {
-      const addr = aWeb.host_.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
-      await bWeb.host_.dial(addr);
+      const aHost = aWeb.host_!;
+      const bHost = bWeb.host_!;
+      const addr = aHost.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
+      await bHost.dial(addr);
 
       const bClient = wsClient(bWeb.port);
       await opened(bClient);
@@ -115,4 +120,52 @@ describe('web host — HTTP + WS bridge of @peers/api', () => {
       await Promise.allSettled([aWeb.close(), bWeb.close()]);
     }
   }, 40_000);
+
+  it('account mode: starts locked, unlocks over the socket, persists', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'peers-web-acct-'));
+    try {
+      // First boot: no keystore yet → locked; the renderer drives login.
+      let thePhrase = '';
+      {
+        const web1 = await startWebHost({accountDir: dir, kdf: TEST_KDF});
+        try {
+          const c1 = wsClient(web1.port);
+          await opened(c1);
+          expect((await c1.call('has_identity')).ret).toBe(false);
+          expect((await c1.call('is_unlocked')).ret).toBe(false);
+          const locked = await c1.call('my_code');
+          expect(locked.ok).toBe(false);
+
+          thePhrase = (await c1.call('generate_phrase', {wordCount: 12})).ret as string;
+          const info = (await c1.call('init_from_phrase', {phrase: thePhrase})).ret as {peerId: string};
+          expect(info.peerId.startsWith('12D3KooW')).toBe(true);
+          expect((await c1.call('is_unlocked')).ret).toBe(true);
+          expect((await c1.call('my_code')).ok).toBe(true);
+          c1.close();
+        } finally {
+          await web1.close(); // lock flushes sealed state to disk
+        }
+      }
+
+      // Second boot on the same dir: identity known, still locked until
+      // the correct phrase arrives — and it rebuilds the same peer id.
+      {
+        const web2 = await startWebHost({accountDir: dir, kdf: TEST_KDF});
+        try {
+          const c2 = wsClient(web2.port);
+          await opened(c2);
+          expect((await c2.call('has_identity')).ret).toBe(true);
+          expect((await c2.call('is_unlocked')).ret).toBe(false);
+          expect((await c2.call('unlock', {password: 'not the phrase'})).ok).toBe(false);
+          const again = (await c2.call('unlock', {password: thePhrase})).ret as {peerId: string};
+          expect(again.peerId.startsWith('12D3KooW')).toBe(true);
+          c2.close();
+        } finally {
+          await web2.close();
+        }
+      }
+    } finally {
+      await rm(dir, {recursive: true, force: true});
+    }
+  }, 30_000);
 });

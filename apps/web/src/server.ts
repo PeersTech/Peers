@@ -1,8 +1,8 @@
 import {createServer, type IncomingMessage, type ServerResponse} from 'node:http';
 import {createReadStream, existsSync, statSync} from 'node:fs';
 import {extname, join, normalize} from 'node:path';
-import {Identity} from '@peers/core';
-import {PeersHost} from '@peers/host';
+import {Identity, type KdfParams} from '@peers/core';
+import {PeersAccount, PeersHost} from '@peers/host';
 import type {CommandName, EventName} from '@peers/api';
 import {WebSocketServer, WebSocket, type RawData} from 'ws';
 
@@ -18,19 +18,29 @@ import {WebSocketServer, WebSocket, type RawData} from 'ws';
  */
 
 export interface WebHostOptions {
-  /** Auto-created in `dataDir` when omitted (plaintext node identity). */
+  /** Ephemeral auto-identity mode: the engine to wrap. */
   identity?: Identity;
-  dataDir?: string;
+  listenAddrs?: string[];
+  /** Account mode: keystore + sealed state under this dir. Starts locked
+   * when the keystore doesn't exist yet — the renderer drives unlock. */
+  accountDir?: string;
+  /** KDF params for account mode (tests inject TEST_KDF). */
+  kdf?: KdfParams;
   host?: string;
   port?: number;
   /** Static renderer root. Default: ../../frontend/dist if it exists. */
   distDir?: string;
 }
 
+/** Anything that answers the @peers/api seam: the unlocked engine, or a
+ * full account (which handles the session commands while locked). */
+export type Backend = Pick<PeersHost, 'request' | 'on'> & {stop?(): Promise<void>};
+
 export interface WebHost {
   port: number;
-  peerId: string;
-  host_: PeersHost;
+  peerId: string | null;
+  host_: PeersHost | null;
+  backend: Backend;
   close(): Promise<void>;
 }
 
@@ -45,9 +55,35 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
+/**
+ * Starts the localhost bridge.
+ *
+ * - Default: an ephemeral auto-identity engine, always unlocked (demo/tests).
+ * - With `accountDir`: a full {@link PeersAccount} backed by that dir —
+ *   starts LOCKED when no keystore exists yet; the renderer drives
+ *   generate_phrase / init_from_phrase / unlock through the same socket.
+ */
 export async function startWebHost(opts: WebHostOptions = {}): Promise<WebHost> {
-  const identity = opts.identity ?? Identity.random();
-  const host = await PeersHost.start({identity});
+  let backend: Backend;
+  let peerId: string | null = null;
+  let host_: PeersHost | null = null;
+  let account: PeersAccount | null = null;
+
+  if (opts.accountDir) {
+    account = new PeersAccount({
+      dataDir: opts.accountDir,
+      kdf: opts.kdf,
+      listenAddrs: opts.listenAddrs,
+    });
+    // Recover the peer id for display without unlocking anything.
+    if (!account.hasIdentity()) peerId = null;
+  } else {
+    const identity = opts.identity ?? Identity.random();
+    host_ = await PeersHost.start({identity});
+    peerId = host_.peerId;
+    backend = host_;
+  }
+  backend = (account ?? host_) as Backend;
 
   const http = createServer((req, res) => {
     void serveStatic(req, res, opts.distDir ?? defaultDist());
@@ -56,16 +92,17 @@ export async function startWebHost(opts: WebHostOptions = {}): Promise<WebHost> 
 
   wss.on('connection', (socket) => {
     const offs: (() => void)[] = [];
-    // Every event the engine emits fans out to this socket as a frame.
+    // Every event the backend emits fans out to this socket as a frame.
+    // While locked the account queues these and attaches them at unlock.
     for (const event of EVENT_NAMES) {
       offs.push(
-        host.on(event, (payload) => {
+        backend!.on(event, (payload) => {
           send(socket, {event, payload});
         }),
       );
     }
     socket.on('message', (raw: RawData) => {
-      void dispatch(host, socket, raw);
+      void dispatch(backend!, socket, raw);
     });
     socket.on('close', () => offs.forEach((off) => off()));
   });
@@ -77,13 +114,15 @@ export async function startWebHost(opts: WebHostOptions = {}): Promise<WebHost> 
     get port(): number {
       return (http.address() as {port: number}).port;
     },
-    peerId: host.peerId,
-    host_: host,
+    peerId,
+    host_,
+    backend,
     close: async () => {
       for (const client of wss.clients) client.terminate();
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => http.close(() => resolve()));
-      await host.stop();
+      if (account) await account.lock();
+      else if (host_) await host_.stop();
     },
   };
 }
@@ -92,7 +131,7 @@ export async function startWebHost(opts: WebHostOptions = {}): Promise<WebHost> 
 
 type WireRequest = {id?: number | string; cmd: CommandName; args?: Record<string, unknown>};
 
-async function dispatch(host: PeersHost, socket: WebSocket, raw: RawData): Promise<void> {
+async function dispatch(backend: Backend, socket: WebSocket, raw: RawData): Promise<void> {
   let req: WireRequest;
   try {
     req = JSON.parse(String(raw)) as WireRequest;
@@ -103,7 +142,7 @@ async function dispatch(host: PeersHost, socket: WebSocket, raw: RawData): Promi
     return send(socket, {id: req?.id, ok: false, error: 'missing cmd'});
   }
   try {
-    const ret = await host.request(req.cmd, (req.args ?? {}) as never);
+    const ret = await backend.request(req.cmd, (req.args ?? {}) as never);
     send(socket, {id: req.id, ok: true, ret} as never);
   } catch (e) {
     send(socket, {id: req.id, ok: false, error: e instanceof Error ? e.message : String(e)} as never);

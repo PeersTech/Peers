@@ -1,9 +1,7 @@
 import {existsSync} from 'node:fs';
-import {mkdir, readFile, writeFile} from 'node:fs/promises';
-import {dirname, join} from 'node:path';
+import {join} from 'node:path';
 import {BrowserWindow, Menu, Tray, app, ipcMain, nativeImage, powerMonitor} from 'electron';
-import {Identity} from '@peers/core';
-import {PeersHost} from '@peers/host';
+import {PeersAccount} from '@peers/host';
 import type {CommandName, EventName} from '@peers/api';
 
 /**
@@ -18,37 +16,23 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitRequested = false;
 
-/** The engine is created once, lazily, and shared by every IPC caller. */
-let engine: Promise<PeersHost> | null = null;
+/** The account is created once, lazily, and shared by every IPC caller.
+ * It starts locked when no keystore exists yet — the renderer's login
+ * screen drives generate_phrase / init_from_phrase / unlock over IPC. */
+let account: PeersAccount | null = null;
 
-function getEngine(): Promise<PeersHost> {
-  if (!engine) {
-    engine = bootEngine().catch((err: unknown) => {
-      engine = null; // allow retry on next command
-      throw err;
+function getAccount(): PeersAccount {
+  if (!account) {
+    account = new PeersAccount({
+      dataDir: join(app.getPath('userData'), 'account'),
+      // M12 battery guard: the OS reports, the node decides. An hour of
+      // idle counts as "asleep on a shelf" even if the battery is drawn.
+      powerSource: {
+        isPowerConstrained: () => powerMonitor.isOnBatteryPower() && powerMonitor.getSystemIdleTime() < 3600,
+      },
     });
   }
-  return engine;
-}
-
-async function bootEngine(): Promise<PeersHost> {
-  const dir = join(app.getPath('userData'), 'node');
-  const identityPath = join(dir, 'identity.bin');
-  const identity = existsSync(identityPath)
-    ? Identity.unmarshal(new Uint8Array(await readFile(identityPath)))
-    : Identity.random();
-  if (!existsSync(identityPath)) {
-    await mkdir(dirname(identityPath), {recursive: true});
-    await writeFile(identityPath, identity.marshal(), {mode: 0o600});
-  }
-  return PeersHost.start({
-    identity,
-    // M12 battery guard: the OS reports, the node decides. An hour of
-    // idle counts as "asleep on a shelf" even if the battery is drawn.
-    powerSource: {
-      isPowerConstrained: () => powerMonitor.isOnBatteryPower() && powerMonitor.getSystemIdleTime() < 3600,
-    },
-  });
+  return account;
 }
 
 function createWindow(distDir: string): void {
@@ -125,15 +109,16 @@ const EVENT_NAMES: EventName[] = [
 function wireIpc(): void {
   ipcMain.handle('peers:request', async (_event, cmd: CommandName, args: unknown) => {
     try {
-      return {ok: true, ret: await (await getEngine()).request(cmd, args as never)};
+      return {ok: true, ret: await getAccount().request(cmd, args as never)};
     } catch (e) {
       return {ok: false, error: e instanceof Error ? e.message : String(e)};
     }
   });
-  ipcMain.on('peers:subscribe-events', async (event) => {
-    const host = await getEngine();
+  // Events flow from the account (queued while locked, live after unlock).
+  ipcMain.on('peers:subscribe-events', (event) => {
+    const acct = getAccount();
     for (const name of EVENT_NAMES) {
-      host.on(name, (payload) => {
+      acct.on(name, (payload) => {
         if (!event.sender.isDestroyed()) event.sender.send(`peers:event:${name}`, payload);
       });
     }
@@ -169,9 +154,9 @@ if (!gotLock) {
   app.on('before-quit', async () => {
     quitRequested = true;
     try {
-      await (await getEngine()).stop();
+      await getAccount().lock(); // flushes sealed state, stops the node
     } catch {
-      /* engine never started — nothing to stop */
+      /* account never constructed — nothing to stop */
     }
   });
 
