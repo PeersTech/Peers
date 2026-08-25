@@ -1,4 +1,5 @@
-import type {FriendNotice, Identity} from '@peers/core';
+import type {
+  StoreHandle} from '@peers/core';
 import {
   JoinNotice,
   PeerCard,
@@ -6,6 +7,7 @@ import {
   PLAZA_TOPIC,
   ProfileNotice,
   ServerDir,
+  ServerRecord,
   SessionDir,
   SignedMessage,
   SignedProfile,
@@ -17,8 +19,10 @@ import {
   serverTopic,
   shortCode,
   utf8,
+  type FriendNotice,
+  type Identity,
+  PersistedState,
   type PlazaMessageShape,
-  type ServerRecord,
 } from '@peers/core';
 import {PeersNode, type IncomingMessage} from '@peers/node';
 import type {
@@ -64,12 +68,15 @@ export class PeersHost {
   /** Last-seen ts per Plaza participant (presence). */
   private readonly plazaSeen = new Map<string, number>();
   private profile: SignedProfile | null = null;
+  /** Sealed at-rest storage; null = ephemeral host (tests). */
+  private storage: StoreHandle | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(
     readonly identity: Identity,
     private readonly node: PeersNode,
-    private readonly sessions = new SessionDir(identity),
-    private readonly servers = new ServerDir(),
+    private sessions = new SessionDir(identity),
+    private servers = new ServerDir(),
   ) {}
 
   static async start(opts: {
@@ -77,12 +84,10 @@ export class PeersHost {
     listenAddrs?: string[];
     /** Battery/idle guard handed to the underlying node (desktop hosts). */
     powerSource?: Parameters<typeof PeersNode.start>[0]['powerSource'];
+    nodeFactory?: (identity: Identity) => Promise<PeersNode>;
   }): Promise<PeersHost> {
-    const node = await PeersNode.start({
-      identity: opts.identity,
-      listenAddrs: opts.listenAddrs,
-      powerSource: opts.powerSource,
-    });
+    const make = opts.nodeFactory ?? ((id: Identity) => PeersNode.start({identity: id, listenAddrs: opts.listenAddrs, powerSource: opts.powerSource}));
+    const node = await make(opts.identity);
     return PeersHost.startWithNode(opts.identity, node);
   }
 
@@ -97,6 +102,79 @@ export class PeersHost {
     node.onMessage((msg) => host.onWireMessage(msg));
     node.onFriendNotice((n) => host.onFriendNotice(n));
     return host;
+  }
+
+  /**
+   * Attaches sealed at-rest storage and restores whatever survived the
+   * last run: E2E sessions, contacts, servers, histories, profile. Called
+   * right after construction, before any traffic flows.
+   */
+  async attachStorage(handle: StoreHandle): Promise<void> {
+    this.storage = handle;
+    const state = await handle.load();
+    if (state.sessions.length > 0 || state.contacts.length > 0) {
+      this.sessions = SessionDir.restore(
+        {sessions: state.sessions, contacts: state.contacts},
+        this.identity,
+      );
+    }
+    for (const raw of state.servers as ReturnType<ServerRecord['toPersisted']>[]) {
+      try {
+        this.servers.restore(ServerRecord.fromPersisted(raw));
+      } catch {
+        continue; // a corrupt record must not take the rest down
+      }
+    }
+    for (const [key, msgs] of state.history.server) {
+      const slash = key.indexOf('/');
+      if (slash === -1) continue;
+      const map = historyFor(this.serverHistory, key.slice(0, slash));
+      map.set(key.slice(slash + 1), msgs);
+    }
+    for (const [peer, msgs] of state.history.dm) this.dmHistory.set(peer, msgs);
+    if (state.profile) {
+      this.profile = state.profile;
+      void this.announcePlazaProfile().catch(() => {});
+    }
+    // Rejoin everything we were part of.
+    for (const rec of this.servers.records()) {
+      this.node.subscribe(serverTopic(rec.id));
+      for (const c of rec.channels) this.node.subscribe(channelTopic(rec.id, c.name));
+    }
+  }
+
+  /** Collects everything worth surviving a restart. */
+  private collectState(): PersistedState {
+    const state = new PersistedState();
+    const dir = this.sessions.export();
+    state.sessions = dir.sessions;
+    state.contacts = dir.contacts;
+    state.servers = this.servers.records().map((r) => r.toPersisted());
+    for (const [serverId, channels] of this.serverHistory) {
+      for (const [channel, msgs] of channels) state.history.server.set(`${serverId}/${channel}`, msgs);
+    }
+    for (const [peer, msgs] of this.dmHistory) state.history.dm.set(peer, msgs);
+    state.profile = this.profile;
+    return state;
+  }
+
+  /** Debounced best-effort save — mutations call `touch()`, never await. */
+  private touch(): void {
+    if (!this.storage || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      void this.storage!.save(this.collectState()).catch(() => {});
+    }, 300);
+  }
+
+  /** Flushes pending state now (lock/shutdown path). */
+  async flush(): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (!this.storage) return;
+    await this.storage.save(this.collectState()).catch(() => {});
   }
 
   get peerId(): string {
@@ -114,7 +192,7 @@ export class PeersHost {
   }
 
   stop(): Promise<void> {
-    return this.node.stop();
+    return this.flush().finally(() => this.node.stop());
   }
 
   // -------------------------------------------------------------------------
@@ -250,6 +328,7 @@ export class PeersHost {
       this.servers.remove(a.serverId);
       this.serverHistory.delete(a.serverId);
       this.openInvites.delete(a.serverId);
+      this.touch();
       return null;
     },
     add_member: async (a) => {
@@ -352,6 +431,7 @@ export class PeersHost {
           n++;
         }
       }
+      this.touch();
       return n;
     },
 
@@ -364,6 +444,7 @@ export class PeersHost {
       }
       // Let the Plaza learn the new name/avatar (Rust: announce_plaza_profile).
       await this.announcePlazaProfile().catch(() => {});
+      this.touch();
       return {...p};
     },
     get_profile: async () => (this.profile ? {...this.profile} : null),
@@ -496,6 +577,7 @@ export class PeersHost {
     }
     const dto: DmMessageDto = {peer: from, text, ts: Date.now(), mine: false};
     this.dmHistory.set(from, [...(this.dmHistory.get(from) ?? []), dto]);
+    this.touch();
     this.emit('node://message', {from, channel: from, text});
   }
 
@@ -556,6 +638,7 @@ export class PeersHost {
         }
       }
     }
+    this.touch(); // riding cards became contact keys — keep them sealed
     this.emit('server://list', this.dtoView(rec.view(this.peerId)));
   }
 
@@ -616,6 +699,7 @@ export class PeersHost {
   private onFriendNotice(notice: FriendNotice): void {
     this.sessions.rememberContact(notice.from, notice.card);
     if (notice.profile) this.contactProfiles.set(notice.from, {...notice.profile});
+    this.touch();
     if (notice.kind === 'request') {
       this.emit('friend://request', {
         peerId: notice.from,
@@ -641,6 +725,7 @@ export class PeersHost {
         ...(this.dmHistory.get(channel) ?? []),
         {peer: channel, text, ts: Date.now(), mine: true},
       ]);
+      this.touch();
       return;
     }
     this.node.subscribe(topic);
@@ -667,6 +752,7 @@ export class PeersHost {
 
   private async publishList(rec: ServerRecord): Promise<void> {
     await this.publishJson(serverTopic(rec.id), rec.signedList());
+    this.touch(); // every owner mutation funnels through here
     this.emit('server://list', this.dtoView(rec.view(this.peerId)));
   }
 
@@ -680,6 +766,7 @@ export class PeersHost {
     arr.push(msg);
     if (arr.length > 500) arr.splice(0, arr.length - 500);
     map.set(msg.channel, arr);
+    this.touch();
   }
 
   private viewOf(rec: ServerRecord): ServerViewDto {
