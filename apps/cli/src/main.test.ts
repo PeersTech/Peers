@@ -55,7 +55,7 @@ describe('shareable address filtering', () => {
 });
 
 describe('runBackbone', () => {
-  it('starts a relay-tier node and prints pasteable PEERS_NODES lines', async () => {
+  it('starts a relay-tier node — discovery via directory, seed hidden by default', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'peers-cli-run-'));
     try {
       const lines: string[] = [];
@@ -66,21 +66,39 @@ describe('runBackbone', () => {
         portOverride: 0,
         onLine: (l) => lines.push(l),
       });
+      const backboneId = backbone.peerId;
       try {
-        expect(backbone.peerId.startsWith('12D3KooW')).toBe(true);
-        expect(lines.some((l) => l.includes(`peers node peer id: ${backbone.peerId}`))).toBe(true);
-        expect(lines.some((l) => l.includes('PEERS_NODES=') && l.endsWith(`/p2p/${backbone.peerId}`))).toBe(true);
-        await backbone.stop();
-
-        // A second instance over the same data dir restores the identity.
-        const again = await runBackbone({env: {}, dataDir: dir, portOverride: 0, onLine: () => {}});
-        try {
-          expect(again.peerId).toBe(backbone.peerId);
-        } finally {
-          await again.stop();
-        }
+        expect(backboneId.startsWith('12D3KooW')).toBe(true);
+        expect(lines.some((l) => l.includes(`peers node peer id: ${backboneId}`))).toBe(true);
+        // Seed line hidden by default — directory handles discovery.
+        expect(lines.some((l) => l.includes('PEERS_NODES='))).toBe(false);
+        expect(lines.some((l) => l.includes('directory.peers.dpdns.org'))).toBe(true);
       } finally {
         await backbone.stop();
+      }
+
+      // Explicit --show-seed prints it for manual override.
+      const seeded: string[] = [];
+      const withSeed = await runBackbone({
+        env: {},
+        dataDir: dir,
+        portOverride: 0,
+        showSeed: true,
+        onLine: (l) => seeded.push(l),
+      });
+      try {
+        expect(seeded.some((l) => l.includes('PEERS_NODES=') && l.endsWith(`/p2p/${withSeed.peerId}`))).toBe(true);
+        expect(withSeed.peerId).toBe(backboneId);
+      } finally {
+        await withSeed.stop();
+      }
+
+      // A third instance over the same data dir restores the identity.
+      const again = await runBackbone({env: {}, dataDir: dir, portOverride: 0, onLine: () => {}});
+      try {
+        expect(again.peerId).toBe(backboneId);
+      } finally {
+        await again.stop();
       }
     } finally {
       await rm(dir, {recursive: true, force: true});

@@ -87,19 +87,11 @@ systemctl restart peers-node
 
 step "waiting for startup"
 sleep 2
-# This boot only (-b), newest line wins — old journal entries would lie.
-LINE=$(journalctl -u peers-node -b --no-pager 2>/dev/null | grep -E 'PEERS_NODES=/' | tail -1 | sed 's/^.*PEERS_NODES=//')
-
 systemctl is-active peers-node >/dev/null
 echo ""
 ok "peers-node is running (port $PORT)"
 echo "   logs:    journalctl -u peers-node -f"
 echo "   upgrade: cd $DIR && git pull && sudo ./scripts/install-node.sh --dir $DIR --port $PORT"
-if [[ -n ${LINE:-} ]]; then
-  echo ""
-  echo "Give clients this line (also printed on every start):"
-  echo "  $LINE"
-  echo ""
-  echo "Clients put it in ~/.config/peers/nodes.json like:"
-  echo '  ["'"$LINE"'"]'
-fi
+echo ""
+echo "Clients auto-discover via https://directory.peers.dpdns.org — no manual config needed."
+echo "If you need a manual seed line (directory down): PEERS_SHOW_SEED=1 $DIR/apps/cli/bin/peers.js --node --show-seed"

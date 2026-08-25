@@ -14,17 +14,20 @@ if (!args.includes('--node')) {
       '',
       `  ${paint('36', '--node')}          run the headless backbone node (relay tier)`,
       `  ${paint('36', '--port <port>')}   override the listen port (default 4001 or PEERS_PORT)`,
+      `  ${paint('36', '--show-seed')}     print PEERS_NODES line (hidden by default — directory handles it)`,
       '',
     ].join('\n') + '\n',
   );
   process.exit(args.length === 0 ? 0 : 1);
 }
+let showSeed = false;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') process.env.PEERS_PORT = args[i + 1] ?? '';
+  if (args[i] === '--show-seed') showSeed = true;
 }
 try {
   const {runBackbone} = await import('../dist/main.js');
-  const backbone = await runBackbone();
+  const backbone = await runBackbone({showSeed});
   const shutdown = async () => {
     await backbone.stop();
     process.exit(0);

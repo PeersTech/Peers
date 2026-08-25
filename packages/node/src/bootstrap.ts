@@ -19,6 +19,7 @@ export interface BootstrapEnv {
   PEERS_NODES?: string;
   PEERS_PORT?: string;
   PEERS_ANNOUNCE?: string;
+  PEERS_SHOW_SEED?: string;
   XDG_CONFIG_HOME?: string;
   HOME?: string;
 }

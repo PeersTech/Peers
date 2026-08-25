@@ -32,5 +32,7 @@ export function paintLine(line: string): string {
   if (line.startsWith('peers node is up.')) return c.bold(c.green(line));
   if (line.startsWith('dialing known node:')) return c.dim(line);
   if (line.startsWith('  →')) return c.dim(line);
+  // banner / boxed info — already painted before log(), keep as-is
+  if (line.startsWith('  peers') || line.startsWith('  ┌') || line.startsWith('  └') || line.startsWith('  │')) return line;
   return line;
 }

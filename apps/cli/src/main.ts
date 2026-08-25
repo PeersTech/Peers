@@ -3,8 +3,15 @@ import {existsSync} from 'node:fs';
 import {networkInterfaces} from 'node:os';
 import {dirname, join} from 'node:path';
 import {Identity} from '@peers/core';
-import {announceAddrs, listenPort, resolveBootstrapNodes, type BootstrapEnv} from '@peers/node';
-import {paintLine} from './ui.js';
+import {
+  DEFAULT_DIRECTORIES,
+  announceAddrs,
+  listenPort,
+  resolveBootstrapNodes,
+  type BootstrapEnv,
+} from '@peers/node';
+import {b64encode} from '@peers/core';
+import {c, paintLine} from './ui.js';
 
 /**
  * Headless backbone node (M11 parity with `backend/src/node.rs`).
@@ -22,6 +29,8 @@ export interface BackboneOptions {
   /** Ephemeral port for tests; beats PEERS_PORT and the 4001 default. */
   portOverride?: number;
   onLine?: (line: string) => void;
+  /** Print the manual PEERS_NODES seed line (hidden by default — directory does it). */
+  showSeed?: boolean;
 }
 
 export interface Backbone {
@@ -105,12 +114,19 @@ export async function runBackbone(opts: BackboneOptions = {}): Promise<Backbone>
 
   // Directories first: live list, cached to disk, seeds as fallback.
   const nodes = await resolveBootstrapNodes({env, configDir: dataDir});
+  const port = opts.portOverride ?? listenPort(4001, env);
   const identity = await loadOrCreateIdentity(identityPath);
+
+  // ── pretty startup banner (tests inject onLine so they see raw lines too) ──
+  log('');
+  log(c.bold(c.yellow('  peers  •  backbone node')));
+  log(c.dim('  ─────────────────────────'));
   log(`peers node peer id: ${identity.peerId}`);
   log(`peers node identity: ${identityPath}`);
+  log(`${c.dim('  port      ')}${c.yellow(String(port))}  ${c.dim('•')}  ${c.green('relay tier: node')}  ${c.dim('•')}  ${c.cyan('directory.peers.dpdns.org')} ${c.dim('(auto)')}`);
+  log('');
 
   const {PeersNode} = await import('@peers/node');
-  const port = opts.portOverride ?? listenPort(4001, env);
   const announce = announceAddrs(env);
   const announced = announce.length > 0;
 
@@ -139,18 +155,62 @@ export async function runBackbone(opts: BackboneOptions = {}): Promise<Backbone>
   const listenAddrs = expandListenAddrs(await node.rawListenAddrs());
   for (const line of shareableLines(listenAddrs, announced, node.peerId)) {
     log(`listening: ${line}`);
-    log(`  → PEERS_NODES=${line}`);
   }
   for (const line of shareableLines(announce, announced, node.peerId)) {
     log(`announcing: ${line}`);
-    log(`  → PEERS_NODES=${line}`);
   }
-  log('peers node is up. give clients the `PEERS_NODES=` line above.');
+  const showSeed = opts.showSeed ?? env.PEERS_SHOW_SEED === '1';
+  if (showSeed && listenAddrs.length > 0) {
+    const seed = shareableLines(listenAddrs, announced, node.peerId)[0] ?? shareableLines(announce, announced, node.peerId)[0];
+    if (seed) log(`seed (manual override): PEERS_NODES=${seed}`);
+  }
+  log('peers node is up. discovery via directory.peers.dpdns.org — no client config needed.');
+
+  // Keep this node's address fresh in the directory so fresh installs find it.
+  // Best-effort: directory may not be deployed yet; the fallback seeds still work.
+  const heartbeatAddr = shareableLines(listenAddrs, announced, node.peerId)[0] ?? shareableLines(announce, announced, node.peerId)[0];
+  if (heartbeatAddr) startDirectoryHeartbeat(identity, heartbeatAddr);
 
   return {
     peerId: node.peerId,
     port,
     shareable: shareableLines(listenAddrs, announced, node.peerId),
-    stop: () => node.stop(),
+    stop: async () => {
+      stopDirectoryHeartbeat();
+      await node.stop();
+    },
   };
+}
+
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+function startDirectoryHeartbeat(identity: Identity, multiaddr: string): void {
+  const tick = async (): Promise<void> => {
+    const ts = Date.now();
+    const msg = `peers-directory:v1:heartbeat:${identity.peerId}:${ts}`;
+    const sig = b64encode(identity.sign(new TextEncoder().encode(msg)));
+    const body = JSON.stringify({peerId: identity.peerId, ts, sig, multiaddr});
+    for (const base of DEFAULT_DIRECTORIES) {
+      try {
+        await fetch(`${base.replace(/\/$/, '')}/v1/heartbeat`, {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body,
+        });
+      } catch {
+        /* directory not deployed / offline — fallback seeds keep the mesh alive */
+      }
+    }
+  };
+  void tick();
+  heartbeatTimer = setInterval(() => void tick(), 10 * 60_000);
+  // allow process to exit even if timer is still armed (tests)
+  heartbeatTimer.unref?.();
+}
+
+function stopDirectoryHeartbeat(): void {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 }
