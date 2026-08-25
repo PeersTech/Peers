@@ -28,6 +28,13 @@ The seam is `@peers/api`: the renderer keeps its existing call surface,
 only the transport adapter changes (Tauri `invoke()` → Electron IPC or
 WebSocket). Three adapters = a real seam.
 
+## Status
+
+**Migration complete through step 9 (cutover).** The Rust backend is gone;
+`packages/` + `apps/` are the product. `126/126 tests green · tsc clean ·
+eslint clean`. Step 10 is the physical cross-NAT verification gate — it needs
+a VPS and a laptop on different networks, so it cannot run in CI.
+
 ## Done ✅
 
 - **Monorepo scaffold**: npm workspaces, strict TS (`tsc -p` per package),
@@ -162,8 +169,11 @@ v3-compatible gossipsub ships.
    `apps/web` (HTTP + WS bridge adapter of @peers/api), `apps/desktop`
    (Electron shell + `frontend/` renderer; tray/close-to-tray via
    powerMonitor-backed `powerSource`).
-9. **Cutover** — delete `backend/`, swap CI to typecheck/lint/test +
-   electron-builder matrix (3 OS), update PLAN.md/README/docs.
+9. ~~Cutover~~ ✅ — `backend/` deleted (Rust history preserved in git; the
+   battery-guard WIP was committed pre-cutover in 085e949), CI swapped to
+   frontend + root typecheck/lint/vitest + desktop bundle smoke on 3 OS,
+   release.yml now cuts electron-builder installers for all three OSes,
+   README/docs updated to the TS architecture.
 10. **Manual verification gate** — VPS node + laptop behind different
     networks: code connect, relayed delivery, hole-punch upgrade.
 

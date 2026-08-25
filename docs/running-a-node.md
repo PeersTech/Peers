@@ -58,21 +58,25 @@ relayed traffic that has not yet upgraded to direct.
 
 ## Setup
 
-### 1. Build the binary
+### 1. Get the node running
 
-On the node machine (or build locally and copy the binary over):
+On the node machine (Node.js 22+ required):
 
 ```sh
 git clone https://github.com/PeersTech/Peers.git
-cd Peers/backend
-cargo build --release
+cd Peers
+npm install
 ```
 
-The binary lands at `backend/target/release/peers`.
+Then run the headless backbone node:
 
-> On a 1 GB Pi, `cargo build --release` may run out of memory while linking.
-> Build on a bigger machine with the same architecture and `scp` the binary
-> across, or add swap.
+```sh
+node apps/cli/src/main.ts
+# or, after `npm link` in apps/cli: peers --node
+```
+
+The identity is stored plaintext (0600) at `~/.config/peers/node-identity.bin`,
+so restarts keep the same peer id and friend code.
 
 > **Running on Pterodactyl?** There is a ready-made egg at
 > [PeersTech/ptero-egg](https://github.com/PeersTech/ptero-egg) that does all of
@@ -81,7 +85,7 @@ The binary lands at `backend/target/release/peers`.
 
 ### 2. Open the firewall
 
-The node listens on a TCP and a QUIC (UDP) port — 4001 by default. Allow both
+The node listens on a TCP port — 4001 by default. Allow both
 protocols:
 
 ```sh
@@ -233,7 +237,7 @@ anyone restarting an app, while a node that stays down is not hammered by every
 client that has it configured.
 
 This means you can restart a node freely, **as long as its peer ID and port do
-not change**. Keep `node_identity.json` and pin `PEERS_PORT`.
+not change**. Keep `~/.config/peers/node-identity.bin` and pin `PEERS_PORT`.
 
 ---
 
@@ -271,7 +275,8 @@ WantedBy=multi-user.target
 
 ```sh
 sudo useradd -r -m -d /home/peers peers
-sudo cp backend/target/release/peers /usr/local/bin/
+# Install the CLI (or copy the repo to /opt/peers and point ExecStart at it)
+cd Peers/apps/cli && sudo npm link
 sudo systemctl enable --now peers-node
 journalctl -u peers-node -f
 ```

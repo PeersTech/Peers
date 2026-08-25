@@ -19,15 +19,15 @@ be taken down or subpoenaed.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                            Peers (Tauri 2)                        │
+│                          Peers (TypeScript)                       │
 │  ┌───────────────────────────┐  ┌──────────────────────────────┐  │
-│  │  frontend/                │  │  backend/                   │  │
-│  │  React 19 + TypeScript    │◄─┼─► Rust (libp2p swarm)        │  │
-│  │  Vite + Tailwind 4        │  │  invoke() ── crypto ── p2p   │  │
-│  └───────────────────────────┘  └──────────────────────────────┘  │
-│            │                         │                            │
-│            │         E2E ciphertext  │ sealed envelopes + blobs   │
-│            ▼                         ▼                            │
+│  │  frontend/                │  │  packages/ + apps/           │  │
+│  │  React 19 + TypeScript    │◄─┼─► @peers/host (engine)       │  │
+│  │  Vite + Tailwind 4        │  │  @peers/core ── @peers/node   │  │
+│  └───────────────────────────┘  │  (libp2p swarm)               │  │
+│            │                    └──────────────────────────────┘  │
+│            │         E2E ciphertext  sealed envelopes + blobs     │
+│            ▼                                                      │
 │  ┌────────────────────────────────────────────────────────────────┐
 │  │  Public IPFS testnet: gossipsub topics + Kademlia DHT          │
 │  │  (live chat)                 (torrent-style blob parking)      │
@@ -35,8 +35,11 @@ be taken down or subpoenaed.
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-The GUI is a shell only — **private keys and decryption never leave the Rust
-backend**, and the frontend never sees a secret.
+The UI is a shell only — **private keys and decryption never leave the
+host engine**, and the frontend never sees a secret. One TypeScript
+engine (`@peers/core` domain + `@peers/node` network) powers three hosts:
+the Electron desktop app, a localhost web server, and the headless
+`peers --node` CLI.
 
 ---
 
@@ -82,17 +85,21 @@ wrong-AAD and third-party-open attacks are all covered.
 ```
 Peers/
 ├── frontend/            React UI (Vite + TypeScript + Tailwind)
-│   ├── src/             components, screens, Tauri bindings
-│   └── package.json     npm scripts incl. tauri:dev / tauri:build
-├── backend/             Rust app (Tauri 2 + libp2p)
-│   ├── src/
-│   │   ├── crypto/      identity, keystore, sessions, cipher, peer cards
-│   │   ├── p2p/         libp2p behaviour, blob store, DNS bootstrap
-│   │   └── lib.rs       Tauri commands + event relay
-│   ├── tauri.conf.json  app/bundle config
-│   └── Cargo.toml
+│   ├── src/             components, screens, host bindings
+│   └── package.json     npm scripts (dev / build / test)
+├── packages/
+│   ├── api/             @peers/api — the typed command/event seam
+│   ├── core/            @peers/core — domain: identity, keystore, sessions,
+│   │                    servers, profiles, codes, plaza (pure TS, tested)
+│   ├── node/            @peers/node — createPeersNode(): libp2p assembly,
+│   │                    DHT blobs, relay tiers, bootstrap config
+│   └── host/            @peers/host — the engine implementing the seam
+├── apps/
+│   ├── desktop/         Electron shell (tray, close-to-tray, battery guard)
+│   ├── web/             localhost HTTP + WS bridge serving the renderer
+│   └── cli/             peers --node headless backbone node
 ├── scripts/             icon generator
-└── .github/workflows/   CI, 3-OS builds, releases
+└── .github/workflows/   CI, 3-OS bundles, releases
 ```
 
 ---
@@ -101,24 +108,32 @@ Peers/
 
 ### Prerequisites
 
-- [Node.js 20+](https://nodejs.org) with npm
-- A Rust toolchain — see [Tauri prerequisites](https://tauri.app/start/prerequisites/)
-  (Linux: webkit2gtk 4.1, libgtk-3, librsvg, patchelf)
+- [Node.js 22+](https://nodejs.org) with npm
 
 ### Run in development
 
 ```sh
-# 1. install frontend deps (includes the Tauri CLI)
-cd frontend && npm install
+# install everything (npm workspaces)
+npm install
 
-# 2. start the app with hot reload (vite + cargo watch)
-npm run tauri:dev
+# typecheck + lint + test the whole monorepo
+npm run typecheck && npm run lint && npm test
+
+# build the renderer once for the desktop/web shells
+cd frontend && npm install && npm run build && cd ..
 ```
 
-### Production build
+### Hosts
 
 ```sh
-npm run tauri:build        # bundles installers into backend/target/release/bundle
+# Desktop (Electron): builds main/preload then launches
+npm run start --workspace apps/desktop
+
+# Web: localhost HTTP + WebSocket bridge on :8787
+npm run start --workspace apps/web
+
+# Headless backbone node (relay tier, fixed port)
+node apps/cli/src/main.ts        # or: peers --node after npm link
 ```
 
 ### Regenerate app icons
@@ -133,9 +148,8 @@ node scripts/gen-icons.mjs # draws the Peers logo (pure Node, zero deps)
 
 | Workflow | When | What it does |
 |---|---|---|
-| `ci.yml` | every push/PR | `cargo fmt --check`, clippy `-D warnings`, full test suite, frontend build, Windows/macOS `cargo check` |
-| `build.yml` | main + PRs | builds **Windows, Linux and macOS installers** and uploads them as artifacts |
-| `release.yml` | tag `v*` | cross-platform release draft with installers, signed to a GitHub Release |
+| `ci.yml` | every push/PR | frontend test+build; root `typecheck`, `lint`, full vitest suite; desktop bundle smoke on Windows/Linux/macOS |
+| `release.yml` | tag `v*` | electron-builder matrix cutting installers for all three OSes onto a GitHub Release |
 
 Trigger a manual build or release anytime from the **Actions** tab.
 
@@ -154,13 +168,13 @@ Trigger a manual build or release anytime from the **Actions** tab.
 
 ### Node network (international chat — see [`PLAN.md`](PLAN.md))
 
-- [ ] **M8** — Friend codes: share/scan peer-ID code, DHT `find_peer`, direct dial
-- [ ] **M9** — Circuit Relay v2: NAT'd peers connect through always-on nodes
-- [ ] **M10** — DCUtR hole punching: upgrade relayed connections to direct P2P
-- [x] **M11** — Headless node mode (`--node`): run the backend as an always-on routing/relay node (Pi/VPS)
+- [x] **M8** — Friend codes: share/scan peer-ID code, DHT lookup, signed mutual-accept handshake
+- [x] **M9** — Circuit Relay v2: NAT'd peers connect through always-on nodes
+- [x] **M10** — DCUtR hole punching: upgrade relayed connections to direct P2P (cross-NAT verification pending)
+- [x] **M11** — Headless node mode (`peers --node`): run an always-on routing/relay node (Pi/VPS)
 - [x] **M12** — Node bootstrap + capacity caps: `PEERS_NODES`/`nodes.json`, tiered relay budgets (`PEERS_NO_RELAY=1` opts out)
 - [x] **M13** — Deployment guide: [`docs/running-a-node.md`](docs/running-a-node.md)
-- [ ] **M14** — Custom profiles: signed display name, profile picture (DHT avatar), about me
+- [x] **M14** — Custom profiles: signed display name, profile picture (DHT avatar), about me
 - [x] **M16** — Seed-phrase login: BIP39 12/24-word phrase *is* the private key (HKDF → Ed25519 + X25519)
 
 ---

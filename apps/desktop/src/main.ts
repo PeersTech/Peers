@@ -151,7 +151,11 @@ if (!gotLock) {
 
   void app.whenReady().then(async () => {
     wireIpc();
-    const distDir = join(app.getAppPath(), '../../frontend/dist');
+    // Packaged builds ship the renderer via electron-builder extraResources;
+    // dev runs read it straight out of the frontend workspace.
+    const distDir = app.isPackaged
+      ? join(process.resourcesPath, 'renderer')
+      : join(app.getAppPath(), '../../frontend/dist');
     createWindow(existsSync(distDir) ? distDir : '');
     createTray();
 

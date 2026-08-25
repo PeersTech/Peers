@@ -1,0 +1,26 @@
+appId: app.peers.desktop
+productName: Peers
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - package.json
+extraResources:
+  # The renderer is built from frontend/ and shipped inside the app.
+  - from: ../../frontend/dist
+    to: renderer
+  - from: ../../frontend/package.json
+    to: frontend-package.json
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Network;InstantMessaging
+mac:
+  target:
+    - dmg
+  category: public.app-category.social-networking
+win:
+  target:
+    - nsis

@@ -1,5 +1,9 @@
 # Peers — Decentralized Node Network Plan
 
+> **Note:** the implementation is now TypeScript (`packages/` + `apps/`); see
+> [`TS-MIGRATION.md`](TS-MIGRATION.md) for the migration record and current
+> architecture. Milestone history below describes behaviour, not toolchains.
+
 ## Goal
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

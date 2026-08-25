@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  desktop:
     permissions:
       contents: write
     strategy:
@@ -14,11 +14,11 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: --target universal-apple-darwin
+            args: --mac
           - platform: ubuntu-22.04
-            args: ""
+            args: --linux
           - platform: windows-latest
-            args: ""
+            args: --win
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -27,40 +27,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend deps
+          cache-dependency-path: package-lock.json
+      - name: Install
         run: npm ci
+
+      - name: Build renderer
+        run: npm run build
         working-directory: frontend
 
-      - name: Install Rust (macos)
-        if: matrix.platform == 'macos-latest'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - name: Install Rust
-        if: matrix.platform != 'macos-latest'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux deps
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-            librsvg2-dev patchelf libxdo-dev libssl-dev
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: backend
-
-      - uses: tauri-apps/tauri-action@v0
+      - name: Bundle desktop app (electron-builder)
+        run: npx electron-builder ${MATRIX_ARGS}
+        working-directory: apps/desktop
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          appPath: backend
-          tagName: app-v__VERSION__
-          releaseName: "Peers v__VERSION__"
-          releaseBody: "See the assets to download and install this version."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          MATRIX_ARGS: ${{ matrix.args }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
