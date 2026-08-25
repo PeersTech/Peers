@@ -31,9 +31,29 @@ WebSocket). Three adapters = a real seam.
 ## Status
 
 **Migration complete through step 9 (cutover).** The Rust backend is gone;
-`packages/` + `apps/` are the product. `126/126 tests green · tsc clean ·
-eslint clean`. Step 10 is the physical cross-NAT verification gate — it needs
-a VPS and a laptop on different networks, so it cannot run in CI.
+`packages/` + `apps/` are the product. Step 10 is the physical cross-NAT
+verification gate — it needs a VPS and a laptop on different networks, so
+it cannot run in CI.
+
+Deferred follow-ups, resolved:
+- **Sealed persistence + account lifecycle** — `PeersAccount`
+  (`generate_phrase` / `initFromPhrase` / `unlock` / `lock`) wraps the
+  engine; sessions, contacts, servers, histories and profile survive
+  restarts via the Argon2id-sealed state store (tested incl. two-account
+  DM round trip across lock/unlock).
+- **Hosts ride the account** — web host starts locked when no keystore
+  exists (renderer drives login over the socket); desktop shell routes IPC
+  through the account with the battery-guarded power source.
+- **Frontend transport swap** — `lib/api.ts` now speaks to
+  `window.peers` (Electron) or a WebSocket (`/ws`, same-origin or
+  `VITE_PEERS_WS`); Tauri deps removed from the renderer entirely.
+- **Desktop smoke under Xvfb** — window + renderer boot clean headless
+  (GPU/shutdown warnings only); real GUI verification rides step 10.
+- **QUIC** — `@libp2p/quic` was never published to npm; js-libp2p has no
+  QUIC transport at all, so there is nothing to put behind a flag. TCP is
+  the wire; revisit if/when an official QUIC transport ships.
+
+`133/133 root tests green (+22 frontend) · tsc clean · eslint clean`
 
 ## Done ✅
 
