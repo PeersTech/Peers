@@ -1,0 +1,118 @@
+import {describe, expect, it} from 'vitest';
+import {Identity} from '@peers/core';
+import type {EventName} from '@peers/api';
+import {startWebHost} from './server.js';
+import WebSocket from 'ws';
+
+/**
+ * The WS transport adapter: the same command/event seam the desktop
+ * shell gets over IPC, exercised over real sockets. Two hosts link via
+ * their nodes so an event raised on one arrives on the other's socket.
+ */
+
+type Frame = {id?: number | string; ok?: boolean; ret?: unknown; error?: string; event?: EventName; payload?: unknown};
+
+function wsClient(port: number): {
+  socket: WebSocket;
+  call: (cmd: string, args?: Record<string, unknown>) => Promise<Frame>;
+  frames: Frame[];
+  close(): void;
+} {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  const pending = new Map<number, (f: Frame) => void>();
+  const frames: Frame[] = [];
+  let nextId = 1;
+  socket.on('message', (raw) => {
+    const f = JSON.parse(String(raw)) as Frame;
+    if (f.event !== undefined) {
+      frames.push(f);
+      return;
+    }
+    const resolve = pending.get(f.id as number);
+    if (resolve) {
+      pending.delete(f.id as number);
+      resolve(f);
+    }
+  });
+  return {
+    socket,
+    frames,
+    async call(cmd, args = {}) {
+      const id = nextId++;
+      const reply = new Promise<Frame>((resolve) => pending.set(id, resolve));
+      socket.send(JSON.stringify({id, cmd, args}));
+      return reply;
+    },
+    close() {
+      socket.close();
+    },
+  };
+}
+
+async function opened(client: ReturnType<typeof wsClient>): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    client.socket.once('open', resolve);
+    client.socket.once('error', reject);
+  });
+}
+
+describe('web host — HTTP + WS bridge of @peers/api', () => {
+  it('serves the status page and answers commands over the socket', async () => {
+    const web = await startWebHost({identity: Identity.random()});
+    try {
+      // Static fallback page while no renderer build exists.
+      const res = await fetch(`http://127.0.0.1:${web.port}/`);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(await res.text()).toContain('Peers web host');
+
+      const client = wsClient(web.port);
+      await opened(client);
+      try {
+        const code = await client.call('my_code');
+        expect(code.ok).toBe(true);
+        expect(code.ret).toMatchObject({formatted: expect.stringMatching(/\d{4} \d{4} \d{4}/)});
+
+        const status = await client.call('net_status');
+        expect((status.ret as {listenAddrs: string[]}).listenAddrs.length).toBeGreaterThan(0);
+
+        const bad = await client.call('lookup_code', {code: 'nope'});
+        expect(bad.ok).toBe(false);
+        expect(String(bad.error)).toMatch(/12 digits/);
+      } finally {
+        client.close();
+      }
+    } finally {
+      await web.close();
+    }
+  }, 30_000);
+
+  it('pushes engine events across sockets between two linked hosts', async () => {
+    const aWeb = await startWebHost({identity: Identity.random()});
+    const bWeb = await startWebHost({identity: Identity.random()});
+    try {
+      const addr = aWeb.host_.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
+      await bWeb.host_.dial(addr);
+
+      const bClient = wsClient(bWeb.port);
+      await opened(bClient);
+      const aClient = wsClient(aWeb.port);
+      await opened(aClient);
+      try {
+        // Alice's friend request travels her node → bob's node → bob's socket.
+        for (let i = 0; i < 20; i++) {
+          await aClient.call('send_friend_request', {peerId: bWeb.peerId});
+          if (bClient.frames.some((f) => f.event === 'friend://request')) break;
+          await new Promise((r) => setTimeout(r, 400));
+        }
+        const evt = bClient.frames.find((f) => f.event === 'friend://request');
+        expect(evt).toBeTruthy();
+        expect((evt!.payload as {peerId: string}).peerId).toBe(aWeb.peerId);
+      } finally {
+        aClient.close();
+        bClient.close();
+      }
+    } finally {
+      await Promise.allSettled([aWeb.close(), bWeb.close()]);
+    }
+  }, 40_000);
+});

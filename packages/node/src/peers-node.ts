@@ -201,6 +201,17 @@ export class PeersNode {
     return this.libp2p.getMultiaddrs().map((ma) => ma.toString());
   }
 
+  /** Raw listeners before advertisement filtering — wildcards kept with
+   * their real ports (`0.0.0.0` never appears in `listenAddrs`). */
+  async rawListenAddrs(): Promise<string[]> {
+    const tm = (
+      this.libp2p as unknown as {
+        components: {transportManager: {getAddrs(): Promise<Multiaddr[]>}};
+      }
+    ).components.transportManager;
+    return (await tm.getAddrs()).map((ma) => ma.toString());
+  }
+
   /** Number of currently open connections (net_status peers). */
   get peerCount(): number {
     return this.libp2p.getConnections().length;

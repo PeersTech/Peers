@@ -10,7 +10,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/api && tsc -p packages/core && tsc -p packages/node && tsc -p packages/host",
+    "typecheck": "tsc -p packages/api && tsc -p packages/core && tsc -p packages/node && tsc -p packages/host && tsc -p apps/cli && tsc -p apps/web && tsc -p apps/desktop",
     "test": "vitest run",
     "lint": "eslint ."
   },

@@ -1,0 +1,21 @@
+{
+  "name": "@peers/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=esm --external:electron --outfile=dist/main.js && esbuild src/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload.js",
+    "start": "npm run build && electron ."
+  },
+  "dependencies": {
+    "@peers/api": "*",
+    "@peers/core": "*",
+    "@peers/host": "*",
+    "@peers/node": "*"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "esbuild": "^0.24.0"
+  }
+}

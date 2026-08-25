@@ -1,0 +1,16 @@
+{
+  "name": "@peers/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "peers": "./bin/peers.js"
+  },
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@peers/core": "*",
+    "@peers/node": "*"
+  }
+}

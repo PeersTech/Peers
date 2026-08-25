@@ -72,8 +72,17 @@ export class PeersHost {
     private readonly servers = new ServerDir(),
   ) {}
 
-  static async start(opts: {identity: Identity; listenAddrs?: string[]}): Promise<PeersHost> {
-    const node = await PeersNode.start({identity: opts.identity, listenAddrs: opts.listenAddrs});
+  static async start(opts: {
+    identity: Identity;
+    listenAddrs?: string[];
+    /** Battery/idle guard handed to the underlying node (desktop hosts). */
+    powerSource?: Parameters<typeof PeersNode.start>[0]['powerSource'];
+  }): Promise<PeersHost> {
+    const node = await PeersNode.start({
+      identity: opts.identity,
+      listenAddrs: opts.listenAddrs,
+      powerSource: opts.powerSource,
+    });
     return PeersHost.startWithNode(opts.identity, node);
   }
 

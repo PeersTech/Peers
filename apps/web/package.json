@@ -1,0 +1,19 @@
+{
+  "name": "@peers/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.ts"
+  },
+  "dependencies": {
+    "@peers/api": "*",
+    "@peers/core": "*",
+    "@peers/host": "*",
+    "@peers/node": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0"
+  }
+}

@@ -113,7 +113,25 @@ WebSocket). Three adapters = a real seam.
   the Plaza (Rust `announce_plaza_profile` parity). Two-node test covers
   chat delivery, profile riding, presence and empty-message rejection.
   `119/119 tests green`.
-- **119/119 tests green · tsc clean · eslint clean**
+- **Hosts** — all three adapters, one engine:
+  - `apps/cli` — `peers --node` headless backbone (M11 parity): plaintext
+    0600 auto-identity in the config dir, fixed port via `PEERS_PORT`
+    (4001), `PEERS_NODES`/nodes.json dial + relay reservation, RFC1918/
+    loopback shareability filter, pasteable `PEERS_NODES=` lines.
+    js-libp2p hides wildcard listeners from advertisement — engine exposes
+    `rawListenAddrs()` so operators get concrete per-interface addresses.
+  - `apps/web` — Node HTTP + WS transport adapter: same renderer over a
+    single socket (`{id,cmd,args}` → `{id,ok,ret|error}`, events pushed as
+    frames). Static serving of `frontend/dist` with SPA fallback + status
+    page. Tested with real WS clients incl. cross-host event fanout.
+  - `apps/desktop` — Electron shell: tray + close-to-tray (hide keeps the
+    node alive; OS shutdown quits for real), single-instance lock,
+    `powerMonitor`-backed powerSource (battery+idle → citizen downgrade),
+    contextBridge preload exposing exactly the @peers/api surface;
+    esbuild-bundled main/preload. Runtime check needs a display — rides
+    the step-10 manual gate.
+  `126/126 tests green`.
+- **126/126 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 
@@ -140,9 +158,9 @@ v3-compatible gossipsub ships.
 6. ~~DCUtR hole punching (M10)~~ ✅ — loopback handshake test; cross-NAT
    stays a manual verification gate.
 7. ~~Plaza (M15)~~ ✅ — auto-join topic, self-signed chat/profiles, presence.
-8. **Hosts** — `apps/cli` (`--node`, M11 parity incl. auto identity),
+8. ~~Hosts~~ ✅ — `apps/cli` (`--node`, M11 parity incl. auto identity),
    `apps/web` (HTTP + WS bridge adapter of @peers/api), `apps/desktop`
-   (Electron shell + move `frontend/` renderer; tray/close-to-tray via
+   (Electron shell + `frontend/` renderer; tray/close-to-tray via
    powerMonitor-backed `powerSource`).
 9. **Cutover** — delete `backend/`, swap CI to typecheck/lint/test +
    electron-builder matrix (3 OS), update PLAN.md/README/docs.
