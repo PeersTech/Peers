@@ -172,6 +172,13 @@ export class PeersNode {
     return this.libp2p.getConnections().length;
   }
 
+  /** Distinct connected peers (online_peers). */
+  remotePeers(): string[] {
+    const seen = new Set<string>();
+    for (const conn of this.libp2p.getConnections()) seen.add(conn.remotePeer.toString());
+    return [...seen];
+  }
+
   subscribe(topic: string): void {
     this.libp2p.services.pubsub.subscribe(topic);
   }
@@ -258,22 +265,26 @@ export class PeersNode {
   }
 
   /** Ask `to` to be our friend: signed notice on their per-peer topic. */
-  async sendFriendRequest(to: string): Promise<void> {
-    await this.sendFriendNotice('request', to);
+  async sendFriendRequest(to: string, opts?: {profile?: FriendNotice['profile']}): Promise<void> {
+    await this.sendFriendNotice('request', to, opts);
   }
 
   /** Answer a verified request: signed accept on the requester's topic. */
-  async acceptFriend(to: string): Promise<void> {
-    await this.sendFriendNotice('accept', to);
+  async acceptFriend(to: string, opts?: {profile?: FriendNotice['profile']}): Promise<void> {
+    await this.sendFriendNotice('accept', to, opts);
   }
 
-  private async sendFriendNotice(kind: 'request' | 'accept', to: string): Promise<void> {
+  private async sendFriendNotice(
+    kind: 'request' | 'accept',
+    to: string,
+    opts?: {profile?: FriendNotice['profile']},
+  ): Promise<void> {
     if (to === this.peerId) throw new Error('cannot send a friend notice to yourself');
     // Gossipsub only routes topics we mesh on: subscribe to theirs first,
     // exactly like Rust's subscribe_with_relay before Publish.
     const topic = friendRequestTopic(to);
     this.subscribe(topic);
-    await this.publish(topic, encodeFriendNotice(FriendNotice.sign(this.identity, kind, to)));
+    await this.publish(topic, encodeFriendNotice(FriendNotice.sign(this.identity, kind, to, opts)));
   }
 
   private dispatchFriendNotice(data: Uint8Array): void {

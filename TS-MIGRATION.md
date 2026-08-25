@@ -74,7 +74,22 @@ WebSocket). Three adapters = a real seam.
   code resolution between two loopback nodes, full mutual accept both
   directions with card exchange, foreign-addressed drop, malformed-code
   rejection. `101/101 tests green`.
-- **101/101 tests green · tsc clean · eslint clean**
+- **@peers/host engine + servers over gossipsub (M14 finish)** — new
+  `packages/host` (@peers/host): ONE implementation of the @peers/api
+  command/event seam over core+node, so the three future hosts stay thin
+  transports. Friend notices now carry signed profiles; verified
+  requests/accepts cache cards + profiles. DMs seal multi-recipient
+  envelopes to `peers/v1/ch/<peer>` topics (aad-bound, replay-windowed);
+  servers do invite→JoinNotice (owner-side nonce authorization)→signed
+  member list with cards/profiles riding, channel SignedMessages under ACL,
+  profile notices folded into lists by the owner, snapshots, key rotation
+  followed via chain head. Wire JSON hydrates typed arrays both ways
+  (canonicalJson would mangle Uint8Array); join re-announces until the
+  owner's list admits. Members track the verified chain head (`seenEpoch`)
+  — core fix, unit-tested. Tests over real loopback swarms: handshake→
+  sealed DMs both directions, display names on requests, full server flow
+  incl. ACL rejection, spent-invite replay ignored.
+- **106/106 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 
@@ -92,8 +107,9 @@ v3-compatible gossipsub ships.
 3. ~~Friend codes end-to-end (M8/M17)~~ ✅ — publish code key → DHT lookup →
    signed request/accept handshake over per-peer gossip topics, cards riding
    both notices.
-4. **Servers over gossipsub (M14 finish)** — signed lists on server topics,
-   join flow, profiles riding member lists; DM envelopes over DM topics.
+4. ~~Servers over gossipsub (M14 finish)~~ ✅ — @peers/host engine: signed
+   lists on server topics, nonce-authorized join flow, profiles riding
+   member lists, sealed DM envelopes over DM topics.
 5. **Relay mesh + capacity tiers (M9/M12)** — circuit-relay-v2 client+server,
    citizen/node/off tiers, `PEERS_NODES` / nodes.json bootstrap, battery/idle
    guard via injected `powerSource` port.

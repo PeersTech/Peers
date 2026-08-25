@@ -2,7 +2,7 @@ import {ed25519} from '@noble/curves/ed25519.js';
 import {peersErr} from './error.js';
 import type {Identity} from './identity.js';
 import {derivePeerId} from './peerid.js';
-import {PeerCard} from './card.js';
+import {PeerCard, SignedProfile} from './card.js';
 import {b64decode, b64encode, canonicalJson, unixNow, utf8} from './util.js';
 
 /**
@@ -52,6 +52,9 @@ export interface FriendNotice {
   ts: number;
   /** Sender's identity card: acceptance caches the X25519 key for DMs. */
   card: PeerCard;
+  /** Sender's signed display profile, if they have one — lets the
+   * recipient show *who* is asking (mirrors Rust's envelope fields). */
+  profile?: SignedProfile | null;
   sig: string;
 }
 
@@ -59,7 +62,12 @@ export const FriendNotice = {
   KIND_REQUEST: 'request' as const,
   KIND_ACCEPT: 'accept' as const,
 
-  sign(identity: Identity, kind: FriendNoticeKind, to: string): FriendNotice {
+  sign(
+    identity: Identity,
+    kind: FriendNoticeKind,
+    to: string,
+    extras?: {profile?: SignedProfile | null},
+  ): FriendNotice {
     const n: FriendNotice = {
       version: 1,
       kind,
@@ -68,6 +76,7 @@ export const FriendNotice = {
       pubkey: identity.edPublicAsArray(),
       ts: unixNow(),
       card: PeerCard.sign(identity),
+      profile: extras?.profile ?? null,
       sig: '',
     };
     n.sig = b64encode(identity.sign(canonicalJson(noticeSignView(n))));
@@ -101,6 +110,11 @@ export const FriendNotice = {
     if (!arrayEq(Array.from(msg.card.edPub), msg.pubkey)) {
       throw peersErr('Crypto', 'friend notice card does not belong to sender');
     }
+    if (msg.profile) {
+      // Throws on tamper or peer-id mismatch.
+      SignedProfile.verify(msg.profile);
+      if (msg.profile.peerId !== msg.from) throw peersErr('Crypto', 'friend notice profile mismatch');
+    }
   },
 };
 
@@ -125,6 +139,7 @@ export function encodeFriendNotice(n: FriendNotice): Uint8Array {
         x25519Pub: Array.from(n.card.x25519Pub),
         sig: Array.from(n.card.sig),
       },
+      profile: n.profile ?? null,
       sig: n.sig,
     }),
   );
@@ -143,6 +158,7 @@ export function decodeFriendNotice(data: Uint8Array): FriendNotice {
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
   const kind = raw.kind === 'request' || raw.kind === 'accept' ? raw.kind : undefined;
   if (kind === undefined) throw peersErr('Crypto', 'friend notice has unknown kind');
+  const profile = (raw.profile ?? null) as SignedProfile | null;
   return {
     version: typeof raw.version === 'number' ? raw.version : -1,
     kind,
@@ -155,6 +171,7 @@ export function decodeFriendNotice(data: Uint8Array): FriendNotice {
       x25519Pub: Uint8Array.from(nums(card?.x25519Pub, 32)),
       sig: Uint8Array.from(nums(card?.sig, 64)),
     },
+    profile,
     sig: str(raw.sig),
   };
 }
@@ -174,6 +191,7 @@ function noticeSignView(n: FriendNotice): Record<string, unknown> {
       x25519Pub: Array.from(n.card.x25519Pub),
       sig: Array.from(n.card.sig),
     },
+    profile: n.profile ?? null,
     sig: '',
   };
 }

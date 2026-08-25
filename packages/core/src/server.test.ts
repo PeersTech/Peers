@@ -173,6 +173,32 @@ describe('server dir', () => {
     expect(a.epoch).toBe(1);
     expect(b.epoch).toBe(0);
   });
+
+  it('member views track the verified chain head (epoch without keys)', () => {
+    const owner = Identity.random();
+    const rec = ServerRecord.newOwned(newServerId(), 's', owner.peerId, PeerCard.sign(owner));
+    const invite = rec.invite();
+    const member = ServerRecord.newJoined(invite);
+    // Before any list the member sits at epoch 0, pending.
+    expect(member.view('someone').pending).toBe(true);
+
+    rec.members.push({
+      peerId: 'someone',
+      name: 'someone',
+      role: 'member',
+      joinedEpoch: 0,
+      card: null,
+      profile: null,
+    });
+    member.verifyList(rec.signedList());
+    expect(member.view('someone').epoch).toBe(0);
+
+    rec.keys!.rotate();
+    member.verifyList(rec.signedList());
+    const v = member.view('someone');
+    expect(v.epoch).toBe(1); // seen via lists, though the member holds no keys
+    expect(v.pending).toBe(false);
+  });
 });
 
 describe('topics and ids', () => {

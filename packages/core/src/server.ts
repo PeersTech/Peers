@@ -216,6 +216,9 @@ export class ServerRecord {
   members: Member[];
   channels: ChannelConfig[];
   keys: ServerKeys | null;
+  /** Latest verified list epoch — how members (who hold no keys) track
+   * the chain head they have actually seen. */
+  private seenEpoch = 0;
 
   private constructor(init: {
     id: string;
@@ -299,6 +302,7 @@ export class ServerRecord {
     this.members = list.payload.members.map(cloneMember);
     this.channels = list.payload.channels.map((c) => ({...c}));
     this.knownPub = [...list.payload.nextPub];
+    this.seenEpoch = list.payload.epoch;
   }
 
   /**
@@ -342,7 +346,7 @@ export class ServerRecord {
       isOwner: this.ownerPeer === me,
       myRole: this.roleOf(me) ?? null,
       memberCount: this.members.length,
-      epoch: this.keys?.epoch ?? 0,
+      epoch: this.keys?.epoch ?? this.seenEpoch,
       pending: this.keys === null && this.roleOf(me) === undefined,
       channels: this.channels.map((c) => ({...c})),
       members: this.members.map(cloneMember),

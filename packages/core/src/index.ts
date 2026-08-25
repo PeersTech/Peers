@@ -36,6 +36,7 @@ export {
 export {Keystore, VERSION as KEYSTORE_VERSION} from './keystore.js';
 export {PROD_KDF, TEST_KDF, deriveKey, sealX, openX, type KdfParams} from './kdf.js';
 export {History, PersistedState, Store, StoreHandle} from './store.js';
+export {b64decode, b64encode, canonicalJson, utf8, unixNow} from './util.js';
 export {
   Role,
   Invite,
