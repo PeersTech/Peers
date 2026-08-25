@@ -82,7 +82,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now peers-node
+systemctl enable peers-node --now 2>/dev/null || true
+systemctl restart peers-node
 
 step "waiting for startup"
 sleep 2
