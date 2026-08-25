@@ -3,6 +3,7 @@ import {createReadStream, existsSync, statSync} from 'node:fs';
 import {extname, join, normalize} from 'node:path';
 import {Identity, type KdfParams} from '@peers/core';
 import {PeersAccount, PeersHost} from '@peers/host';
+import {knownNodes} from '@peers/node';
 import type {CommandName, EventName} from '@peers/api';
 import {WebSocketServer, WebSocket, type RawData} from 'ws';
 
@@ -74,6 +75,7 @@ export async function startWebHost(opts: WebHostOptions = {}): Promise<WebHost> 
       dataDir: opts.accountDir,
       kdf: opts.kdf,
       listenAddrs: opts.listenAddrs,
+      bootstrapAddrs: knownNodes(),
     });
     // Recover the peer id for display without unlocking anything.
     if (!account.hasIdentity()) peerId = null;

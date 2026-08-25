@@ -82,11 +82,13 @@ export class PeersHost {
   static async start(opts: {
     identity: Identity;
     listenAddrs?: string[];
+    /** Always-on nodes to dial + reserve relay slots on at start. */
+    bootstrapAddrs?: string[];
     /** Battery/idle guard handed to the underlying node (desktop hosts). */
     powerSource?: Parameters<typeof PeersNode.start>[0]['powerSource'];
     nodeFactory?: (identity: Identity) => Promise<PeersNode>;
   }): Promise<PeersHost> {
-    const make = opts.nodeFactory ?? ((id: Identity) => PeersNode.start({identity: id, listenAddrs: opts.listenAddrs, powerSource: opts.powerSource}));
+    const make = opts.nodeFactory ?? ((id: Identity) => PeersNode.start({identity: id, listenAddrs: opts.listenAddrs, bootstrapAddrs: opts.bootstrapAddrs, powerSource: opts.powerSource}));
     const node = await make(opts.identity);
     return PeersHost.startWithNode(opts.identity, node);
   }

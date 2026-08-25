@@ -1,0 +1,54 @@
+name: Build desktop (Linux & Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, typescript-migration]
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            args: --linux
+          - os: windows-latest
+            name: windows
+            args: --win
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspace deps
+        run: npm ci
+
+      - name: Build renderer
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+
+      - name: Bundle desktop (${{ matrix.name }})
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        working-directory: apps/desktop
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Peers-${{ matrix.name }}
+          path: |
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.AppImage.zsync
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.zip
+          if-no-files-found: error
+          retention-days: 14

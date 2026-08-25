@@ -7,10 +7,14 @@
     "peers": "./bin/peers.js"
   },
   "scripts": {
-    "start": "node src/main.ts"
+    "build": "esbuild src/main.ts --bundle --platform=node --format=esm --outfile=dist/main.js",
+    "start": "npm run build && node dist/main.js"
   },
   "dependencies": {
     "@peers/core": "*",
     "@peers/node": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
   }
 }

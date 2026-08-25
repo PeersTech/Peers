@@ -1,5 +1,6 @@
 appId: app.peers.desktop
 productName: Peers
+executableName: peers
 directories:
   output: release
   buildResources: build
@@ -15,7 +16,6 @@ extraResources:
 linux:
   target:
     - AppImage
-    - deb
   category: Network;InstantMessaging
 mac:
   target:

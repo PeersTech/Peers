@@ -39,6 +39,8 @@ export class PeersAccount {
       /** KDF params; tests inject TEST_KDF to keep unlocks instant. */
       kdf?: KdfParams;
       listenAddrs?: string[];
+      /** Always-on nodes (PEERS_NODES / nodes.json) dialed at unlock. */
+      bootstrapAddrs?: string[];
       powerSource?: Parameters<typeof PeersNode.start>[0]['powerSource'];
       /** Test seam: build the node yourself instead of dialing the world. */
       nodeFactory?: (identity: Identity) => Promise<PeersNode>;
@@ -135,6 +137,7 @@ export class PeersAccount {
       : await PeersHost.start({
           identity,
           listenAddrs: this.opts.listenAddrs,
+          bootstrapAddrs: this.opts.bootstrapAddrs,
           powerSource: this.opts.powerSource,
         });
     await host.attachStorage(storage);

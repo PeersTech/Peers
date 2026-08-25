@@ -6,3 +6,6 @@ backend/gen
 .superpowers
 
 apps/desktop/dist/
+apps/desktop/dist/
+apps/desktop/release/
+apps/cli/dist/

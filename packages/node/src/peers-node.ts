@@ -183,6 +183,9 @@ export class PeersNode {
     for (const addr of config.bootstrapAddrs ?? []) {
       try {
         await node.dial(multiaddr(addr));
+        // Reserve a circuit slot so NAT'd peers can dial US back through
+        // this backbone node (Rust parity: Dial + ListenOnRelay).
+        await self.reserveOnRelay(addr);
       } catch {
         // Bootstrap failures are not fatal: the mesh heals itself.
       }
