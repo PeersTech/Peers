@@ -13,7 +13,17 @@ import type { KadDHT } from '@libp2p/kad-dht';
 import type { Ping } from '@libp2p/ping';
 import type { GossipsubEvents } from '@chainsafe/libp2p-gossipsub';
 import type { PeerId, PubSub } from '@libp2p/interface';
-import type { Identity } from '@peers/core';
+import {
+  FriendNotice,
+  FRIEND_REQUEST_TOPIC_PREFIX,
+  codeKey,
+  decodeFriendNotice,
+  encodeFriendNotice,
+  friendRequestTopic,
+  normalizeCode,
+  shortCode,
+  type Identity,
+} from '@peers/core';
 import {
   BLOB_PROTOCOL,
   BlobStore,
@@ -57,20 +67,26 @@ export interface IncomingMessage {
 /**
  * The Peers network node — THE deep module of this package.
  *
- * A small interface (`start`/`subscribe`/`publish`/`onMessage` + `parkBlob`/
- * `fetchBlob`) hides the whole libp2p assembly: transports, encryption,
- * muxing, discovery, gossipsub topics, Kademlia provider records for blobs,
- * and the `/peers/blob/1.0.0` request-response transfer. Callers never touch
- * a multiaddr, a CID, or a stream unless they choose to.
+ * A small interface (`start`/`subscribe`/`publish`/`onMessage`, `parkBlob`/
+ * `fetchBlob`, `publishCode`/`lookupCode`, `sendFriendRequest`/`acceptFriend`
+ * + `onFriendNotice`) hides the whole libp2p assembly: transports,
+ * encryption, muxing, discovery, gossipsub topics, Kademlia provider records
+ * for blobs and friend codes, and the `/peers/blob/1.0.0` request-response
+ * transfer. Callers never touch a multiaddr, a CID, or a stream unless they
+ * choose to.
  *
  * Depth: two blob methods buy the whole park/provide → findProviders → dial
- * → framed fetch → hash-verify cycle. Locality: 64 KiB cap, CID wrapping,
- * and corruption checks live here, not in every avatar/profile caller.
+ * → framed fetch → hash-verify cycle; four code/handshake methods buy the
+ * whole M8/M17 friend flow with signed, recipient-bound notices. Locality:
+ * 64 KiB cap, CID wrapping, corruption checks, notice verification and
+ * self-notice filtering live here, not in every caller.
  */
 export class PeersNode {
   private readonly announced = new Set<string>();
+  private readonly friendHandlers = new Set<(notice: FriendNotice) => void>();
   private constructor(
     private readonly libp2p: PeersLibp2p,
+    private readonly identity: Identity,
     private readonly blobStore: BlobStore,
     private readonly handlers = new Set<(msg: IncomingMessage) => void>(),
     readonly relayRole: RelayRole = 'citizen',
@@ -108,17 +124,27 @@ export class PeersNode {
     // Blob transfer handler — registered before any provider lookup can race it.
     await node.handle(BLOB_PROTOCOL, handleBlobProtocol(blobStore) as never);
 
-    const self = new PeersNode(node, blobStore, undefined, config.relayRole ?? 'citizen');
+    const self = new PeersNode(node, config.identity, blobStore, undefined, config.relayRole ?? 'citizen');
     node.services.pubsub.addEventListener('message', (evt) => {
       const from = (evt.detail as { from?: { toString(): string } }).from;
-      for (const handler of self.handlers) {
-        handler({
-          topic: evt.detail.topic,
-          from: from ? from.toString() : '',
-          data: evt.detail.data,
-        });
+      const msg = {
+        topic: evt.detail.topic,
+        from: from ? from.toString() : '',
+        data: evt.detail.data,
+      };
+      // Friend notices get parsed, verified and dispatched as typed events
+      // so hosts never re-parse gossip bytes (mirrors the dedicated
+      // NodeEvent::FriendRequest in the Rust swarm loop).
+      if (msg.topic.startsWith(FRIEND_REQUEST_TOPIC_PREFIX)) {
+        self.dispatchFriendNotice(msg.data);
+        return;
       }
+      for (const handler of self.handlers) handler(msg);
     });
+
+    // Our own friend topic is where requests and accepts addressed to us
+    // arrive — subscribed for the lifetime of the node, like Rust's unlock.
+    node.services.pubsub.subscribe(friendRequestTopic(self.peerId));
 
     for (const addr of config.bootstrapAddrs ?? []) {
       try {
@@ -161,6 +187,106 @@ export class PeersNode {
   onMessage(handler: (msg: IncomingMessage) => void): () => void {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
+  }
+
+  /** Our short 12-digit friend code (lookup hint, not proof of identity). */
+  get code(): string {
+    return shortCode(this.identity.peerIdBytes);
+  }
+
+  /**
+   * Announce ourselves as the provider of our own code's DHT key, so
+   * anyone holding the code can resolve us — same provider machinery
+   * blobs use; a code is just a well-known key that maps to whoever
+   * claims it. Bounded like every provide here: isolated nodes simply
+   * have no one to tell yet.
+   */
+  async publishCode(): Promise<void> {
+    const cid = hashToCid(codeKey(this.code));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    try {
+      for await (const evt of this.libp2p.services.dht.provide(cid, {
+        signal: controller.signal,
+      } as never)) {
+        void evt;
+      }
+    } catch {
+      // Abort or no routing table yet — re-advertised on the next call.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Resolve a 12-digit code to candidate peer ids via DHT providers.
+   * Bounded (1.5 s) and self-excluding. A resolved id is a *lead*, not
+   * proof of identity — the user verifies name/fingerprint before accepting.
+   */
+  async lookupCode(code: string): Promise<string[]> {
+    const normalized = normalizeCode(code);
+    if (!normalized) throw new Error('a peer code is 12 digits, e.g. 4827 1193 6052');
+    const cid = hashToCid(codeKey(normalized));
+    const me = this.libp2p.peerId.toString();
+    const found = new Set<string>();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    try {
+      for await (const evt of this.libp2p.services.dht.findProviders(cid, {
+        signal: controller.signal,
+      } as never)) {
+        const e = evt as { name?: string; providers?: { id: PeerId }[] };
+        if (e.name === 'PROVIDER' && e.providers) {
+          for (const p of e.providers) {
+            const id = p.id.toString();
+            if (id !== me) found.add(id);
+          }
+        }
+      }
+    } catch {
+      // timeout/abort — return whatever surfaced before the deadline
+    } finally {
+      clearTimeout(timer);
+    }
+    return [...found];
+  }
+
+  /** Subscribe-free handle for verified incoming request/accept notices. */
+  onFriendNotice(handler: (notice: FriendNotice) => void): () => void {
+    this.friendHandlers.add(handler);
+    return () => this.friendHandlers.delete(handler);
+  }
+
+  /** Ask `to` to be our friend: signed notice on their per-peer topic. */
+  async sendFriendRequest(to: string): Promise<void> {
+    await this.sendFriendNotice('request', to);
+  }
+
+  /** Answer a verified request: signed accept on the requester's topic. */
+  async acceptFriend(to: string): Promise<void> {
+    await this.sendFriendNotice('accept', to);
+  }
+
+  private async sendFriendNotice(kind: 'request' | 'accept', to: string): Promise<void> {
+    if (to === this.peerId) throw new Error('cannot send a friend notice to yourself');
+    // Gossipsub only routes topics we mesh on: subscribe to theirs first,
+    // exactly like Rust's subscribe_with_relay before Publish.
+    const topic = friendRequestTopic(to);
+    this.subscribe(topic);
+    await this.publish(topic, encodeFriendNotice(FriendNotice.sign(this.identity, kind, to)));
+  }
+
+  private dispatchFriendNotice(data: Uint8Array): void {
+    try {
+      const notice = decodeFriendNotice(data);
+      // Only notices actually addressed to us count; other subscribers of
+      // this topic drop silently.
+      if (notice.to !== this.peerId) return;
+      FriendNotice.verify(notice);
+      for (const handler of this.friendHandlers) handler(notice);
+    } catch {
+      // Invalid or foreign notice — treated as dropped, not fatal.
+    }
   }
 
   /** Dial a peer by multiaddr (bootstrap, invites, code resolution). */

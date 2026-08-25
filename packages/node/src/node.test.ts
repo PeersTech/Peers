@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { Identity } from '@peers/core';
+import {
+  FriendNotice,
+  Identity,
+  encodeFriendNotice,
+  friendRequestTopic,
+  shortCode,
+} from '@peers/core';
 import { PeersNode, MAX_BLOB_SIZE } from './peers-node.js';
 
 const TOPIC = 'peers/v1/tracer';
@@ -106,8 +112,127 @@ describe('DHT blobs — kad provide/get + request-response transfer, 64 KiB cap'
   });
 });
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+describe('friend codes end-to-end (M8/M17) — publish → resolve → mutual accept', () => {
+  it('derives the same code as the core domain function', async () => {
+    const identity = Identity.random();
+    const a = await PeersNode.start({ identity });
+    try {
+      expect(a.code).toBe(shortCode(identity.peerIdBytes));
+    } finally {
+      await a.stop();
+    }
+  });
+
+  it('lookup rejects malformed codes', async () => {
+    const a = await PeersNode.start({ identity: Identity.random() });
+    try {
+      await expect(a.lookupCode('123')).rejects.toThrow(/12 digits/);
+      await expect(a.lookupCode('no-digits-at-all')).rejects.toThrow();
+    } finally {
+      await a.stop();
+    }
+  });
+
+  it('resolves a published code via DHT and completes the mutual accept', async () => {
+    const aId = Identity.random();
+    const bId = Identity.random();
+    const a = await PeersNode.start({ identity: aId });
+    const b = await PeersNode.start({ identity: bId });
+    try {
+      const bAddr = b.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
+      await a.dial(bAddr);
+      await eventually(() => a.peerCount > 0 && b.peerCount > 0, 'nodes never connected');
+
+      // Both announce their codes; a resolves b's through the DHT.
+      await Promise.all([a.publishCode(), b.publishCode()]);
+      let resolved: string[] = [];
+      await eventuallyAsync(
+        async () => {
+          resolved = await a.lookupCode(b.code);
+          return resolved.includes(b.peerId);
+        },
+        'a never resolved b from its code',
+      );
+      // The code is a lookup hint only: it must never resolve to *us*.
+      expect(resolved).not.toContain(a.peerId);
+
+      // Full handshake: request → accept, both signed and verified. Early
+      // publishes can drop while the per-topic mesh forms, so retry sends
+      // until the verified notice arrives.
+      const gotRequest = friendNotice(b, 'request', a.peerId);
+      const gotAccept = friendNotice(a, 'accept', b.peerId);
+      await sendUntil(() => a.sendFriendRequest(b.peerId), gotRequest, 'b never received a valid request');
+      const req = await gotRequest;
+      expect(req.card.x25519Pub).toEqual(aId.xPublic());
+
+      await sendUntil(() => b.acceptFriend(req.from), gotAccept, 'a never received an accept');
+      const acc = await gotAccept;
+      expect(acc.card.x25519Pub).toEqual(bId.xPublic());
+    } finally {
+      await Promise.allSettled([a.stop(), b.stop()]);
+    }
+  });
+
+  it('drops notices addressed to someone else', async () => {
+    const aId = Identity.random();
+    const a = await PeersNode.start({ identity: aId });
+    const b = await PeersNode.start({ identity: Identity.random() });
+    try {
+      const bAddr = b.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
+      await a.dial(bAddr);
+      await eventually(() => a.peerCount > 0 && b.peerCount > 0, 'nodes never connected');
+
+      // Both mesh on a third party's request topic so the notice really is
+      // delivered — only the recipient binding may keep b from acting on it.
+      const stranger = Identity.random();
+      const topic = friendRequestTopic(stranger.peerId);
+      a.subscribe(topic);
+      b.subscribe(topic);
+      await sleep(1200);
+
+      let acted = false;
+      const off = b.onFriendNotice(() => { acted = true; });
+      try {
+        // Validly signed, but bound `to` the stranger — not to b.
+        const notice = FriendNotice.sign(aId, 'request', stranger.peerId);
+        await a.publish(topic, encodeFriendNotice(notice));
+        await sleep(1500);
+      } finally {
+        off();
+      }
+      expect(acted).toBe(false);
+    } finally {
+      await Promise.allSettled([a.stop(), b.stop()]);
+    }
+  });
+});
+
+/** Retry `send` until `waiter` resolves — gossipsub needs a beat to graft a
+ * freshly subscribed topic into the mesh, and early publishes vanish. */
+async function sendUntil(send: () => Promise<void>, waiter: Promise<unknown>, message: string): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    await send();
+    const won = await Promise.race([waiter.then(() => true), sleep(700).then(() => false)]);
+    if (won) return;
+  }
+  throw new Error(message);
+}
+
+function friendNotice(
+  node: PeersNode,
+  kind: string,
+  from: string,
+): Promise<{ kind: string; from: string; card: { x25519Pub: Uint8Array } }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no ${kind} notice arrived`)), 20_000);
+    node.onFriendNotice((n) => {
+      if (n.kind === kind && n.from === from) {
+        clearTimeout(timer);
+        resolve(n);
+      }
+    });
+  });
 }
 
 async function eventually(check: () => boolean, message: string): Promise<void> {
@@ -117,4 +242,17 @@ async function eventually(check: () => boolean, message: string): Promise<void> 
     await sleep(50);
   }
   throw new Error(message);
+}
+
+async function eventuallyAsync(check: () => Promise<boolean>, message: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await sleep(100);
+  }
+  throw new Error(message);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

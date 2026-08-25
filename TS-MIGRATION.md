@@ -61,7 +61,20 @@ WebSocket). Three adapters = a real seam.
   buy the whole cycle (locality: cap/CID/corruption in one place). Tests:
   park/fetch round trip between two nodes, cap rejection, missing blob,
   dedup — plus gossip now waits 1.2 s for DHT mesh. `91/91 tests green`.
-- **91/91 tests green · tsc clean · eslint clean**
+- **@peers/node friend codes end-to-end (M8/M17)** — signed `FriendNotice`
+  request/accept in core (canonical-JSON sig covering kind/from/to/pubkey/ts
+  + riding card; recipient-bound so captured notices can't be replayed at a
+  third peer) with wire encode/decode. `PeersNode` grew four methods:
+  `publishCode`/`lookupCode` reuse the blob provider machinery on the
+  domain-separated code key (bounded 1.5 s, self-excluding), and
+  `sendFriendRequest`/`acceptFriend` publish verified, addressed notices on
+  per-peer `peers/v1/fr/<id>` topics — own topic subscribed for the node's
+  lifetime, subscribe-before-publish mirrors Rust's relay-mesh dance,
+  invalid/foreign notices drop silently via `onFriendNotice`. Tests: DHT
+  code resolution between two loopback nodes, full mutual accept both
+  directions with card exchange, foreign-addressed drop, malformed-code
+  rejection. `101/101 tests green`.
+- **101/101 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 
@@ -76,8 +89,9 @@ v3-compatible gossipsub ships.
 1. ~~@peers/node tracer bullet~~ ✅
 2. ~~DHT blobs~~ ✅ — kad provide/get + request-response transfer, 64 KiB cap;
    park/fetch round trip between two nodes in tests.
-3. **Friend codes end-to-end (M8/M17)** — publish code key → DHT lookup →
-   dial → mutual accept handshake.
+3. ~~Friend codes end-to-end (M8/M17)~~ ✅ — publish code key → DHT lookup →
+   signed request/accept handshake over per-peer gossip topics, cards riding
+   both notices.
 4. **Servers over gossipsub (M14 finish)** — signed lists on server topics,
    join flow, profiles riding member lists; DM envelopes over DM topics.
 5. **Relay mesh + capacity tiers (M9/M12)** — circuit-relay-v2 client+server,

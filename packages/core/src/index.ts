@@ -16,6 +16,14 @@ export {deriveKeys} from './seed.js';
 export {derivePeerId, fingerprint, peerIdBytes as peerIdBytesOf} from './peerid.js';
 export {Identity} from './identity.js';
 export {shortCode, formatCode, normalizeCode, codeKey, CODE_DIGITS} from './code.js';
+export {
+  FriendNotice,
+  encodeFriendNotice,
+  decodeFriendNotice,
+  friendRequestTopic,
+  FRIEND_REQUEST_TOPIC_PREFIX,
+  type FriendNoticeKind,
+} from './friend.js';
 export {Session, MAX_SESSION_GAP, type SessionState} from './session.js';
 export {seal, open, nonceFor, MAX_MESSAGE_SIZE} from './cipher.js';
 export {
