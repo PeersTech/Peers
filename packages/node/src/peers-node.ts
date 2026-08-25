@@ -3,6 +3,7 @@ import { gossipsub } from '@chainsafe/libp2p-gossipsub';
 import { noise } from '@chainsafe/libp2p-noise';
 import { yamux } from '@chainsafe/libp2p-yamux';
 import { circuitRelayServer, circuitRelayTransport } from '@libp2p/circuit-relay-v2';
+import { dcutr } from '@libp2p/dcutr';
 import { identify } from '@libp2p/identify';
 import { kadDHT, passthroughMapper } from '@libp2p/kad-dht';
 import { ping } from '@libp2p/ping';
@@ -136,6 +137,9 @@ export class PeersNode {
           allowPublishToZeroTopicPeers: true,
           emitSelf: false,
         }),
+        // Hole punching (M10): upgrades relayed connections to direct
+        // ones by synchronized dials. Pointless without the relay transport.
+        ...(role !== 'off' ? {dcutr: dcutr()} : {}),
         ...(relayServer
           ? {
               relay: circuitRelayServer({
@@ -359,6 +363,16 @@ export class PeersNode {
     return this.libp2p
       .getMultiaddrs()
       .filter((ma: Multiaddr) => ma.protoNames().includes('p2p-circuit')).length;
+  }
+
+  /** Remote addresses per peer — relayed addrs contain `/p2p-circuit`,
+   * direct ones don't. Feeds hole-punch checks and net_status. */
+  connections(): {peer: string; addr: string; limited: boolean}[] {
+    return this.libp2p.getConnections().map((conn) => ({
+      peer: conn.remotePeer.toString(),
+      addr: conn.remoteAddr.toString(),
+      limited: conn.limits != null,
+    }));
   }
 
   /**

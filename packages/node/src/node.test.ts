@@ -281,6 +281,46 @@ describe('relay mesh + capacity tiers (M9/M12)', () => {
   }, 30_000);
 });
 
+describe('DCUtR hole punching (M10)', () => {
+  it('upgrades a circuit-only meeting into a direct connection', async () => {
+    const r = await PeersNode.start({identity: Identity.random(), relayRole: 'node'});
+    const a = await PeersNode.start({identity: Identity.random()});
+    const b = await PeersNode.start({identity: Identity.random()});
+    try {
+      const rAddr = r.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
+
+      // Both citizens know only the relay; they meet exclusively through
+      // a circuit, which is the DCUtR trigger condition.
+      await a.dial(rAddr);
+      await a.reserveOnRelay(rAddr);
+      await b.dial(rAddr);
+      await b.dial(`${rAddr}/p2p-circuit/p2p/${a.peerId}`);
+
+      const circuitConns = (): boolean =>
+        [...a.connections(), ...b.connections()].some((c) => c.addr.includes('/p2p-circuit'));
+      expect(circuitConns()).toBe(true);
+
+      // The inbound side (a) upgrades the connection: either via the DCUtR
+      // handshake or by dialing b's now-known direct address. Either way,
+      // the peers must end up with at least one non-limited direct link.
+      await eventually(
+        () => {
+          for (const n of [a, b]) {
+            if (n.connections().some((c) => c.peer === (n === a ? b.peerId : a.peerId) && !c.addr.includes('/p2p-circuit') && !c.limited)) {
+              return true;
+            }
+          }
+          return false;
+        },
+        'connection never upgraded to direct',
+        15_000,
+      );
+    } finally {
+      await Promise.allSettled([r.stop(), a.stop(), b.stop()]);
+    }
+  }, 30_000);
+});
+
 /** Retry `send` until `waiter` resolves — gossipsub needs a beat to graft a
  * freshly subscribed topic into the mesh, and early publishes vanish. */
 async function sendUntil(send: () => Promise<void>, waiter: Promise<unknown>, message: string): Promise<void> {
@@ -309,8 +349,8 @@ function friendNotice(
   });
 }
 
-async function eventually(check: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+async function eventually(check: () => boolean, message: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (check()) return;
     await sleep(50);

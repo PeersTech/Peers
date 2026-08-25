@@ -100,7 +100,13 @@ WebSocket). Three adapters = a real seam.
   `PEERS_PORT`, `PEERS_ANNOUNCE`, injectable env/dir). Test: a relay
   carries gossip between two citizens where one listens nowhere — real
   circuit traffic, plus tier/battery/parsing suites. `117/117 green`.
-- **117/117 tests green · tsc clean · eslint clean**
+- **DCUtR hole punching (M10)** — `@libp2p/dcutr` service wired for every
+  non-`off` tier; upgrades relayed connections automatically (inbound-side
+  trigger, unilateral direct dial first, then synchronized handshake).
+  Loopback test: two citizens meet ONLY through a circuit and end up with
+  a non-limited direct connection. Cross-NAT stays a manual gate (step 10).
+  `118/118 tests green`.
+- **118/118 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 
@@ -124,8 +130,8 @@ v3-compatible gossipsub ships.
 5. ~~Relay mesh + capacity tiers (M9/M12)~~ ✅ — circuit-relay-v2 client+
    server, citizen/node/off tiers, PEERS_NODES/nodes.json bootstrap,
    battery/idle guard via injected `powerSource` port.
-6. **DCUtR hole punching (M10)** — loopback handshake test; cross-NAT stays
-   a manual verification gate.
+6. ~~DCUtR hole punching (M10)~~ ✅ — loopback handshake test; cross-NAT
+   stays a manual verification gate.
 7. **Plaza (M15)** — auto-join topic, self-signed chat/profiles, presence.
 8. **Hosts** — `apps/cli` (`--node`, M11 parity incl. auto identity),
    `apps/web` (HTTP + WS bridge adapter of @peers/api), `apps/desktop`
