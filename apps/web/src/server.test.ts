@@ -63,10 +63,11 @@ describe('web host — HTTP + WS bridge of @peers/api', () => {
   it('serves the status page and answers commands over the socket', async () => {
     const web = await startWebHost({identity: Identity.random()});
     try {
-      // Static fallback page while no renderer build exists.
+      // The real renderer build when it exists, else the status stub.
       const res = await fetch(`http://127.0.0.1:${web.port}/`);
       expect(res.headers.get('content-type')).toContain('text/html');
-      expect(await res.text()).toContain('Peers web host');
+      const html = await res.text();
+      expect(html.includes('id="root"') || html.includes('Peers web host')).toBe(true);
 
       const client = wsClient(web.port);
       await opened(client);

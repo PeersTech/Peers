@@ -1,5 +1,14 @@
-import {invoke} from "@tauri-apps/api/core";
-import {listen} from "@tauri-apps/api/event";
+import {host as transport} from "./transport";
+
+/** The two primitives every binding below is written against — the
+ * carrier (Electron IPC or WebSocket) is chosen in transport.ts. The
+ * listen shim keeps the Tauri event-object shape (`e.payload`) so the
+ * bindings themselves never changed. */
+const invoke = <T,>(cmd: string, args?: Record<string, unknown>) => transport().invoke<T>(cmd, args);
+const listen = <T,>(event: string, cb: (e: {payload: T}) => void) =>
+    transport().listen<T>(event, (payload) => cb({payload}));
+
+export type {UnlistenFn} from "./transport";
 
 export type Role = "member" | "admin" | "owner";
 
