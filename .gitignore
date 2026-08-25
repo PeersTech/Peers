@@ -4,3 +4,5 @@ frontend/dist
 backend/target
 backend/gen
 .superpowers
+
+apps/desktop/dist/
