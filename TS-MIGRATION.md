@@ -89,7 +89,18 @@ WebSocket). Three adapters = a real seam.
   — core fix, unit-tested. Tests over real loopback swarms: handshake→
   sealed DMs both directions, display names on requests, full server flow
   incl. ACL rejection, spent-invite replay ignored.
-- **106/106 tests green · tsc clean · eslint clean**
+- **Relay mesh + capacity tiers (M9/M12)** — `circuit-relay-v2` wired per
+  tier: `node` = backbone hop (server, bounded reservations: 128 slots /
+  2 h / 4 MiB), `citizen` = client-only, `off` strips the transport.
+  `powerSource` port injected at start — a constrained source downgrades
+  `node`→`citizen` (laptops never relay on battery; no platform deps in
+  the package). `reserveOnRelay()` listens on `<relay>/p2p-circuit` for
+  HOP reservations, counted in `net_status.relayReservations`. Bootstrap
+  config ported from Rust (`PEERS_NODES` env → `nodes.json` fallback,
+  `PEERS_PORT`, `PEERS_ANNOUNCE`, injectable env/dir). Test: a relay
+  carries gossip between two citizens where one listens nowhere — real
+  circuit traffic, plus tier/battery/parsing suites. `117/117 green`.
+- **117/117 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 
@@ -110,9 +121,9 @@ v3-compatible gossipsub ships.
 4. ~~Servers over gossipsub (M14 finish)~~ ✅ — @peers/host engine: signed
    lists on server topics, nonce-authorized join flow, profiles riding
    member lists, sealed DM envelopes over DM topics.
-5. **Relay mesh + capacity tiers (M9/M12)** — circuit-relay-v2 client+server,
-   citizen/node/off tiers, `PEERS_NODES` / nodes.json bootstrap, battery/idle
-   guard via injected `powerSource` port.
+5. ~~Relay mesh + capacity tiers (M9/M12)~~ ✅ — circuit-relay-v2 client+
+   server, citizen/node/off tiers, PEERS_NODES/nodes.json bootstrap,
+   battery/idle guard via injected `powerSource` port.
 6. **DCUtR hole punching (M10)** — loopback handshake test; cross-NAT stays
    a manual verification gate.
 7. **Plaza (M15)** — auto-join topic, self-signed chat/profiles, presence.

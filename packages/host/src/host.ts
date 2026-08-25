@@ -557,7 +557,7 @@ export class PeersHost {
       peers: this.node.peerCount,
       listenAddrs: this.node.listenAddrs,
       externalAddrs: [],
-      relayReservations: 0,
+      relayReservations: this.node.reservationCount,
       reachability: 'unknown',
       reachabilityMeasured: false,
       knownNodes: 0,

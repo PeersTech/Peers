@@ -2,17 +2,20 @@ import { generateKeyPairFromSeed } from '@libp2p/crypto/keys';
 import { gossipsub } from '@chainsafe/libp2p-gossipsub';
 import { noise } from '@chainsafe/libp2p-noise';
 import { yamux } from '@chainsafe/libp2p-yamux';
+import { circuitRelayServer, circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { identify } from '@libp2p/identify';
 import { kadDHT, passthroughMapper } from '@libp2p/kad-dht';
 import { ping } from '@libp2p/ping';
 import { tcp } from '@libp2p/tcp';
 import { multiaddr } from '@multiformats/multiaddr';
+import type { Multiaddr } from '@multiformats/multiaddr';
 import { createLibp2p, type Libp2p } from 'libp2p';
 import type { Identify } from '@libp2p/identify';
 import type { KadDHT } from '@libp2p/kad-dht';
 import type { Ping } from '@libp2p/ping';
 import type { GossipsubEvents } from '@chainsafe/libp2p-gossipsub';
 import type { PeerId, PubSub } from '@libp2p/interface';
+import type { CircuitRelayService } from '@libp2p/circuit-relay-v2';
 import {
   FriendNotice,
   FRIEND_REQUEST_TOPIC_PREFIX,
@@ -35,6 +38,7 @@ import {
   hashToCid,
   toHex,
 } from './blobs.js';
+import { alwaysPluggedIn, type PowerSource } from './power.js';
 
 /** The concrete service map this node assembles. */
 type PeersLibp2p = Libp2p<{
@@ -42,9 +46,12 @@ type PeersLibp2p = Libp2p<{
   ping: Ping;
   dht: KadDHT;
   pubsub: PubSub<GossipsubEvents>;
+  relay?: CircuitRelayService;
 }>;
 
-/** How much relaying this node takes on (M12 capacity tiers). */
+/** How much relaying this node takes on (M12 capacity tiers).
+ * `citizen` uses relays, serves none; `node` is a backbone hop;
+ * `off` disables the relay transport entirely. */
 export type RelayRole = 'citizen' | 'node' | 'off';
 
 export interface PeersNodeConfig {
@@ -56,6 +63,9 @@ export interface PeersNodeConfig {
   bootstrapAddrs?: string[];
   /** Capacity tier. Default `citizen`. */
   relayRole?: RelayRole;
+  /** Battery/idle guard port. A constrained source downgrades a `node`
+   * to `citizen` at start (a laptop must not drain relaying for others). */
+  powerSource?: PowerSource;
 }
 
 export interface IncomingMessage {
@@ -97,12 +107,21 @@ export class PeersNode {
 
     const blobStore = new BlobStore();
 
+    // Battery/idle guard (M12): a constrained machine never becomes a
+    // backbone hop, whatever its configured tier says.
+    const power = config.powerSource ?? alwaysPluggedIn;
+    let role: RelayRole = config.relayRole ?? 'citizen';
+    if (role === 'node' && power.isPowerConstrained()) role = 'citizen';
+    const relayServer = role === 'node';
+
     const node = await createLibp2p({
       privateKey: keypair,
       addresses: {
         listen: config.listenAddrs ?? ['/ip4/127.0.0.1/tcp/0'],
       },
-      transports: [tcp()],
+      // `off` strips the relay transport entirely; citizens keep the
+      // client side so they can reserve slots on backbone nodes.
+      transports: role === 'off' ? [tcp()] : [tcp(), circuitRelayTransport()],
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
       services: {
@@ -117,6 +136,17 @@ export class PeersNode {
           allowPublishToZeroTopicPeers: true,
           emitSelf: false,
         }),
+        ...(relayServer
+          ? {
+              relay: circuitRelayServer({
+                reservations: {
+                  maxReservations: 128,
+                  defaultDurationLimit: 2 * 60 * 60 * 1000,
+                  defaultDataLimit: BigInt(4 * 1024 * 1024),
+                },
+              }),
+            }
+          : {}),
       },
     });
     await node.start();
@@ -124,7 +154,7 @@ export class PeersNode {
     // Blob transfer handler — registered before any provider lookup can race it.
     await node.handle(BLOB_PROTOCOL, handleBlobProtocol(blobStore) as never);
 
-    const self = new PeersNode(node, config.identity, blobStore, undefined, config.relayRole ?? 'citizen');
+    const self = new PeersNode(node, config.identity, blobStore, undefined, role);
     node.services.pubsub.addEventListener('message', (evt) => {
       const from = (evt.detail as { from?: { toString(): string } }).from;
       const msg = {
@@ -303,6 +333,32 @@ export class PeersNode {
   /** Dial a peer by multiaddr (bootstrap, invites, code resolution). */
   async dial(addr: string): Promise<void> {
     await this.libp2p.dial(multiaddr(addr));
+  }
+
+  /**
+   * Reserve a circuit slot on a relay node (M9): listen on
+   * `<relay>/p2p-circuit` so we become reachable as
+   * `<relay>/p2p-circuit/p2p/<us>` and NAT'd peers can dial us through it.
+   * The relay address must include its `/p2p/<peer-id>` suffix.
+   */
+  async reserveOnRelay(relayAddr: string): Promise<void> {
+    const base = multiaddr(relayAddr);
+    if (!base.getPeerId()) throw new Error('relay address must include /p2p/<peer-id>');
+    const circuit = base.encapsulate('/p2p-circuit');
+    // Listening on a /p2p-circuit address is how the transport performs a
+    // HOP reservation; the manager isn't on the public interface yet, so
+    // reach it via the concrete components (same as libp2p's own tests).
+    const tm = (this.libp2p as unknown as {
+      components: {transportManager: {listen(addrs: Multiaddr[]): Promise<void>}};
+    }).components.transportManager;
+    await tm.listen([circuit]);
+  }
+
+  /** Active circuit reservations (net_status relayReservations). */
+  get reservationCount(): number {
+    return this.libp2p
+      .getMultiaddrs()
+      .filter((ma: Multiaddr) => ma.protoNames().includes('p2p-circuit')).length;
   }
 
   /**

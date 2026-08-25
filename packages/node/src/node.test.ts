@@ -207,6 +207,80 @@ describe('friend codes end-to-end (M8/M17) — publish → resolve → mutual ac
   });
 });
 
+describe('relay mesh + capacity tiers (M9/M12)', () => {
+  it('a node-tier relay carries traffic between citizens that only know it', async () => {
+    const r = await PeersNode.start({
+      identity: Identity.random(),
+      relayRole: 'node',
+    });
+    const a = await PeersNode.start({identity: Identity.random()});
+    // b listens nowhere: nobody can dial it directly, it can only be
+    // reached (and reach others) through circuits.
+    const b = await PeersNode.start({identity: Identity.random(), listenAddrs: []});
+    try {
+      const rAddr = r.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
+      const circuitToA = `${rAddr}/p2p-circuit/p2p/${a.peerId}`;
+
+      await a.dial(rAddr);
+      await eventually(() => a.peerCount > 0, 'a never connected to the relay');
+
+      // Reserve a slot so b can reach a through the relay.
+      await a.reserveOnRelay(rAddr);
+      expect(a.reservationCount).toBeGreaterThan(0);
+
+      await b.dial(circuitToA);
+      await eventually(() => b.peerCount > 0 && a.peerCount >= 2, 'circuit never established');
+
+      // Gossip flows across the circuit: a hears from b.
+      const got = new Promise<string>((resolve) => {
+        a.onMessage((msg) => {
+          if (msg.topic === TOPIC) resolve(new TextDecoder().decode(msg.data));
+        });
+      });
+      a.subscribe(TOPIC);
+      b.subscribe(TOPIC);
+      await sleep(1200);
+      await sendUntil(() => b.publish(TOPIC, new TextEncoder().encode('via relay')), got, 'no message over the circuit');
+      expect(await got).toBe('via relay');
+    } finally {
+      await Promise.allSettled([r.stop(), a.stop(), b.stop()]);
+    }
+  }, 40_000);
+
+  it('battery guard downgrades a node tier to citizen', async () => {
+    const n = await PeersNode.start({
+      identity: Identity.random(),
+      relayRole: 'node',
+      powerSource: {isPowerConstrained: () => true}, // laptop on battery
+    });
+    try {
+      expect(n.relayRole).toBe('citizen'); // must not drain itself relaying
+    } finally {
+      await n.stop();
+    }
+  });
+
+  it('off disables the relay transport entirely', async () => {
+    const n = await PeersNode.start({
+      identity: Identity.random(),
+      relayRole: 'off',
+    });
+    try {
+      expect(n.relayRole).toBe('off');
+      // No circuit transport: dialing any /p2p-circuit addr is impossible.
+      const other = await PeersNode.start({identity: Identity.random(), relayRole: 'node'});
+      try {
+        const addr = other.listenAddrs.find((ma) => ma.includes('/tcp/'))!;
+        await expect(n.dial(`${addr}/p2p-circuit`)).rejects.toThrow();
+      } finally {
+        await other.stop();
+      }
+    } finally {
+      await n.stop();
+    }
+  }, 30_000);
+});
+
 /** Retry `send` until `waiter` resolves — gossipsub needs a beat to graft a
  * freshly subscribed topic into the mesh, and early publishes vanish. */
 async function sendUntil(send: () => Promise<void>, waiter: Promise<unknown>, message: string): Promise<void> {
