@@ -1,0 +1,21 @@
+{
+  "productName": "Peers",
+  "version": "0.1.0",
+  "identifier": "app.peers.desktop",
+  "build": {
+    "frontendDist": "/root/Peers/frontend/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm --prefix ../../frontend run build",
+    "beforeDevCommand": "npm --prefix ../../frontend run dev"
+  },
+  "app": {
+    "windows": [{ "title": "Peers", "width": 1100, "height": 760 }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "deb"],
+    "icon": ["icons/icon.png"],
+    "category": "DeveloperTool"
+  }
+}

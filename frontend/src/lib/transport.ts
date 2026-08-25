@@ -29,7 +29,15 @@ interface ElectronPeers {
 declare global {
     interface Window {
         peers?: ElectronPeers;
+        __TAURI__?: { invoke: (cmd: string, args?: unknown) => Promise<unknown>; event: { listen: (event: string, cb: (e: {payload: unknown}) => void) => Promise<UnlistenFn> } };
     }
+}
+
+function tauriTransport(tauri: NonNullable<Window['__TAURI__']>): HostTransport {
+    return {
+        invoke: (cmd, args) => tauri.invoke(cmd, args) as Promise<never>,
+        listen: (event, cb) => tauri.event.listen(event, (e) => cb(e.payload as never)),
+    };
 }
 
 function electronTransport(peers: ElectronPeers): HostTransport {
@@ -130,19 +138,81 @@ function wsTransport(url: string, WebSocketImpl: typeof WebSocket = WebSocket): 
 
 let impl: HostTransport | null = null;
 
+/** Probes candidate WS endpoints, returning the first that connects. */
+async function probeWs(urls: string[], WebSocketImpl: typeof WebSocket): Promise<string | null> {
+    for (const url of urls) {
+        const ok = await new Promise<boolean>((resolve) => {
+            const timer = setTimeout(() => resolve(false), 1200);
+            try {
+                const ws = new WebSocketImpl(url);
+                ws.onopen = () => { clearTimeout(timer); ws.close(); resolve(true); };
+                ws.onerror = () => { clearTimeout(timer); resolve(false); };
+            } catch {
+                clearTimeout(timer);
+                resolve(false);
+            }
+        });
+        if (ok) return url;
+    }
+    return null;
+}
+
+let wsFallback: Promise<HostTransport> | null = null;
+
+/** Thin shells (Tauri without a wired engine) ride the local web host. */
+function wsHost(WebSocketImpl: typeof WebSocket): Promise<HostTransport> {
+    if (!wsFallback) {
+        wsFallback = (async () => {
+            const candidates = [
+                ...(typeof location !== 'undefined' && location.protocol.startsWith('http')
+                    ? [`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`]
+                    : []),
+                'ws://127.0.0.1:8787/ws',
+                'ws://127.0.0.1:8123/ws',
+            ];
+            const live = await probeWs(candidates, WebSocketImpl);
+            return wsTransport(live ?? candidates[0], WebSocketImpl);
+        })();
+    }
+    return wsFallback;
+}
+
+function defaultUrl(): string {
+    const devUrl = import.meta.env?.VITE_PEERS_WS as string | undefined;
+    return (
+        devUrl ??
+        (typeof location !== 'undefined' && location.protocol.startsWith('http')
+            ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`
+            : 'ws://127.0.0.1:8787/ws')
+    );
+}
+
 /** The selected carrier, decided once on first use. */
 export function host(): HostTransport {
     if (!impl) {
-        if (typeof window !== 'undefined' && window.peers) {
+        if (typeof window !== 'undefined' && window.__TAURI__) {
+            // Tauri shell: the Rust side is a thin webview — the engine runs
+            // in the local web host, so probe Tauri first and fall back to
+            // WebSocket when the backend has no commands wired.
+            const t = tauriTransport(window.__TAURI__);
+            const probe = t
+                .invoke('has_identity', {})
+                .then(() => 'tauri' as const)
+                .catch(() => 'fallback' as const);
+            impl = {
+                invoke: async (cmd, args) => {
+                    if ((await probe) === 'tauri') return t.invoke(cmd, args);
+                    return (await wsHost(WebSocket)).invoke(cmd, args);
+                },
+                listen: async (event, cb) => {
+                    if ((await probe) === 'tauri') return t.listen(event, cb);
+                    return (await wsHost(WebSocket)).listen(event, cb);
+                },
+            };
+        } else if (typeof window !== 'undefined' && window.peers) {
             impl = electronTransport(window.peers);
         } else {
-            const devUrl = import.meta.env?.VITE_PEERS_WS as string | undefined;
-            const url =
-                devUrl ??
-                (typeof location !== 'undefined' && location.protocol.startsWith('http')
-                    ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`
-                    : 'ws://127.0.0.1:8787/ws');
-            impl = wsTransport(url);
+            impl = wsTransport(defaultUrl());
         }
     }
     return impl;

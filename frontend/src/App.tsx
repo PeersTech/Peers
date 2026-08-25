@@ -79,6 +79,7 @@ export default function App() {
     const [profileAbout, setProfileAbout] = useState('');
     const [avatarBytes, setAvatarBytes] = useState<number[] | null>(null);
     const [pendingHash, setPendingHash] = useState<string | null>(null);
+    const [showMembers, setShowMembers] = useState(true);
     /** Incoming friend requests from peers who scanned our code. */
     const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
     const booted = useRef(false);
@@ -1240,16 +1241,47 @@ export default function App() {
 
     return (
         <div className="flex h-full w-full flex-col bg-surface-1 text-ink">
-            {net && net.knownNodes === 0 && net.reachability !== 'direct' && (
-                <div
-                    className="shrink-0 bg-accent-soft px-4 py-1.5 text-[11px] text-warn"
-                    title="Two peers behind NAT cannot connect without a reachable node in between."
+            {/* Studio top bar — brand + channel crumb + members toggle */}
+            <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge bg-surface-2 px-4">
+                <span className="text-sm font-bold tracking-tight text-ink">
+                    peers <span className="text-accent">•</span>
+                </span>
+                <span className="hidden text-sm text-muted sm:block">
+                    {server ? (
+                        <>
+                            <b className="font-semibold text-ink">{server.name}</b> / #{activeChannel ?? '…'}
+                        </>
+                    ) : plazaOpen ? (
+                        <b className="font-semibold text-ink">plaza</b>
+                    ) : dm ? (
+                        <b className="font-semibold text-ink">{dm.name}</b>
+                    ) : (
+                        '—'
+                    )}
+                </span>
+                <button
+                    onClick={() => setShowMembers((v) => !v)}
+                    className={`ml-auto rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                        showMembers ? 'border-accent bg-accent text-black' : 'border-edge bg-surface-3 text-muted hover:bg-surface-4 hover:text-ink'
+                    }`}
+                    title={showMembers ? 'Hide members' : 'Show members'}
                 >
-                    No relay node configured — messages will only reach peers on your own network.
-                    Set <span className="font-mono">PEERS_NODES</span> to an always-on node
-                    (see docs/running-a-node.md).
+                    Members
+                </button>
+                <span className="hidden text-xs text-faint sm:block" title={netTitle}>
+                    {netLabel()}
+                </span>
+            </div>
+            {net && net.knownNodes === 0 && net.reachability !== 'direct' && (
+                <div className="flex shrink-0 items-center gap-2 bg-accent-soft px-4 py-1.5 text-[11px] text-warn">
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" />
+                    <span>
+                        Offline — directory unreachable. Messages will only reach peers on your LAN.
+                    </span>
                 </div>
             )}
+            <div className="flex min-h-0 flex-1">
+            <div className="flex w-[316px] shrink-0 flex-col border-r border-edge bg-surface-2">
             <div className="flex min-h-0 flex-1">
             <ServerRail
                 servers={serverList}
@@ -1418,13 +1450,49 @@ export default function App() {
                     onPromoteMember={(peerId, role) => void promoteMember(server.id, peerId, role)}
                     onExportSnapshot={() => void exportSnapshotUi(server.id)}
                     onImportSnapshot={() => void importSnapshotUi(server.id)}
-                    onCopyMyId={copyMyId}
                 />
             ) : (
                 <div className="flex h-full w-[248px] items-center justify-center bg-surface-2 px-4 text-center text-xs text-muted">
-                    No server selected
+                    <div>
+                        <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-3 text-accent">◈</div>
+                        <div className="font-medium text-ink">No server selected</div>
+                        <div className="mt-1 text-faint">Create a server or join with an invite</div>
+                    </div>
                 </div>
             )}
+            </div>
+            {/* left downbar — your info, lives under rail+channels (316px), not full width */}
+            <div className="flex h-[56px] shrink-0 items-center gap-3 border-t border-edge bg-surface-1 px-3">
+                <div
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-black"
+                    style={{background: THEME.online}}
+                >
+                    {(myProfile?.displayName || me?.peerIdShort || 'Y')[0].toUpperCase()}
+                </div>
+                <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-ink">
+                        {myProfile?.displayName || me?.peerIdShort || 'you'}
+                    </div>
+                    <div className="truncate font-mono text-[11px] text-muted">
+                        {me ? shortId(me.peerId) : '…'} {online.size > 0 && `· ${online.size} online`}
+                    </div>
+                </div>
+                <button
+                    onClick={copyMyId}
+                    className="rounded-lg p-1.5 text-muted hover:bg-surface-3 hover:text-ink"
+                    title="Copy peer id"
+                >
+                    ⧉
+                </button>
+                <button
+                    onClick={openSettings}
+                    className="rounded-lg bg-accent p-1.5 text-black hover:bg-accent-hover"
+                    title="Profile & settings"
+                >
+                    ⚙
+                </button>
+            </div>
+            </div>
             <MessagePane
                 channelName={paneName || '…'}
                 subtitle={[
@@ -1446,6 +1514,31 @@ export default function App() {
                 onSend={send}
                 avatarFor={avatarFor}
             />
+            {showMembers && (
+                <div className="hidden w-[220px] shrink-0 flex-col border-l border-edge bg-surface-2 xl:flex">
+                    <div className="flex h-12 shrink-0 items-center px-4 text-[11px] font-bold uppercase tracking-wide text-muted">
+                        Members — {paneMembers.length}
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-2">
+                        {paneMembers.length === 0 ? (
+                            <div className="px-2 py-4 text-center text-xs text-muted">No members yet</div>
+                        ) : (
+                            paneMembers.map((m) => (
+                                <div key={m.peerId} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-ink-dim hover:bg-surface-3">
+                                    <span
+                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-black"
+                                        style={{background: colorFor(m.peerId)}}
+                                    >
+                                        {m.name[0]?.toUpperCase() ?? '?'}
+                                    </span>
+                                    <span className="flex-1 truncate">{m.name}</span>
+                                    {online.has(m.peerId) && <span className="h-2 w-2 shrink-0 rounded-full bg-online" />}
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            )}
             </div>
             {addOpen && (
                 <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={() => setAddOpen(false)}>

@@ -1,34 +1,34 @@
 @import "tailwindcss";
 
-/* ── Ember ────────────────────────────────────────────────────────────────
-   Warm-dominant dark theme: soot-brown surfaces, ember-orange accent, sage
-   for presence and success. Sans-serif UI; monospace only where character
-   precision matters (peer ids, hashes, multiaddrs, recovery phrases).
+/* ── Noir Studio ────────────────────────────────────────────────────────
+   True black, electric accent, high contrast. Studio layout: centered
+   document, floating glass, spacious — not Discord.
 
    Every colour lives here. Components reference tokens (`bg-surface-2`),
    never literals — that is what makes a reskin a one-file change.
    ──────────────────────────────────────────────────────────────────────── */
 @theme {
-    --color-surface-0: #100e0a;  /* icon rail, deepest wells */
-    --color-surface-1: #17150f;  /* message pane */
-    --color-surface-2: #1c1912;  /* channel sidebar, member list */
-    --color-surface-3: #241f16;  /* composer, raised cards, hover */
-    --color-surface-4: #2b2619;  /* active channel row, pressed */
+    --color-surface-0: #000000;  /* true black — OLED, rail */
+    --color-surface-1: #050507;  /* canvas — message document */
+    --color-surface-2: #0F0F10;  /* glass sidebar */
+    --color-surface-3: #1A1A1E;  /* composer, cards */
+    --color-surface-4: #232326;  /* active, pressed */
 
-    --color-edge: #221e16;       /* hairline rules, dividers */
+    --color-edge: #1C1C1E;       /* hairline */
+    --color-glass: rgba(15, 15, 16, 0.8); /* floating glass */
 
-    --color-accent: #e8863c;     /* active state, own messages, primary */
-    --color-accent-hover: #f09a55;
-    --color-accent-soft: #2b1f12; /* accent-tinted background wash */
+    --color-accent: #00D5FF;     /* electric cyan — own messages, primary */
+    --color-accent-hover: #33DDFF;
+    --color-accent-soft: #0A1E24; /* cyan wash */
 
-    --color-online: #7bb08a;     /* presence dots, success */
-    --color-danger: #d9614f;     /* errors, destructive, unread badges */
-    --color-warn: #e0b04a;       /* mentions, degraded connectivity */
+    --color-online: #30D158;     /* presence, success — iOS green */
+    --color-danger: #FF453A;     /* errors, destructive */
+    --color-warn: #FF9F0A;       /* mentions, degraded */
 
-    --color-ink: #f0e6d2;        /* primary text (parchment) */
-    --color-ink-dim: #d6cdb9;    /* message body */
-    --color-muted: #8f8574;      /* secondary text, inactive channels */
-    --color-faint: #6b6354;      /* timestamps, placeholders, # glyphs */
+    --color-ink: #F5F5F7;        /* primary — near white */
+    --color-ink-dim: #AEAEB2;    /* body */
+    --color-muted: #8E8E93;      /* secondary */
+    --color-faint: #636366;      /* timestamps, # */
 
     --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }

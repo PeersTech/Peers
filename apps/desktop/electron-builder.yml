@@ -1,12 +1,16 @@
 appId: app.peers.desktop
 productName: Peers
 executableName: peers
+compression: maximum
+asar: true
 directories:
   output: release
   buildResources: build
 files:
   - dist/**/*
   - package.json
+  - "!**/*.map"
+  - "!**/node_modules/.cache/**"
 extraResources:
   # The renderer is built from frontend/ and shipped inside the app.
   - from: ../../frontend/dist

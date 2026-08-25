@@ -21,13 +21,12 @@ interface Props {
     onPromoteMember: (peerId: string, role: "admin" | "member") => void;
     onExportSnapshot: () => void;
     onImportSnapshot: () => void;
-    onCopyMyId: () => void;
 }
 
 export function ChannelList({
     server, activeChannel, unreadFor, me, joinRequests, online, onSelectChannel, onInvite,
     onAddChannel, onAddMember, onAcceptJoin, onRejectJoin, onLeave, onRename, onRotateKey,
-    onKickMember, onPromoteMember, onExportSnapshot, onImportSnapshot, onCopyMyId,
+    onKickMember, onPromoteMember, onExportSnapshot, onImportSnapshot,
 }: Props) {
     const unreadTotal = server.channels.reduce((n, c) => n + unreadFor(c.name), 0);
     const onlineCount = server.members.filter((m) => online.has(m.peerId)).length;
@@ -199,24 +198,7 @@ export function ChannelList({
                 })}
             </div>
 
-            <div className="flex h-14 shrink-0 items-center gap-2 bg-surface-0 px-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-online to-online text-xs font-bold text-black">
-                    {me?.peerIdShort[0].toUpperCase() ?? "Y"}
-                </div>
-                <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-ink">you</div>
-                    <div className="truncate text-[11px] text-muted">{me?.peerIdShort ?? "…"}</div>
-                </div>
-                <button
-                    onClick={onCopyMyId}
-                    title={`Your peer id: ${me?.peerId ?? "…"} — click to copy`}
-                    className="text-muted hover:text-white"
-                >
-                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
-                        <path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
-                    </svg>
-                </button>
-            </div>
+
         </div>
     );
 }

@@ -29,12 +29,10 @@ export const DEFAULT_DIRECTORIES = [
   'https://directory.peers.dpdns.org',
 ];
 
-/** Built-in seed nodes — last-resort fallback when the directories are
- * unreachable (fresh install, offline first run). Operators join this list
- * via PR; users override everything with PEERS_NODES / nodes.json. */
-export const DEFAULT_SEEDS: string[] = [
-  '/ip4/213.136.86.78/tcp/4001/p2p/12D3KooWNYP5YYmb6ex8qoy4RkUUrEh9EosbSfenVBrSQwiyLDuu',
-];
+/** No hardcoded seeds — directory is the source. Fresh installs fetch
+ * https://directory.peers.dpdns.org; offline falls back to the on-disk
+ * cache written after the first successful fetch. */
+export const DEFAULT_SEEDS: string[] = [];
 
 /** TCP port to bind, from `PEERS_PORT`. A node's port must stay stable —
  * clients hold it in nodes.json; an OS-assigned one silently invalidates

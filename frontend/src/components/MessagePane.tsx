@@ -324,8 +324,14 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
                     );
                 })}
                 {messages.length === 0 && (
-                    <div className="flex h-full items-center justify-center text-xs text-faint">
-                        No messages yet — say hi with a {channelName ? `#${channelName}` : "channel"} ping.
+                    <div className="flex h-full flex-col items-center justify-center gap-3 px-8 py-12 text-center">
+                        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-surface-2 text-accent">
+                            <span className="text-xl">#</span>
+                        </div>
+                        <div className="text-sm font-medium text-ink">No messages yet</div>
+                        <div className="max-w-[320px] text-xs leading-relaxed text-muted">
+                            Say hi in <span className="font-medium text-ink">#{channelName || 'general'}</span> — your message is end-to-end encrypted and will be delivered via the relay.
+                        </div>
                     </div>
                 )}
             </div>
