@@ -1,14 +1,18 @@
-import {readFileSync} from 'node:fs';
+import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 
 /**
  * Bootstrap configuration for reaching always-on Peers backbone nodes
- * (M9). Port of `backend/src/p2p/bootstrap.rs`, minus the DNS resolver:
- * config order is the `PEERS_NODES` env var (comma-separated multiaddrs)
- * first, then a `nodes.json` array in the config dir.
+ * (M9). Port of `backend/src/p2p/bootstrap.rs`, plus the directory:
+ * config order is
  *
- * Everything here is injectable so tests never touch the real environment.
+ *   1. `PEERS_NODES` env var (power users)
+ *   2. user's `nodes.json`
+ *   3. live node directories (`DEFAULT_DIRECTORIES`, cached to disk)
+ *   4. built-in `DEFAULT_SEEDS`
+ *
+ * so a fresh install connects with zero configuration and no pasted ids.
  */
 
 export interface BootstrapEnv {
@@ -19,19 +23,17 @@ export interface BootstrapEnv {
   HOME?: string;
 }
 
-/** Multiaddrs of known always-on nodes, dialed on startup. */
-export function knownNodes(env: BootstrapEnv = process.env, configDir?: string): string[] {
-  const fromEnv = parseAddrList(env.PEERS_NODES);
-  if (fromEnv.length > 0) return fromEnv;
-  const path = join(configDir ?? defaultConfigDir(env), 'peers', 'nodes.json');
-  try {
-    const raw: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((a): a is string => typeof a === 'string' && isValidAddr(a.trim()));
-  } catch {
-    return [];
-  }
-}
+/** Official node directories — queried in order, results merged+deduped. */
+export const DEFAULT_DIRECTORIES = [
+  'https://directory.peers.dpdns.org',
+];
+
+/** Built-in seed nodes — last-resort fallback when the directories are
+ * unreachable (fresh install, offline first run). Operators join this list
+ * via PR; users override everything with PEERS_NODES / nodes.json. */
+export const DEFAULT_SEEDS: string[] = [
+  '/ip4/213.136.86.78/tcp/4001/p2p/12D3KooWNYP5YYmb6ex8qoy4RkUUrEh9EosbSfenVBrSQwiyLDuu',
+];
 
 /** TCP port to bind, from `PEERS_PORT`. A node's port must stay stable —
  * clients hold it in nodes.json; an OS-assigned one silently invalidates
@@ -48,6 +50,105 @@ export function announceAddrs(env: BootstrapEnv = process.env): string[] {
 
 // ---------------------------------------------------------------------------
 
+/** Sync sources only (env → nodes.json → defaults). The async directory
+ * lookup lives in {@link resolveBootstrapNodes}. */
+export function knownNodes(env: BootstrapEnv = process.env, configDir?: string): string[] {
+  const fromEnv = parseAddrList(env.PEERS_NODES);
+  if (fromEnv.length > 0) return fromEnv;
+  const custom = (() => {
+    const path = join(configDir ?? defaultConfigDir(env), 'peers', 'nodes.json');
+    try {
+      const raw: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      if (!Array.isArray(raw)) return [];
+      return raw.filter((a): a is string => typeof a === 'string' && isValidAddr(a.trim()));
+    } catch {
+      return [];
+    }
+  })();
+  if (custom.length > 0) return custom;
+  return DEFAULT_SEEDS;
+}
+
+export interface ResolveOptions {
+  env?: BootstrapEnv;
+  configDir?: string;
+  directories?: string[];
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Full bootstrap resolution, directories included. Order:
+ * env → nodes.json → live directory query (cached to
+ * `<config>/peers/directory-cache.json` so an offline NEXT run still has
+ * the last known-good list) → built-in seeds. Never throws: every failure
+ * degrades to the next source.
+ */
+export async function resolveBootstrapNodes(opts: ResolveOptions = {}): Promise<string[]> {
+  const env = opts.env ?? process.env;
+  const configDir = opts.configDir ?? defaultConfigDir(env);
+  const staticNodes = knownNodes(env, configDir);
+  // Static config wins outright — a power user naming nodes means it.
+  if (staticNodes !== DEFAULT_SEEDS && staticNodes.length > 0) return staticNodes;
+
+  const cachePath = join(configDir, 'peers', 'directory-cache.json');
+  const cached = readCache(cachePath);
+  if (cached.length > 0) return cached;
+
+  const dirs = opts.directories ?? DEFAULT_DIRECTORIES;
+  const doFetch = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? 3000;
+  const found = new Set<string>();
+  await Promise.allSettled(
+    dirs.map(async (dirUrl) => {
+      const res = await withTimeout(
+        doFetch(`${dirUrl.replace(/\/$/, '')}/v1/nodes?limit=200`),
+        timeoutMs,
+      );
+      if (!res.ok) return;
+      const body = (await res.json()) as {nodes?: {multiaddr?: string}[]};
+      for (const n of body.nodes ?? []) {
+        if (typeof n.multiaddr === 'string' && isValidAddr(n.multiaddr)) found.add(n.multiaddr);
+      }
+    }),
+  );
+  if (found.size === 0) return DEFAULT_SEEDS;
+  writeCache(cachePath, [...found]);
+  return [...found];
+}
+
+async function withTimeout(p: Promise<Response>, ms: number): Promise<Response> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('directory timeout')), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function readCache(path: string): string[] {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((a): a is string => typeof a === 'string' && isValidAddr(a));
+  } catch {
+    return [];
+  }
+}
+
+function writeCache(path: string, addrs: string[]): void {
+  try {
+    mkdirSync(dirname(path), {recursive: true});
+    writeFileSync(path, JSON.stringify(addrs));
+  } catch {
+    /* cache is best-effort */
+  }
+}
 function parseAddrList(raw: string | undefined): string[] {
   if (!raw) return [];
   return raw

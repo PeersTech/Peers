@@ -3,7 +3,8 @@ import {existsSync} from 'node:fs';
 import {networkInterfaces} from 'node:os';
 import {dirname, join} from 'node:path';
 import {Identity} from '@peers/core';
-import {announceAddrs, listenPort, knownNodes, type BootstrapEnv} from '@peers/node';
+import {announceAddrs, listenPort, resolveBootstrapNodes, type BootstrapEnv} from '@peers/node';
+import {paintLine} from './ui.js';
 
 /**
  * Headless backbone node (M11 parity with `backend/src/node.rs`).
@@ -99,9 +100,11 @@ export async function runBackbone(opts: BackboneOptions = {}): Promise<Backbone>
   const dataDir = opts.dataDir ?? env.XDG_CONFIG_HOME ?? `${env.HOME ?? '.'}/.config`;
   const identityPath = join(dataDir, 'peers', 'node-identity.bin');
   const log = opts.onLine ?? ((line: string): void => {
-    process.stdout.write(`${line}\n`);
+    process.stdout.write(`${paintLine(line)}\n`);
   });
 
+  // Directories first: live list, cached to disk, seeds as fallback.
+  const nodes = await resolveBootstrapNodes({env, configDir: dataDir});
   const identity = await loadOrCreateIdentity(identityPath);
   log(`peers node peer id: ${identity.peerId}`);
   log(`peers node identity: ${identityPath}`);
@@ -115,12 +118,12 @@ export async function runBackbone(opts: BackboneOptions = {}): Promise<Backbone>
     identity,
     listenAddrs: [`/ip4/0.0.0.0/tcp/${port}`],
     relayRole: 'node',
-    bootstrapAddrs: knownNodes(env),
+    bootstrapAddrs: nodes,
   });
 
   // Dial + reserve on every known always-on node so this node works as a
   // rendezvous for hole-punching even when it itself sits behind NAT.
-  for (const ma of knownNodes(env)) {
+  for (const ma of nodes) {
     log(`dialing known node: ${ma}`);
     try {
       await node.dial(ma);

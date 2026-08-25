@@ -53,7 +53,7 @@ Deferred follow-ups, resolved:
   QUIC transport at all, so there is nothing to put behind a flag. TCP is
   the wire; revisit if/when an official QUIC transport ships.
 
-`133/133 root tests green (+22 frontend) · tsc clean · eslint clean`
+`137/137 root tests green (+22 frontend) · tsc clean · eslint clean`
 
 ## Done ✅
 
@@ -158,7 +158,16 @@ Deferred follow-ups, resolved:
     esbuild-bundled main/preload. Runtime check needs a display — rides
     the step-10 manual gate.
   `126/126 tests green`.
-- **126/126 tests green · tsc clean · eslint clean**
+- **Directory-backed zero-config bootstrap** — `DEFAULT_DIRECTORIES`
+  (`https://directory.peers.dpdns.org`) + on-disk cache
+  (`directory-cache.json`) so a fresh install connects with no pasted ids.
+  `resolveBootstrapNodes()` merges `PEERS_NODES` → `nodes.json` →
+  live directory fetch (3 s timeout, dedup) → `DEFAULT_SEEDS`; web/desktop
+  hosts auto-resolve at unlock/start. New `PeeringAccount` bootstrap tests
+  cover env wins, directory hit, cache fallback, and seed degradation.
+  CLI now prints coloured output + announces via `shareableLines()`.
+  `137/137 tests green`.
+- **137/137 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 

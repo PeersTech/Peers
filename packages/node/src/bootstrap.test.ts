@@ -1,9 +1,11 @@
 import {describe, expect, it} from 'vitest';
 import {
   announceAddrs,
+  DEFAULT_SEEDS,
   knownNodes,
   listenPort,
   parsePort,
+  resolveBootstrapNodes,
   type BootstrapEnv,
 } from './bootstrap.js';
 import {alwaysPluggedIn, type PowerSource} from './power.js';
@@ -21,9 +23,9 @@ describe('bootstrap config', () => {
     ]);
   });
 
-  it('entries missing a peer id are dropped (undialable)', () => {
+  it('entries missing a peer id are dropped → falls through to seeds', () => {
     const env: BootstrapEnv = {PEERS_NODES: '/ip4/10.0.0.1/tcp/4001,not-an-addr'};
-    expect(knownNodes(env)).toEqual([]);
+    expect(knownNodes(env)).toEqual(DEFAULT_SEEDS);
   });
 
   it('falls back to nodes.json when the env var is unset or empty', async () => {
@@ -48,9 +50,9 @@ describe('bootstrap config', () => {
     }
   });
 
-  it('missing file and malformed json both degrade to empty', async () => {
-    expect(knownNodes({}, '/tmp/opencode/definitely-not-here')).toEqual([]);
-    expect(knownNodes({PEERS_NODES: ''}, undefined)).toEqual([]);
+  it('missing file and malformed json both degrade to built-in seeds', async () => {
+    expect(knownNodes({}, '/tmp/opencode/definitely-not-here')).toEqual(DEFAULT_SEEDS);
+    expect(knownNodes({PEERS_NODES: ''}, undefined)).toEqual(DEFAULT_SEEDS);
   });
 
   it('port override wins over default; garbage falls back', () => {
@@ -71,6 +73,69 @@ describe('bootstrap config', () => {
     ).toEqual(['/ip4/203.0.113.7/tcp/4001/p2p/12D3KooWA']);
     expect(announceAddrs({})).toEqual([]);
   });
+});
+
+describe('bootstrap resolution with directory', () => {
+  const SEED = '/ip4/203.0.113.1/tcp/4001/p2p/12D3KooWSEED';
+  const dirNodeA = '/ip4/198.51.100.10/tcp/4001/p2p/12D3KooWDIRA';
+  const dirNodeB = '/ip4/198.51.100.11/tcp/4001/p2p/12D3KooWDIRB';
+
+  const dirFetch = (body: unknown, ok = true) =>
+    ((): Promise<Response> => Promise.resolve(new Response(JSON.stringify(body), {status: ok ? 200 : 500}))) as typeof fetch;
+
+  it('env override wins and never touches the network', async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = (() => {
+      calls++;
+      throw new Error('should not fetch');
+    }) as typeof fetch;
+    const nodes = await resolveBootstrapNodes({
+      env: {PEERS_NODES: `${dirNodeA},${SEED}`},
+      configDir: '/tmp/opencode/nonexistent',
+      fetchImpl,
+    });
+    expect(nodes).toEqual([dirNodeA, SEED]);
+    expect(calls).toBe(0);
+  });
+
+  it('queries directories when no static config exists', async () => {
+    const {mkdtempSync, existsSync} = await import('node:fs');
+    const dir = mkdtempSync('/tmp/opencode/boot-');
+    const nodes = await resolveBootstrapNodes({
+      env: {},
+      configDir: dir,
+      directories: ['https://directory.test'],
+      fetchImpl: dirFetch({nodes: [{multiaddr: dirNodeA}, {multiaddr: 'garbage'}, {multiaddr: dirNodeB}]}),
+    });
+    expect(nodes).toEqual([dirNodeA, dirNodeB]);
+    // Result was cached to disk for offline next-run.
+    expect(existsSync(`${dir}/peers/directory-cache.json`)).toBe(true);
+  });
+
+  it('falls back to the disk cache when directories are down', async () => {
+    const {mkdtempSync} = await import('node:fs');
+    const dir = mkdtempSync('/tmp/opencode/boot2-');
+    await resolveBootstrapNodes({
+      env: {}, configDir: dir, directories: ['https://directory.test'],
+      fetchImpl: dirFetch({nodes: [{multiaddr: dirNodeA}]}),
+    });
+    const again = await resolveBootstrapNodes({
+      env: {}, configDir: dir, directories: ['https://directory.test'],
+      fetchImpl: dirFetch({nodes: []}, false),
+    });
+    expect(again).toEqual([dirNodeA]);
+  }, 15_000);
+
+  it('degrades to built-in seeds on total failure', async () => {
+    const {mkdtempSync} = await import('node:fs');
+    const dir = mkdtempSync('/tmp/opencode/boot3-');
+    const nodes = await resolveBootstrapNodes({
+      env: {}, configDir: dir, directories: ['https://down.test'],
+      timeoutMs: 50,
+      fetchImpl: (() => new Promise(() => {})) as typeof fetch, // hang → timeout
+    });
+    expect(nodes).toEqual(DEFAULT_SEEDS);
+  }, 15_000);
 });
 
 describe('powerSource port', () => {

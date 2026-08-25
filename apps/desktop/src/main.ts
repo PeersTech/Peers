@@ -2,6 +2,7 @@ import {existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {BrowserWindow, Menu, Tray, app, ipcMain, nativeImage, powerMonitor} from 'electron';
 import {PeersAccount} from '@peers/host';
+import {resolveBootstrapNodes} from '@peers/node';
 import type {CommandName, EventName} from '@peers/api';
 
 /**
@@ -21,10 +22,14 @@ let quitRequested = false;
  * screen drives generate_phrase / init_from_phrase / unlock over IPC. */
 let account: PeersAccount | null = null;
 
-function getAccount(): PeersAccount {
+async function getAccount(): Promise<PeersAccount> {
   if (!account) {
     account = new PeersAccount({
       dataDir: join(app.getPath('userData'), 'account'),
+      // Reach the always-on backbone (PEERS_NODES env or nodes.json) so
+      // cross-NAT chat works out of the box.
+      // Directories + seeds; cached to disk for offline next-run.
+      bootstrapAddrs: await resolveBootstrapNodes().catch(() => []),
       // M12 battery guard: the OS reports, the node decides. An hour of
       // idle counts as "asleep on a shelf" even if the battery is drawn.
       powerSource: {
@@ -109,19 +114,20 @@ const EVENT_NAMES: EventName[] = [
 function wireIpc(): void {
   ipcMain.handle('peers:request', async (_event, cmd: CommandName, args: unknown) => {
     try {
-      return {ok: true, ret: await getAccount().request(cmd, args as never)};
+      return {ok: true, ret: await (await getAccount()).request(cmd, args as never)};
     } catch (e) {
       return {ok: false, error: e instanceof Error ? e.message : String(e)};
     }
   });
   // Events flow from the account (queued while locked, live after unlock).
   ipcMain.on('peers:subscribe-events', (event) => {
-    const acct = getAccount();
-    for (const name of EVENT_NAMES) {
-      acct.on(name, (payload) => {
-        if (!event.sender.isDestroyed()) event.sender.send(`peers:event:${name}`, payload);
-      });
-    }
+    void getAccount().then((acct) => {
+      for (const name of EVENT_NAMES) {
+        acct.on(name, (payload) => {
+          if (!event.sender.isDestroyed()) event.sender.send(`peers:event:${name}`, payload);
+        });
+      }
+    });
   });
 }
 
@@ -154,7 +160,7 @@ if (!gotLock) {
   app.on('before-quit', async () => {
     quitRequested = true;
     try {
-      await getAccount().lock(); // flushes sealed state, stops the node
+      if (account) await account.lock(); // flushes sealed state, stops node
     } catch {
       /* account never constructed — nothing to stop */
     }
