@@ -38,10 +38,21 @@ NODE_MAJOR=$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')
 
 step "placing sources in $DIR"
 if [[ -n $REPO ]]; then
-  [[ -d $DIR ]] || git clone "$REPO" "$DIR"
+  if [[ -d $DIR/.git ]]; then git -C "$DIR" pull --ff-only >/dev/null
+  elif [[ ! -d $DIR ]]; then git clone "$REPO" "$DIR"
+  fi
 else
   SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-  [[ $SCRIPT_DIR == "$DIR" ]] || { mkdir -p "$(dirname "$DIR")"; [[ -d $DIR ]] || cp -r "$SCRIPT_DIR" "$DIR"; }
+  if [[ $SCRIPT_DIR != "$DIR" ]]; then
+    if [[ -d $DIR/.git ]]; then
+      git -C "$DIR" fetch origin >/dev/null 2>&1 || true
+      git -C "$DIR" reset --hard origin/typescript-migration >/dev/null 2>&1 || git -C "$DIR" pull --ff-only >/dev/null || true
+    elif [[ ! -d $DIR ]]; then
+      cp -r "$SCRIPT_DIR" "$DIR"
+    else
+      rsync -a --delete --exclude='.config' "$SCRIPT_DIR"/ "$DIR"/
+    fi
+  fi
 fi
 cd "$DIR"
 
