@@ -9,3 +9,4 @@ apps/desktop/dist/
 apps/desktop/dist/
 apps/desktop/release/
 apps/cli/dist/
+apps/tauri/src-tauri/target/
