@@ -157,23 +157,23 @@ async function probeWs(urls: string[], WebSocketImpl: typeof WebSocket): Promise
     return null;
 }
 
-let wsFallback: Promise<HostTransport> | null = null;
+let wsFallback: HostTransport | null = null;
 
-/** Thin shells (Tauri without a wired engine) ride the local web host. */
-function wsHost(WebSocketImpl: typeof WebSocket): Promise<HostTransport> {
-    if (!wsFallback) {
-        wsFallback = (async () => {
-            const candidates = [
-                ...(typeof location !== 'undefined' && location.protocol.startsWith('http')
-                    ? [`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`]
-                    : []),
-                'ws://127.0.0.1:8787/ws',
-                'ws://127.0.0.1:8123/ws',
-            ];
-            const live = await probeWs(candidates, WebSocketImpl);
-            return wsTransport(live ?? candidates[0], WebSocketImpl);
-        })();
-    }
+/** Thin shells (Tauri without a wired engine) ride the local web host.
+ * A failed probe is never cached — if the engine starts later, the next
+ * command re-probes and connects. */
+async function wsHost(WebSocketImpl: typeof WebSocket): Promise<HostTransport> {
+    if (wsFallback) return wsFallback;
+    const candidates = [
+        ...(typeof location !== 'undefined' && location.protocol.startsWith('http')
+            ? [`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`]
+            : []),
+        'ws://127.0.0.1:8787/ws',
+        'ws://127.0.0.1:8123/ws',
+    ];
+    const live = await probeWs(candidates, WebSocketImpl);
+    if (!live) throw new Error('engine not running — start host.cjs, then retry');
+    wsFallback = wsTransport(live, WebSocketImpl);
     return wsFallback;
 }
 
