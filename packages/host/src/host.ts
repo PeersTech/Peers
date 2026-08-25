@@ -2,6 +2,8 @@ import type {FriendNotice, Identity} from '@peers/core';
 import {
   JoinNotice,
   PeerCard,
+  PlazaMessage,
+  PLAZA_TOPIC,
   ProfileNotice,
   ServerDir,
   SessionDir,
@@ -15,6 +17,7 @@ import {
   serverTopic,
   shortCode,
   utf8,
+  type PlazaMessageShape,
   type ServerRecord,
 } from '@peers/core';
 import {PeersNode, type IncomingMessage} from '@peers/node';
@@ -27,10 +30,16 @@ import type {
   MemberDto,
   NetStatusDto,
   PeerCardDto,
+  PlazaMessageDto,
   ServerViewDto,
   SignedMessageDto,
   SignedProfileDto,
 } from '@peers/api';
+
+/** How many recent Plaza messages we keep (Rust: PLAZA_HISTORY_LIMIT). */
+const PLAZA_HISTORY_LIMIT = 200;
+/** How long a participant counts as "here" after their last message. */
+const PLAZA_PRESENCE_WINDOW_SECS = 600;
 
 /**
  * The Peers host engine: ONE implementation of the {@link Commands}/
@@ -50,6 +59,10 @@ export class PeersHost {
   private readonly dmHistory = new Map<string, DmMessageDto[]>();
   private readonly serverHistory = new Map<string, Map<string, SignedMessage[]>>();
   private readonly contactProfiles = new Map<string, SignedProfileDto>();
+  /** Recent verified Plaza messages, oldest first (deduped by sig). */
+  private readonly plaza: PlazaMessageDto[] = [];
+  /** Last-seen ts per Plaza participant (presence). */
+  private readonly plazaSeen = new Map<string, number>();
   private profile: SignedProfile | null = null;
 
   private constructor(
@@ -70,6 +83,8 @@ export class PeersHost {
     const host = new PeersHost(identity, node);
     // Receive DMs addressed to us: our peer id IS our DM topic (Rust parity).
     node.subscribe(`peers/v1/ch/${node.peerId}`);
+    // Auto-join the global Plaza — no invites, can't leave (M15).
+    node.subscribe(PLAZA_TOPIC);
     node.onMessage((msg) => host.onWireMessage(msg));
     node.onFriendNotice((n) => host.onFriendNotice(n));
     return host;
@@ -338,6 +353,8 @@ export class PeersHost {
       for (const rec of this.servers.records()) {
         await this.publishJson(serverTopic(rec.id), ProfileNotice.new(rec.id, this.peerId, p));
       }
+      // Let the Plaza learn the new name/avatar (Rust: announce_plaza_profile).
+      await this.announcePlazaProfile().catch(() => {});
       return {...p};
     },
     get_profile: async () => (this.profile ? {...this.profile} : null),
@@ -350,12 +367,24 @@ export class PeersHost {
       return null;
     },
 
-    // -- plaza placeholders until M15 wiring lands -----------------------------------
-    publish_plaza: async () => {
-      throw new Error('plaza arrives with M15 wiring');
+    // -- plaza (M15) ------------------------------------------------------------
+    publish_plaza: async (a) => {
+      const text = a.text.trim();
+      if (text.length === 0) return null;
+      const msg = PlazaMessage.sign(this.identity, PlazaMessage.KIND_CHAT, text, {
+        card: PeerCard.sign(this.identity),
+      });
+      await this.publishJson(PLAZA_TOPIC, msg);
+      this.pushPlaza(plazaToDto(msg));
+      return null;
     },
-    plaza_history: async () => [],
-    plaza_who: async () => [],
+    plaza_history: async () => [...this.plaza],
+    plaza_who: async () => {
+      const now = Math.floor(Date.now() / 1000);
+      return [...this.plazaSeen]
+        .filter(([, ts]) => now - ts < PLAZA_PRESENCE_WINDOW_SECS)
+        .map(([peerId, lastTs]) => ({peerId, lastTs}));
+    },
   };
 
   on<K extends EventName>(event: K, cb: (payload: Events[K]) => void): () => void {
@@ -373,6 +402,7 @@ export class PeersHost {
 
   private onWireMessage(msg: IncomingMessage): void {
     try {
+      if (msg.topic === PLAZA_TOPIC) return this.onPlazaMessage(msg);
       if (msg.topic.startsWith('peers/v1/ch/')) {
         const rest = msg.topic.slice('peers/v1/ch/'.length);
         const slash = rest.indexOf('/');
@@ -385,6 +415,62 @@ export class PeersHost {
     } catch {
       // A malformed wire message must never crash the engine.
     }
+  }
+
+  /** Self-signed Plaza traffic (M15): chat and profile announcements. */
+  private onPlazaMessage(msg: IncomingMessage): void {
+    let parsed: PlazaMessageDto & {card?: unknown};
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(msg.data));
+      const coreMsg: Parameters<typeof PlazaMessage.verify>[0] = {
+        ...parsed,
+        card: null,
+      } as never;
+      // The riding card is verified separately (byte arrays over JSON).
+      const card = hydrateCard(parsed.card) ?? undefined;
+      if (card) {
+        if (!PeerCard.verify(card)) return;
+        coreMsg.card = card;
+      }
+      PlazaMessage.verify(coreMsg);
+    } catch {
+      return; // unsigned/tampered — the Plaza trusts only valid signatures
+    }
+    if (this.plaza.some((m) => m.sig === parsed.sig)) return; // dedup
+    this.pushPlaza(parsed);
+    this.plazaSeen.set(parsed.from, parsed.ts);
+
+    if (parsed.profile) {
+      try {
+        SignedProfile.verify(parsed.profile as SignedProfile);
+        this.contactProfiles.set(parsed.from, {...(parsed.profile as SignedProfile)});
+      } catch {
+        parsed.profile = undefined;
+      }
+    }
+    this.emit('plaza://message', {from: parsed.from, text: parsed.text, ts: parsed.ts, profile: parsed.profile ?? null});
+    if (parsed.profile) {
+      this.emit('plaza://profile', {peerId: parsed.from, profile: {...(parsed.profile as SignedProfile)}});
+    }
+  }
+
+  private pushPlaza(msg: PlazaMessageDto): void {
+    this.plaza.push(msg);
+    if (this.plaza.length > PLAZA_HISTORY_LIMIT) {
+      this.plaza.splice(0, this.plaza.length - PLAZA_HISTORY_LIMIT);
+    }
+  }
+
+  /** Best-effort "who I am" announcement so the Plaza learns our profile. */
+  private async announcePlazaProfile(): Promise<void> {
+    if (!this.profile) return;
+    await this.publishJson(
+      PLAZA_TOPIC,
+      PlazaMessage.sign(this.identity, PlazaMessage.KIND_PROFILE, '', {
+        profile: this.profile,
+        card: PeerCard.sign(this.identity),
+      }),
+    );
   }
 
   /** Sealed envelope on a DM topic addressed to us. */
@@ -661,6 +747,20 @@ function dtoToCard(dto: PeerCardDto): PeerCard {
 
 function msgToDto(m: SignedMessage): SignedMessageDto {
   return {...m};
+}
+
+/** Core PlazaMessageShape → wire DTO (drops the card; it's transport-only). */
+function plazaToDto(m: PlazaMessageShape): PlazaMessageDto {
+  return {
+    version: m.version,
+    kind: m.kind,
+    from: m.from,
+    pubkey: [...m.pubkey],
+    ts: m.ts,
+    text: m.text,
+    profile: m.profile ? {...m.profile} : null,
+    sig: m.sig,
+  };
 }
 
 /** Sender identity embedded in a sealed envelope header (unverified bytes;

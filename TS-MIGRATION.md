@@ -106,7 +106,14 @@ WebSocket). Three adapters = a real seam.
   Loopback test: two citizens meet ONLY through a circuit and end up with
   a non-limited direct connection. Cross-NAT stays a manual gate (step 10).
   `118/118 tests green`.
-- **118/118 tests green · tsc clean · eslint clean**
+- **Plaza (M15)** — auto-joined `peers/v1/plaza` in the engine; self-signed
+  chat (card riding) and profile announcements via core `PlazaMessage`,
+  dedup by sig, 200-message history, 600 s presence window (`plaza_who`),
+  `plaza://message` + `plaza://profile` events, `set_profile` announces to
+  the Plaza (Rust `announce_plaza_profile` parity). Two-node test covers
+  chat delivery, profile riding, presence and empty-message rejection.
+  `119/119 tests green`.
+- **119/119 tests green · tsc clean · eslint clean**
 
 ### Stack pin (important)
 
@@ -132,7 +139,7 @@ v3-compatible gossipsub ships.
    battery/idle guard via injected `powerSource` port.
 6. ~~DCUtR hole punching (M10)~~ ✅ — loopback handshake test; cross-NAT
    stays a manual verification gate.
-7. **Plaza (M15)** — auto-join topic, self-signed chat/profiles, presence.
+7. ~~Plaza (M15)~~ ✅ — auto-join topic, self-signed chat/profiles, presence.
 8. **Hosts** — `apps/cli` (`--node`, M11 parity incl. auto identity),
    `apps/web` (HTTP + WS bridge adapter of @peers/api), `apps/desktop`
    (Electron shell + move `frontend/` renderer; tray/close-to-tray via

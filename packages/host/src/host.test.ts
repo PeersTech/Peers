@@ -207,6 +207,66 @@ describe('PeersHost — servers over gossipsub (M14)', () => {
 });
 
 // ---------------------------------------------------------------------------
+describe('PeersHost — plaza (M15)', () => {
+  it('carries self-signed chat, riding profiles and presence', async () => {
+    const [a, b] = await linkedPair();
+    try {
+      // Give the auto-joined Plaza topic a beat to mesh, then announce.
+      await sleep(1200);
+      const profileSeen = new Promise<{peerId: string}>((resolve) =>
+        b.on('plaza://profile', resolve),
+      );
+      const announce = async (): Promise<boolean> => {
+        await a.request('set_profile', {displayName: 'Alice P', about: '', avatarHash: null});
+        return (await b.request('contact_profiles', {}))[a.peerId]?.displayName === 'Alice P';
+      };
+      await eventuallyRetry(announce);
+
+      // Chat flows self-signed; b verifies without any membership check.
+      const chatSeen: {v?: {from: string; text: string}} = {};
+      void b.on('plaza://message', (m) => {
+        if (m.text === 'gm plaza') chatSeen.v = m;
+      });
+      await eventuallyRetry(async () => {
+        await a.request('publish_plaza', {text: 'gm plaza'}).catch(() => {});
+        return chatSeen.v !== undefined;
+      });
+      expect(chatSeen.v).toMatchObject({from: a.peerId});
+
+      // History keeps verified messages oldest-first; duplicates deduped by sig.
+      await eventually(async () =>
+        (await b.request('plaza_history', {})).some((m) => m.text === 'gm plaza' && m.from === a.peerId),
+      );
+
+      // Presence: anyone who spoke counts as "here".
+      const who = await b.request('plaza_who', {});
+      expect(who.some((p) => p.peerId === a.peerId)).toBe(true);
+
+      // Profile announcements surface as typed events too.
+      expect((await profileSeen).peerId).toBe(a.peerId);
+
+      // Empty messages are ignored (history unchanged).
+      const before = (await a.request('plaza_history', {})).length;
+      expect(before).toBeGreaterThan(0);
+      await a.request('publish_plaza', {text: '   '});
+      expect((await a.request('plaza_history', {})).length).toBe(before);
+    } finally {
+      await Promise.allSettled([a.stop(), b.stop()]);
+    }
+  }, 60_000);
+});
+
+/** Polls an idempotent action until it holds (re-runs the action because
+ * early publishes vanish before gossipsub meshes a fresh topic). */
+async function eventuallyRetry(action: () => Promise<boolean>, timeoutMs = 25_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await action()) return;
+    await sleep(400);
+  }
+  throw new Error('eventuallyRetry: condition never held');
+}
+
 async function dmHas(host: PeersHost, peer: string, text: string): Promise<boolean> {
   const hist = await host.request('dm_history', {peer});
   return hist.some((m) => m.text === text);
