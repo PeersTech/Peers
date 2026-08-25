@@ -14,6 +14,16 @@
 
 export type UnlistenFn = () => void;
 
+/** Best-effort renderer logging into the shell's log file. */
+function uiLog(msg: string): void {
+    try {
+        const t = (window as unknown as {__TAURI__?: TauriGlobal}).__TAURI__;
+        void t?.core?.invoke('log_msg', {msg});
+    } catch {
+        /* no shell — ignore */
+    }
+}
+
 export interface HostTransport {
     invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
     /** Resolves once registered; returns the unlisten function. */
@@ -26,16 +36,22 @@ interface ElectronPeers {
     on(event: string, cb: (payload: unknown) => void): () => void;
 }
 
+/** Tauri v2 global (withGlobalTauri): invoke lives under core. */
+interface TauriGlobal {
+    core: {invoke: (cmd: string, args?: unknown) => Promise<unknown>};
+    event: {listen: (event: string, cb: (e: {payload: unknown}) => void) => Promise<UnlistenFn>};
+}
+
 declare global {
     interface Window {
         peers?: ElectronPeers;
-        __TAURI__?: { invoke: (cmd: string, args?: unknown) => Promise<unknown>; event: { listen: (event: string, cb: (e: {payload: unknown}) => void) => Promise<UnlistenFn> } };
+        __TAURI__?: TauriGlobal;
     }
 }
 
-function tauriTransport(tauri: NonNullable<Window['__TAURI__']>): HostTransport {
+function tauriTransport(tauri: TauriGlobal): HostTransport {
     return {
-        invoke: (cmd, args) => tauri.invoke(cmd, args) as Promise<never>,
+        invoke: (cmd, args) => tauri.core.invoke(cmd, args) as Promise<never>,
         listen: (event, cb) => tauri.event.listen(event, (e) => cb(e.payload as never)),
     };
 }
@@ -140,20 +156,35 @@ let impl: HostTransport | null = null;
 
 /** Probes candidate WS endpoints, returning the first that connects. */
 async function probeWs(urls: string[], WebSocketImpl: typeof WebSocket): Promise<string | null> {
+    uiLog(`probe: trying ${urls.length} endpoints`);
     for (const url of urls) {
         const ok = await new Promise<boolean>((resolve) => {
-            const timer = setTimeout(() => resolve(false), 1200);
+            const timer = setTimeout(() => {
+                uiLog(`probe: ${url} TIMEOUT (1200ms)`);
+                resolve(false);
+            }, 1200);
             try {
                 const ws = new WebSocketImpl(url);
-                ws.onopen = () => { clearTimeout(timer); ws.close(); resolve(true); };
-                ws.onerror = () => { clearTimeout(timer); resolve(false); };
-            } catch {
+                ws.onopen = () => {
+                    clearTimeout(timer);
+                    ws.close();
+                    uiLog(`probe: ${url} OPEN`);
+                    resolve(true);
+                };
+                ws.onerror = (e) => {
+                    clearTimeout(timer);
+                    uiLog(`probe: ${url} ERROR ${JSON.stringify(String(e))}`);
+                    resolve(false);
+                };
+            } catch (e) {
                 clearTimeout(timer);
+                uiLog(`probe: ${url} THROW ${String(e)}`);
                 resolve(false);
             }
         });
         if (ok) return url;
     }
+    uiLog('probe: all endpoints failed');
     return null;
 }
 
@@ -197,8 +228,14 @@ export function host(): HostTransport {
             const t = tauriTransport(window.__TAURI__);
             const probe = t
                 .invoke('has_identity', {})
-                .then(() => 'tauri' as const)
-                .catch(() => 'fallback' as const);
+                .then(() => {
+                    uiLog('transport: tauri invoke OK → using tauri backend');
+                    return 'tauri' as const;
+                })
+                .catch((e) => {
+                    uiLog(`transport: tauri invoke FAILED (${String(e)}) → ws fallback`);
+                    return 'fallback' as const;
+                });
             impl = {
                 invoke: async (cmd, args) => {
                     if ((await probe) === 'tauri') return t.invoke(cmd, args);
@@ -212,7 +249,12 @@ export function host(): HostTransport {
         } else if (typeof window !== 'undefined' && window.peers) {
             impl = electronTransport(window.peers);
         } else {
-            impl = wsTransport(defaultUrl());
+            // No shell bridge (browser, or global Tauri off): probe the
+            // known local engine ports instead of guessing one URL.
+            impl = {
+                invoke: async (cmd, args) => (await wsHost(WebSocket)).invoke(cmd, args),
+                listen: async (event, cb) => (await wsHost(WebSocket)).listen(event, cb),
+            };
         }
     }
     return impl;

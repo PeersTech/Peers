@@ -9,13 +9,27 @@
     "beforeDevCommand": "npm --prefix ../../frontend run dev"
   },
   "app": {
-    "windows": [{ "title": "Peers", "width": 1100, "height": 760 }],
-    "security": { "csp": null }
+    "windows": [
+      {
+        "title": "Peers",
+        "width": 1100,
+        "height": 760
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
-    "icon": ["icons/icon.png"],
+    "targets": [
+      "appimage",
+      "deb"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
     "category": "DeveloperTool"
   }
 }
