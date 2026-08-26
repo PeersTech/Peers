@@ -190,15 +190,20 @@ export class PeersNode {
     // arrive — subscribed for the lifetime of the node, like Rust's unlock.
     node.services.pubsub.subscribe(friendRequestTopic(self.peerId));
 
-    for (const addr of config.bootstrapAddrs ?? []) {
-      try {
-        await node.dial(multiaddr(addr));
-        // Reserve a circuit slot so NAT'd peers can dial US back through
-        // this backbone node (Rust parity: Dial + ListenOnRelay).
-        await self.reserveOnRelay(addr);
-      } catch {
-        // Bootstrap failures are not fatal: the mesh heals itself.
-      }
+    // Dial + reserve on every known always-on node — in the background.
+    // Blocking here delayed app startup by whole relay-handshakes; the
+    // mesh heals itself, so callers get the node immediately.
+    if ((config.bootstrapAddrs?.length ?? 0) > 0) {
+      void Promise.allSettled(
+        (config.bootstrapAddrs ?? []).map(async (addr) => {
+          await node.dial(multiaddr(addr));
+          // Reserve a circuit slot so NAT'd peers can dial US back through
+          // this backbone node (Rust parity: Dial + ListenOnRelay).
+          await self.reserveOnRelay(addr);
+        }),
+      ).catch(() => {
+        /* Bootstrap failures are not fatal: the mesh heals itself. */
+      });
     }
 
     return self;
