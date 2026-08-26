@@ -1,4 +1,5 @@
-import { generateKeyPairFromSeed } from '@libp2p/crypto/keys';
+import { privateKeyFromProtobuf } from '@libp2p/crypto/keys';
+import { ed25519 as nobleEd25519 } from '@noble/curves/ed25519.js';
 import { gossipsub } from '@chainsafe/libp2p-gossipsub';
 import { noise } from '@chainsafe/libp2p-noise';
 import { yamux } from '@chainsafe/libp2p-yamux';
@@ -104,7 +105,16 @@ export class PeersNode {
   ) {}
 
   static async start(config: PeersNodeConfig): Promise<PeersNode> {
-    const keypair = await generateKeyPairFromSeed('Ed25519', config.identity.edSeed);
+    // Build the libp2p private key protobuf directly (type=Ed25519,
+    // data=seed||pub). @libp2p/crypto's own derivePublicKey routes through
+    // Node's createPrivateKey with an OKP JWK, which Node 26 rejects.
+    const seed = config.identity.edSeed;
+    const pub = nobleEd25519.getPublicKey(seed);
+    const protobuf = new Uint8Array(4 + 64);
+    protobuf.set([0x08, 0x01, 0x12, 0x40], 0); // Type=Ed25519, Data=64B (seed||pub)
+    protobuf.set(seed, 4);
+    protobuf.set(pub, 36);
+    const keypair = privateKeyFromProtobuf(protobuf);
 
     const blobStore = new BlobStore();
 

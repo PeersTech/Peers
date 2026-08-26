@@ -147,7 +147,10 @@ async function dispatch(backend: Backend, socket: WebSocket, raw: RawData): Prom
     const ret = await backend.request(req.cmd, (req.args ?? {}) as never);
     send(socket, {id: req.id, ok: true, ret} as never);
   } catch (e) {
-    send(socket, {id: req.id, ok: false, error: e instanceof Error ? e.message : String(e)} as never);
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : undefined;
+    if (stack) console.error(`[engine] ${req.cmd} failed: ${stack}`);
+    send(socket, {id: req.id, ok: false, error: msg} as never);
   }
 }
 
