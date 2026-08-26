@@ -1,6 +1,6 @@
 [package]
 name = "peers-tauri"
-version = "0.1.0"
+version = "0.1.4"
 description = "Peers — Tauri shell (small builds, system webview)"
 authors = ["Peers"]
 edition = "2021"

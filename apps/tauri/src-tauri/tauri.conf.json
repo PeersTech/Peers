@@ -1,6 +1,6 @@
 {
   "productName": "Peers",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "identifier": "app.peers.desktop",
   "build": {
     "frontendDist": "/root/Peers/frontend/dist",
