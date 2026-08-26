@@ -189,12 +189,27 @@ async function probeWs(urls: string[], WebSocketImpl: typeof WebSocket): Promise
 }
 
 let wsFallback: HostTransport | null = null;
+let wsPending: Promise<HostTransport> | null = null;
 
 /** Thin shells (Tauri without a wired engine) ride the local web host.
  * A failed probe is never cached — if the engine starts later, the next
  * command re-probes and connects. */
 async function wsHost(WebSocketImpl: typeof WebSocket): Promise<HostTransport> {
     if (wsFallback) return wsFallback;
+    // Dedupe: one probe for N simultaneous callers; cleared on failure so
+    // a later command re-probes (engine may have started in between).
+    if (wsPending) return wsPending;
+    wsPending = (async () => {
+        const t = await wsConnect(WebSocketImpl);
+        wsFallback = t;
+        wsPending = null;
+        return t;
+    })();
+    wsPending.catch(() => { wsPending = null; });
+    return wsPending;
+}
+
+async function wsConnect(WebSocketImpl: typeof WebSocket): Promise<HostTransport> {
     const candidates = [
         ...(typeof location !== 'undefined' && location.protocol.startsWith('http')
             ? [`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`]

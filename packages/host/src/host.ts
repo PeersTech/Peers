@@ -79,6 +79,9 @@ export class PeersHost {
     private servers = new ServerDir(),
   ) {}
 
+  /** How many always-on nodes we were configured with (net_status). */
+  private bootstrapCount = 0;
+
   static async start(opts: {
     identity: Identity;
     listenAddrs?: string[];
@@ -90,7 +93,9 @@ export class PeersHost {
   }): Promise<PeersHost> {
     const make = opts.nodeFactory ?? ((id: Identity) => PeersNode.start({identity: id, listenAddrs: opts.listenAddrs, bootstrapAddrs: opts.bootstrapAddrs, powerSource: opts.powerSource}));
     const node = await make(opts.identity);
-    return PeersHost.startWithNode(opts.identity, node);
+    const host = PeersHost.startWithNode(opts.identity, node);
+    host.bootstrapCount = opts.bootstrapAddrs?.length ?? 0;
+    return host;
   }
 
   /** Composes onto an existing node (tests, custom assemblies). Takes over
@@ -735,14 +740,21 @@ export class PeersHost {
   }
 
   private netStatus(): NetStatusDto {
+    const reservations = this.node.reservationCount;
+    const peers = this.node.peerCount;
+    // Inferred (AutoNAT-style measuring is a later milestone): a relay
+    // reservation means we are reachable through the backbone; any peer
+    // at all means the mesh is alive.
+    const reachability: NetStatusDto['reachability'] =
+      reservations > 0 ? 'relayed' : peers > 0 ? 'direct' : 'unknown';
     return {
-      peers: this.node.peerCount,
+      peers,
       listenAddrs: this.node.listenAddrs,
       externalAddrs: [],
-      relayReservations: this.node.reservationCount,
-      reachability: 'unknown',
+      relayReservations: reservations,
+      reachability,
       reachabilityMeasured: false,
-      knownNodes: 0,
+      knownNodes: this.bootstrapCount,
     };
   }
 

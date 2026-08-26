@@ -22,6 +22,8 @@ export interface WebHostOptions {
   /** Ephemeral auto-identity mode: the engine to wrap. */
   identity?: Identity;
   listenAddrs?: string[];
+  /** Always-on nodes; defaults to directory + seeds resolution. */
+  bootstrapAddrs?: string[];
   /** Account mode: keystore + sealed state under this dir. Starts locked
    * when the keystore doesn't exist yet — the renderer drives unlock. */
   accountDir?: string;
@@ -75,7 +77,7 @@ export async function startWebHost(opts: WebHostOptions = {}): Promise<WebHost> 
       dataDir: opts.accountDir,
       kdf: opts.kdf,
       listenAddrs: opts.listenAddrs,
-      bootstrapAddrs: await resolveBootstrapNodes({configDir: opts.accountDir}),
+      bootstrapAddrs: opts.bootstrapAddrs ?? (await resolveBootstrapNodes({configDir: opts.accountDir})),
     });
     // Recover the peer id for display without unlocking anything.
     if (!account.hasIdentity()) peerId = null;
