@@ -167,4 +167,4 @@ Trigger a manual build or release anytime from the **Actions** tab.
 
 ## License
 
-TBD — open source.
+MIT — see [`LICENSE`](LICENSE).
