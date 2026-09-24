@@ -56,8 +56,9 @@ forms the backbone.
 
 ## Milestones
 
-- [ ] **M8 — Friend codes.** Share/copy a peer-ID code; add friend by code →
-      DHT `find_peer` → dial. Direct connection for reachable/LAN peers.
+- [x] **M8 — Friend codes.** Share/copy a peer-ID code; add friend by code →
+      DHT provider lookup → dial. Requests and acceptances carry verified
+      identity cards, so direct DMs have the required X25519 key.
 - [ ] **M9 — Circuit Relay v2.** Enable relay client transport; NAT'd peers
       connect through always-on nodes. Needed for international NAT traversal.
 - [ ] **M10 — DCUtR hole punching.** After relay rendezvous, upgrade to a direct
@@ -92,18 +93,20 @@ traffic is dropped by clients (only the node in relay mode acts on it).
       No canonical public node list ships: publishing one would make those
       nodes a de facto central dependency, so operators distribute their own
       `PEERS_NODES` line instead.
-- [~] **M14 — Custom profiles.** ~~Global display name, profile picture and "about
-      me", all signed by the identity so they can't be impersonated. Profile
-      rides alongside the peer card (member lists, join notices, DM envelopes);
-      avatars are parked as DHT blobs and fetched by hash. Editable from a
-      settings screen in the UI.~~
-      **In progress:** `SignedProfile` (display name/about/avatar) rides member
-      lists, join notices + profile notices; fun auto-names (JuicyPear); profile
-      cached per contact.
-- [ ] **M15 — The Plaza.** A global auto-joined channel every peer subscribes to
+- [x] **M14 — Custom profiles.** ~~Global display name, profile picture and
+      "about me", all signed by the identity so they can't be impersonated.
+      Profile rides alongside the peer card (member lists, join notices, DM
+      envelopes); avatars are parked as DHT blobs and fetched by hash. Editable
+      from a settings screen in the UI.~~
+      **Done:** `SignedProfile` travels in member lists, join/profile notices,
+      and the Plaza; avatars are persisted, announced, fetched, and rendered
+      in the UI.
+- [x] **M15 — The Plaza.** A global auto-joined channel every peer subscribes to
       (no invites, can't leave). Self-signed chat + profiles; "who's here" =
       verified profiles + connected peers. A community for discovery, not a
       directory.
+      **Done:** the app subscribes on unlock, announces a signed profile, keeps
+      bounded history/presence, and renders the Plaza roster and conversation.
 - [x] **M16 — Seed-phrase login.** ~~The login passphrase IS the private key: 8–11
       diceware words (or the private key hex) → 32 bytes → Ed25519 + X25519 keys
       derived deterministically (wallet-style). Lost phrase = lost identity.~~
@@ -113,16 +116,13 @@ traffic is dropped by clients (only the node in relay mode acts on it).
       phrase rebuilds the same peer ID on any machine, so a lost install is
       recoverable and a lost phrase is not. Keystore v1 is refused outright
       (clean break — its random key can never be phrase-derived).
-- [~] **M17 — Friend codes (peer-id sharing).** ~~Share your peer id as a short
+- [x] **M17 — Friend codes (peer-id sharing).** ~~Share your peer id as a short
       code / QR; add a friend by code → DHT `find_peer` → dial → mutual accept.
       No usernames, no registry.~~
-      **In progress:** 12-digit code derivation shipped
-      (`crypto::code::short_code`, displayed `4827 1193 6052`). The code is a
-      DHT *rendezvous key*, deliberately not a truncated peer id — 12 digits is
-      grindable in GPU-hours, so a matching code is never proof of identity.
-      Resolution yields the full peer id, which the user verifies (name,
-      avatar, fingerprint) before accepting. DHT publish/lookup, QR and the
-      mutual-accept flow are still pending.
+      **Done:** the 12-digit code is a DHT rendezvous key, not a truncated peer
+      id. Resolution yields the full peer id, the UI requires explicit identity
+      confirmation, and the signed request/acceptance carries a peer-bound card
+      for DM key exchange.
 
 ## Identity, Plaza & usernames — finalized design
 
@@ -161,6 +161,8 @@ is nothing unique to enforce.
 ## Verification
 
 - CI (fmt, clippy `-D warnings`, full test suite, 3-OS builds) gates every
-  milestone; libp2p relay/DCUtR/find_peer are exercised by integration tests.
+  milestone. Current unit coverage includes directional DM keys, card/peer
+  binding, list revisions, relay-topic limits, and persistent blob behavior;
+  live relay/DCUtR testing still needs a multi-network integration harness.
 - Manual international test: two nodes on different networks (VPS + home) —
   friend-code connect, relayed message delivery, and hole-punch upgrade.

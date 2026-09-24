@@ -29,8 +29,10 @@ through it, and their messages flow. Then **DCUtR hole-punching upgrades the
 connection to direct** whenever the two NATs allow it, and the node drops out of
 the path entirely. It is a switchboard, not a bottleneck.
 
-**The node never reads anything.** Messages are sealed end-to-end before they
-touch the wire. It sees ciphertext and routing metadata, nothing else.
+The node never decrypts sealed direct messages. It does process signed
+control traffic and server-channel messages, so it can observe that metadata
+and plaintext protocol content. It is not a trusted party for the full
+protocol.
 
 ### Do I definitely need one?
 
@@ -250,7 +252,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=peers
+StateDirectory=peers
 Environment=PEERS_PORT=4001
+Environment=XDG_CONFIG_HOME=/var/lib/peers/.config
 # On a cloud VM, uncomment with your public IP — the instance cannot see it.
 #Environment=PEERS_ANNOUNCE=/ip4/203.0.113.7/tcp/4001
 ExecStart=/usr/local/bin/peers --node
@@ -258,12 +262,12 @@ Restart=always
 RestartSec=10
 
 # The node holds no user secrets — it only routes ciphertext — so it can be
-# locked down hard.
+# locked down hard. State lives under /var/lib/peers, not the protected home.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/home/peers/.config/peers
+ReadWritePaths=/var/lib/peers
 
 [Install]
 WantedBy=multi-user.target
@@ -271,6 +275,8 @@ WantedBy=multi-user.target
 
 ```sh
 sudo useradd -r -m -d /home/peers peers
+sudo mkdir -p /var/lib/peers/.config/peers
+sudo chown -R peers:peers /var/lib/peers
 sudo cp backend/target/release/peers /usr/local/bin/
 sudo systemctl enable --now peers-node
 journalctl -u peers-node -f
