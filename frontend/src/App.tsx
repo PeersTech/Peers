@@ -1,9 +1,9 @@
-import {useEffect, useRef, useState, type FormEvent} from 'react';
+import {useCallback, useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, addContact, acceptFriend, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
+    addMember, acceptFriend, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
     fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
-    leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobParked, onCodeResolved,
+    leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
     publishChannel, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
@@ -84,13 +84,21 @@ export default function App() {
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
+    const blobsRef = useRef<Record<string, number[]>>({});
 
-    const live = useRef({me: null as IdentityInfo | null, servers: {} as Record<string, ServerView>});
+    const live = useRef({
+        me: null as IdentityInfo | null,
+        servers: {} as Record<string, ServerView>,
+        profiles: {} as Record<string, SignedProfile>,
+    });
     useEffect(() => {
-        live.current = {me, servers};
-    }, [me, servers]);
+        live.current = {me, servers, profiles};
+        blobsRef.current = blobs;
+    }, [me, servers, profiles, blobs]);
 
     const activeRef = useRef({server: null as string | null, channel: null as string | null, dm: null as string | null});
+    const closeAddFriend = useCallback(() => setAddOpen(false), []);
+    const closeSettings = useCallback(() => setSettingsOpen(false), []);
     useEffect(() => {
         activeRef.current = {server: activeServer, channel: activeChannel, dm: activeDm};
     }, [activeServer, activeChannel, activeDm]);
@@ -168,7 +176,10 @@ export default function App() {
         historyLoaded.current.add(key);
         try {
             const msgs = await serverHistory(serverId, channel);
-            if (msgs.length === 0) return;
+            if (msgs.length === 0) {
+                historyLoaded.current.delete(key);
+                return;
+            }
             const members = live.current.servers[serverId]?.members ?? [];
             const list: UiMessage[] = msgs.map((d, i) => ({
                 id: `${d.from}:${d.ts}:${i}`,
@@ -182,12 +193,13 @@ export default function App() {
             }));
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
         } catch (e) {
+            historyLoaded.current.delete(key);
             setError(String(e));
         }
     };
 
     const ensureBlob = (hash: string) => {
-        if (!hash || blobs[hash] || blobQueued.current.has(hash)) return;
+        if (!hash || blobsRef.current[hash] || blobQueued.current.has(hash)) return;
         blobQueued.current.add(hash);
         void fetchBlob(hash).catch(() => {});
     };
@@ -315,7 +327,8 @@ export default function App() {
             const buf = await downscaleAvatar(file);
             setAvatarBytes(buf);
             setPendingHash(null);
-            await parkBlob(buf);
+            const hash = await parkBlob(buf);
+            setPendingHash(hash);
         } catch (e) {
             setError(String(e));
         }
@@ -348,7 +361,10 @@ export default function App() {
         historyLoaded.current.add(key);
         try {
             const msgs = await dmHistory(peer);
-            if (msgs.length === 0) return;
+            if (msgs.length === 0) {
+                historyLoaded.current.delete(key);
+                return;
+            }
             const list: UiMessage[] = msgs.map((d, i) => ({
                 id: `${d.peer}:${d.ts}:${i}`,
                 author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(peer),
@@ -361,6 +377,7 @@ export default function App() {
             }));
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
         } catch (e) {
+            historyLoaded.current.delete(key);
             setError(String(e));
         }
     };
@@ -453,7 +470,7 @@ export default function App() {
                     const key = `dm:${chan}`;
                     const msg: UiMessage = {
                         id: crypto.randomUUID(),
-                        author: contactName(m.from),
+                        author: live.current.profiles[chan]?.displayName || shortId(chan),
                         authorColor: colorFor(m.from),
                         time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
                         text: m.text,
@@ -530,7 +547,16 @@ export default function App() {
             }),
         );
         track(
-            onBlobFetched((e) => setBlobs((old) => ({...old, [e.hash]: e.data}))),
+            onBlobFetched((e) => {
+                blobQueued.current.delete(e.hash);
+                setBlobs((old) => ({...old, [e.hash]: e.data}));
+            }),
+        );
+        track(
+            onBlobFetchFailed((e) => {
+                // Permit a later render or retry to request the same blob.
+                blobQueued.current.delete(e.hash);
+            }),
         );
         track(
             onBlobParked((e) => setPendingHash((h) => h ?? e.hash)),
@@ -571,6 +597,7 @@ export default function App() {
         setActiveDm(null);
         setDmOpen(false);
         setActiveChannel(channel);
+        setUnread((u) => ({...u, [`${serverId}/${channel}`]: 0}));
         void subscribeChannel(serverId, channel).catch((e) => setError(String(e)));
         void loadServerHistory(serverId, channel);
     };
@@ -606,6 +633,7 @@ export default function App() {
     const selectChannel = (name: string) => {
         setActiveChannel(name);
         if (activeServer) {
+            setUnread((u) => ({...u, [`${activeServer}/${name}`]: 0}));
             void subscribeChannel(activeServer, name).catch((e) => setError(String(e)));
             void loadServerHistory(activeServer, name);
         }
@@ -643,8 +671,9 @@ export default function App() {
     const send = (text: string) => {
         const t = text.trim();
         if (!t) return;
+        const id = crypto.randomUUID();
         const msg: UiMessage = {
-            id: crypto.randomUUID(),
+            id,
             author: me?.peerIdShort ?? 'you',
             authorColor: THEME.online,
             time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
@@ -654,16 +683,22 @@ export default function App() {
         if (activeDm) {
             const key = `dm:${activeDm}`;
             setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
-            void publish(activeDm, t).catch((e) => setError(String(e)));
+            void publish(activeDm, t).catch((e) => {
+                setHistory((h) => ({...h, [key]: (h[key] ?? []).filter((m) => m.id !== id)}));
+                setError(String(e));
+            });
         } else if (activeServer && activeChannel) {
             const key = `${activeServer}/${activeChannel}`;
             setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
-            void publishChannel(activeServer, activeChannel, t).catch((e) => setError(String(e)));
+            void publishChannel(activeServer, activeChannel, t).catch((e) => {
+                setHistory((h) => ({...h, [key]: (h[key] ?? []).filter((m) => m.id !== id)}));
+                setError(String(e));
+            });
         } else if (plazaOpen) {
             setPlazaPosts((old) => [
                 ...old,
                 {
-                    id: crypto.randomUUID(),
+                    id,
                     author: myProfile?.displayName || (me?.peerIdShort ?? 'you'),
                     authorColor: THEME.online,
                     authorPeer: me?.peerId ?? '',
@@ -673,7 +708,10 @@ export default function App() {
                     profile: myProfile,
                 },
             ]);
-            void publishPlaza(t).catch((e) => setError(String(e)));
+            void publishPlaza(t).catch((e) => {
+                setPlazaPosts((old) => old.filter((p) => p.id !== id));
+                setError(String(e));
+            });
         }
     };
 
@@ -785,7 +823,7 @@ export default function App() {
         try {
             const v = await addMember(n.serverId, n.peerId, n.name, 'member', n.card);
             setServers((old) => ({...old, [v.id]: v}));
-            setJoinRequests((old) => old.filter((x) => x.peerId !== n.peerId));
+            setJoinRequests((old) => old.filter((x) => x.peerId !== n.peerId || x.serverId !== n.serverId));
         } catch (e) {
             setError(String(e));
         }
@@ -1012,6 +1050,11 @@ export default function App() {
         setHistory({});
         setUnread({});
         setJoinRequests([]);
+        setFriendRequests([]);
+        setOnline(new Set());
+        setBlobs({});
+        historyLoaded.current.clear();
+        blobQueued.current.clear();
         setPlazaOpen(false);
         setPlazaPosts([]);
         setPlazaRoster([]);
@@ -1026,6 +1069,7 @@ export default function App() {
 
     const submitAuth = async (e: FormEvent) => {
         e.preventDefault();
+        setError(null);
         setBusy(true);
         try {
             let info;
@@ -1049,6 +1093,12 @@ export default function App() {
             setRecovering(false);
             setPhase('ready');
             await refreshServers();
+            await loadProfiles();
+            try {
+                setOnline(new Set(await onlinePeers()));
+            } catch {
+                // presence is best-effort
+            }
         } catch (err) {
             setError(String(err));
         } finally {
@@ -1124,7 +1174,9 @@ export default function App() {
                                 Enter your 12- or 24-word recovery phrase. This rebuilds the same
                                 identity and peer ID on this machine.
                             </p>
+                            <label htmlFor="recovery-phrase" className="sr-only">Recovery phrase</label>
                             <textarea
+                                id="recovery-phrase"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 rows={3}
@@ -1150,7 +1202,9 @@ export default function App() {
                             <p className="mb-4 text-xs text-muted">
                                 Enter your recovery phrase to unlock your identity and start the swarm.
                             </p>
+                            <label htmlFor="unlock-phrase" className="sr-only">Recovery phrase</label>
                             <textarea
+                                id="unlock-phrase"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 rows={3}
@@ -1448,13 +1502,14 @@ export default function App() {
             />
             </div>
             {addOpen && (
-                <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={() => setAddOpen(false)}>
-                    <div onClick={(e) => e.stopPropagation()} className="w-[28rem] rounded-2xl border border-surface-3 bg-surface-2 p-5">
-                        <div className="mb-4 flex items-center justify-between">
-                            <h2 className="text-lg font-bold text-ink">Add a friend</h2>
-                            <button type="button" onClick={() => setAddOpen(false)} className="text-muted hover:text-ink">✕</button>
-                        </div>
-
+                <Modal
+                    open
+                    title="Add a friend"
+                    description="Share your short code, or look up a code someone sent you."
+                    onClose={closeAddFriend}
+                    className="w-[36rem]"
+                >
+                    <div className="p-5">
                         <p className="mb-2 text-xs text-muted">Your code — share it however you like.</p>
                         <div className="mb-4 flex items-center gap-4 rounded-lg bg-surface-1 p-3">
                             {code && (
@@ -1483,9 +1538,10 @@ export default function App() {
                         </div>
 
                         <form onSubmit={(e) => void submitCode(e)}>
-                            <label className="mb-1 block text-xs text-muted">Enter their 12-digit code</label>
+                            <label htmlFor="friend-code-input" className="mb-1 block text-xs text-muted">Enter their 12-digit code</label>
                             <div className="flex gap-2">
                                 <input
+                                    id="friend-code-input"
                                     value={codeInput}
                                     onChange={(e) => setCodeInput(e.target.value)}
                                     placeholder="4827 1193 6052"
@@ -1553,19 +1609,17 @@ export default function App() {
                             </div>
                         )}
                     </div>
-                </div>
+                </Modal>
             )}
             {settingsOpen && (
-                <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={() => setSettingsOpen(false)}>
-                    <form
-                        onSubmit={(e) => void saveProfile(e)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-96 rounded-2xl border border-surface-3 bg-surface-2 p-5"
-                    >
-                        <div className="mb-4 flex items-center justify-between">
-                            <h2 className="text-lg font-bold text-ink">Your profile</h2>
-                            <button type="button" onClick={() => setSettingsOpen(false)} className="text-muted hover:text-ink">✕</button>
-                        </div>
+                <Modal
+                    open
+                    title="Your profile"
+                    description="Choose how peers see you. The display name and avatar are shared with your contacts."
+                    onClose={closeSettings}
+                    className="w-96"
+                >
+                    <form onSubmit={(e) => void saveProfile(e)} className="p-5">
                         <div className="mb-4 flex items-center gap-4">
                             <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full text-sm font-bold text-black"
                                  style={{background: avatarBytes || myProfile?.avatarHash ? 'transparent' : THEME.online}}>
@@ -1593,15 +1647,17 @@ export default function App() {
                                 {myProfile?.avatarHash ? 'Avatar shared across servers' : 'No avatar yet'}
                             </span>
                         </div>
-                        <label className="mb-1 block text-xs text-muted">Display name</label>
+                        <label htmlFor="profile-name" className="mb-1 block text-xs text-muted">Display name</label>
                         <input
+                            id="profile-name"
                             value={profileName}
                             onChange={(e) => setProfileName(e.target.value)}
                             className="mb-3 w-full rounded-lg bg-surface-1 px-3 py-2 text-sm text-ink outline-none focus:ring-1 focus:ring-accent/50"
                             placeholder="Display name"
                         />
-                        <label className="mb-1 block text-xs text-muted">About</label>
+                        <label htmlFor="profile-about" className="mb-1 block text-xs text-muted">About</label>
                         <textarea
+                            id="profile-about"
                             value={profileAbout}
                             onChange={(e) => setProfileAbout(e.target.value)}
                             rows={2}
@@ -1624,12 +1680,14 @@ export default function App() {
                             </button>
                         </div>
                     </form>
-                </div>
+                </Modal>
             )}
             <DialogHost controller={dialogController}/>
             {notice && (
                 <div
-                    className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-online/30 bg-surface-3 px-3 py-2 text-xs text-online"
+                    role="status"
+                    aria-live="polite"
+                    className={`fixed right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-online/30 bg-surface-3 px-3 py-2 text-xs text-online ${error ? 'bottom-16' : 'bottom-4'}`}
                     onClick={() => setNotice(null)}
                     title="Dismiss"
                 >
@@ -1638,6 +1696,8 @@ export default function App() {
             )}
             {error && (
                 <div
+                    role="alert"
+                    aria-live="assertive"
                     className="fixed bottom-4 right-4 z-50 max-w-sm cursor-pointer rounded-lg border border-danger/30 bg-surface-3 px-3 py-2 text-xs text-danger"
                     onClick={() => setError(null)}
                     title="Dismiss"

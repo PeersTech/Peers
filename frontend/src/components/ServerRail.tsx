@@ -32,6 +32,7 @@ export function ServerRail({servers, dms, activeServer, activeDm, plazaActive, o
                     dmActive ? "bg-accent text-white" : "bg-surface-2 text-ink hover:bg-accent hover:text-white"
                 }`}
                 title="Direct messages"
+                aria-label="Direct messages"
             >
                 <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c.83 0 1.65-.1 2.45-.3l4.7 1.68a.75.75 0 0 0 1-.9l-.92-3.4A9.9 9.9 0 0 0 22 12c0-5.52-4.48-10-10-10zm-3 11a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm3 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm3 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5z"/>
@@ -46,6 +47,7 @@ export function ServerRail({servers, dms, activeServer, activeDm, plazaActive, o
                     plazaActive ? "bg-accent text-white" : "bg-surface-2 text-accent hover:bg-accent hover:text-white"
                 }`}
                 title="Plaza — public channel"
+                aria-label="Plaza — public channel"
             >
                 <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
                     <path d="M12 2a5 5 0 0 0-5 5c0 .6.1 1.2.3 1.7A4.5 4.5 0 0 0 3 13v2a1 1 0 0 0 1 1h2.2a6 6 0 0 0 11.6 0H20a1 1 0 0 0 1-1v-2a4.5 4.5 0 0 0-4.3-4.3c.2-.5.3-1.1.3-1.7a5 5 0 0 0-5-5zm0 2a3 3 0 0 1 3 3c0 .4-.1.8-.2 1.1l-.3.9h-5l-.3-.9A3 3 0 0 1 9 7a3 3 0 0 1 3-3z"/>
@@ -62,6 +64,7 @@ export function ServerRail({servers, dms, activeServer, activeDm, plazaActive, o
                             active ? "bg-accent text-white" : "bg-surface-2 text-ink hover:bg-surface-4"
                         }`}
                         title={s.name + (s.pending ? " (joining…)" : "")}
+                        aria-label={s.name + (s.pending ? " (joining…)" : "")}
                     >
                         {s.name.slice(0, 2).toUpperCase()}
                         {active && <span className="absolute -left-3 h-6 w-1 rounded-full bg-white"/>}
