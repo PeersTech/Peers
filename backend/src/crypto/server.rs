@@ -315,6 +315,17 @@ impl ServerRecord {
             .map(|m| m.role)
     }
 
+    /// Whether `peer_id` may read messages from the channel.
+    pub fn can_read(&self, peer_id: &str, channel: &str) -> bool {
+        let Some(cfg) = self.channels.iter().find(|c| c.name == channel) else {
+            return false;
+        };
+        let Some(member) = self.role_of(peer_id) else {
+            return false;
+        };
+        member >= cfg.read_min
+    }
+
     /// Whether `peer_id` may publish to the channel.
     pub fn can_write(&self, peer_id: &str, channel: &str) -> bool {
         let Some(cfg) = self.channels.iter().find(|c| c.name == channel) else {
@@ -596,7 +607,12 @@ impl ServerView {
             member_count: s.members.len(),
             epoch: s.keys.as_ref().map(|k| k.epoch).unwrap_or(0),
             pending: s.keys.is_none() && s.role_of(me).is_none(),
-            channels: s.channels.clone(),
+            channels: s
+                .channels
+                .iter()
+                .filter(|channel| s.can_read(me, &channel.name))
+                .cloned()
+                .collect(),
             members: s.members.clone(),
         }
     }
@@ -821,10 +837,17 @@ impl SignedMessage {
     }
 
     /// Verifies the signature and that the embedded key matches `from`'s
-    /// peer ID, and that `from` is a member of `rec`.
+    /// peer ID, the message belongs to this server/channel, and the sender
+    /// satisfies the channel write ACL.
     pub fn verify(&self, rec: &ServerRecord) -> Result<()> {
+        if self.server_id != rec.id {
+            return Err(PeersError::ServerNotFound);
+        }
         if rec.role_of(&self.from).is_none() {
             return Err(PeersError::NotInServer);
+        }
+        if !rec.can_write(&self.from, &self.channel) {
+            return Err(PeersError::Forbidden);
         }
         let pk = ed25519::PublicKey::try_from_bytes(&self.pubkey)
             .map_err(|_| PeersError::SnapshotCorrupt)?;
@@ -929,6 +952,8 @@ mod tests {
         assert!(owner.can_write("bob", "general"));
         assert!(!owner.can_write("bob", "admin-only"));
         assert!(owner.can_write("alice", "admin-only"));
+        assert!(!owner.can_read("bob", "admin-only"));
+        assert!(owner.can_read("alice", "admin-only"));
     }
 
     #[test]

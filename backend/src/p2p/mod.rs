@@ -747,17 +747,21 @@ impl Node {
                 num_established,
                 ..
             } => {
-                // Only when the last connection to this peer is gone is any
-                // reservation with it actually lost.
-                if num_established == 0 && self.relay_reservations.remove(&peer_id) {
-                    self.emit(NodeEvent::RelayReservation {
-                        relay_peer: peer_id.to_string(),
-                        active: false,
+                // A peer can have several established connections. Only the
+                // last one closing means it is actually offline; otherwise
+                // the UI would flicker offline whenever a redundant socket
+                // closes.
+                if num_established == 0 {
+                    if self.relay_reservations.remove(&peer_id) {
+                        self.emit(NodeEvent::RelayReservation {
+                            relay_peer: peer_id.to_string(),
+                            active: false,
+                        });
+                    }
+                    self.emit(NodeEvent::PeerDisconnected {
+                        peer_id: peer_id.to_string(),
                     });
                 }
-                self.emit(NodeEvent::PeerDisconnected {
-                    peer_id: peer_id.to_string(),
-                });
             }
             SwarmEvent::ExternalAddrConfirmed { address } => {
                 if self.external_addrs.insert(address.clone()) {
@@ -890,7 +894,18 @@ impl Node {
                     if message.topic == control_hash {
                         return;
                     }
-                    let topic_str = message.topic.to_string();
+                    // Gossipsub exposes only the SHA-256 topic hash on the
+                    // wire. Recover the application topic from the local
+                    // subscription map before dispatching protocol events;
+                    // `TopicHash::to_string()` is the base64 hash, not the
+                    // original `peers/v1/...` name.
+                    let topic_str = self
+                        .topics
+                        .iter()
+                        .find_map(|(name, topic)| (topic.hash() == message.topic).then(|| name.clone()));
+                    let Some(topic_str) = topic_str else {
+                        return;
+                    };
                     // Friend requests are parsed and surfaced as a dedicated
                     // event so the app layer doesn't need to re-parse them.
                     if let Some(_target) = topic_str.strip_prefix(FRIEND_REQUEST_TOPIC_PREFIX) {

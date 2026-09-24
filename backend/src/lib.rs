@@ -884,6 +884,20 @@ async fn subscribe_channel(
     server_id: String,
     channel: String,
 ) -> Result<(), String> {
+    let me = state
+        .identity
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|identity| identity.peer_id.to_string())
+        .ok_or("not unlocked")?;
+    {
+        let servers = state.servers.lock().unwrap();
+        let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
+        if !rec.can_read(&me, &channel) {
+            return Err(PeersError::Forbidden.into());
+        }
+    }
     subscribe_with_relay(&state, channel_topic(&server_id, &channel)).await
 }
 
@@ -1526,24 +1540,43 @@ pub fn run() {
                                         }
                                     }
                                     persist(&state);
-                                    let _ = publish_list(&state, &pn.server_id).await;
+                                    // Tauri event listeners are synchronous. Run the
+                                    // signed-list publish on Tauri's async runtime
+                                    // instead of awaiting inside this callback.
+                                    let publish_handle = app_handle.clone();
+                                    let publish_server_id = pn.server_id.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        let state = publish_handle.state::<AppState>();
+                                        let _ = publish_list(&state, &publish_server_id).await;
+                                    });
                                 }
                             }
                         }
                         return;
                     }
                     // Signed channel messages: `peers/v1/ch/{server}/{channel}`.
-                    if let Some((server_id, _channel)) = topic
+                    if let Some((server_id, channel)) = topic
                         .strip_prefix("peers/v1/ch/")
                         .and_then(|rest| rest.split_once('/'))
                     {
                         if let Ok(msg) = serde_json::from_slice::<SignedMessage>(&data) {
+                            if msg.server_id != server_id || msg.channel != channel {
+                                return;
+                            }
                             let state = app_handle.state::<AppState>();
                             let ok = {
+                                let me = state
+                                    .identity
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .map(|identity| identity.peer_id.to_string());
                                 let servers = state.servers.lock().unwrap();
-                                match servers.get(server_id) {
-                                    Some(rec) => msg.verify(rec).is_ok(),
-                                    None => false,
+                                match (me, servers.get(server_id)) {
+                                    (Some(me), Some(rec)) => {
+                                        msg.verify(rec).is_ok() && rec.can_read(&me, &msg.channel)
+                                    }
+                                    _ => false,
                                 }
                             };
                             if ok {
