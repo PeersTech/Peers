@@ -102,21 +102,42 @@ impl Session {
 
     /// Key for the next outgoing message, then advances the counter.
     pub fn next_key(&mut self) -> Result<[u8; 32]> {
-        let key = self.key_at(self.counter)?;
+        let key = self.outgoing_key_at(self.counter)?;
         self.counter += 1;
         Ok(key)
     }
 
+    /// Key for an outgoing message at `n`.
+    pub fn outgoing_key_at(&self, n: u64) -> Result<[u8; 32]> {
+        self.key_at_with_direction(n, b"out")
+    }
+
+    /// Key for an incoming message at `n`. Direction separation prevents
+    /// both peers from reusing the same key and nonce when their counters
+    /// happen to be equal.
+    pub fn incoming_key_at(&self, n: u64) -> Result<[u8; 32]> {
+        self.key_at_with_direction(n, b"in")
+    }
+
+    /// Backwards-compatible alias for the outgoing derivation used by older
+    /// callers and tests.
+    pub fn key_at(&self, n: u64) -> Result<[u8; 32]> {
+        self.outgoing_key_at(n)
+    }
+
     /// Key for message `n`. Pure with respect to `n` — does not mutate
     /// state, so failed opens and out-of-order deliveries are harmless.
-    pub fn key_at(&self, n: u64) -> Result<[u8; 32]> {
+    fn key_at_with_direction(&self, n: u64, direction: &[u8]) -> Result<[u8; 32]> {
         if n > MAX_SESSION_GAP {
             return Err(PeersError::GapTooLarge);
         }
         let chain = self.chain_at(n);
         let (_, hk) = Hkdf::<Sha256>::extract(Some(&n.to_be_bytes()), &chain);
+        let mut info = Vec::with_capacity(b"peers/v1/msg/".len() + direction.len());
+        info.extend_from_slice(b"peers/v1/msg/");
+        info.extend_from_slice(direction);
         let mut key = [0u8; 32];
-        hk.expand(b"peers/v1/msg", &mut key)
+        hk.expand(&info, &mut key)
             .map_err(|e| PeersError::Crypto(format!("hkdf message key: {e}")))?;
         Ok(key)
     }
@@ -169,9 +190,21 @@ mod tests {
         let sb = Session::new(&b, a_pub).unwrap();
         for i in 0..25u64 {
             let ka = sa.next_key().unwrap();
-            let kb = sb.key_at(i).unwrap();
+            let kb = sb.incoming_key_at(i).unwrap();
             assert_eq!(ka, kb, "key mismatch at seq {i}");
         }
+    }
+
+    #[test]
+    fn directions_use_distinct_keys() {
+        let (a, b, a_pub, b_pub) = pair();
+        let mut sa = Session::new(&a, b_pub).unwrap();
+        let mut sb = Session::new(&b, a_pub).unwrap();
+        let a_to_b = sa.next_key().unwrap();
+        let b_to_a = sb.next_key().unwrap();
+        assert_ne!(a_to_b, b_to_a);
+        assert_eq!(a_to_b, sb.incoming_key_at(0).unwrap());
+        assert_eq!(b_to_a, sa.incoming_key_at(0).unwrap());
     }
 
     #[test]

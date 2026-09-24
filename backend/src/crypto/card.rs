@@ -64,6 +64,18 @@ impl PeerCard {
         }
         Ok(())
     }
+
+    /// Verifies the card and binds it to the authenticated libp2p peer id.
+    pub fn verify_for_peer(&self, peer_id: &str) -> Result<()> {
+        self.verify()?;
+        let pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&self.ed_pub)
+            .map_err(|e| PeersError::Crypto(format!("card pubkey: {e}")))?;
+        let derived = libp2p::PeerId::from_public_key(&pk.into()).to_string();
+        if derived != peer_id {
+            return Err(PeersError::Crypto("card peer id mismatch".into()));
+        }
+        Ok(())
+    }
 }
 
 /// Self-authenticating display profile: a display name, an "about" line and
@@ -378,6 +390,14 @@ mod tests {
         let (a, _b) = pair();
         let card = PeerCard::sign(&a).unwrap();
         card.verify().unwrap();
+    }
+
+    #[test]
+    fn card_binds_to_peer_id() {
+        let (a, _) = pair();
+        let card = PeerCard::sign(&a).unwrap();
+        card.verify_for_peer(&a.peer_id.to_string()).unwrap();
+        assert!(card.verify_for_peer("12D3KooW-invalid").is_err());
     }
 
     #[test]

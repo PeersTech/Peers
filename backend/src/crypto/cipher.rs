@@ -43,7 +43,7 @@ pub fn open(session: &mut Session, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>>
         return Err(PeersError::BadCipher);
     }
     let seq = u64::from_be_bytes(sealed[..8].try_into().map_err(|_| PeersError::BadCipher)?);
-    let key = session.key_at(seq)?;
+    let key = session.incoming_key_at(seq)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let nf = nonce_for(seq);
     let nonce = Nonce::from_slice(&nf);

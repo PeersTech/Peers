@@ -214,6 +214,8 @@ async fn add_contact(state: State<'_, AppState>, peer_id: String) -> Result<(), 
     }
     // Their DM topic is their peer id; subscribing is how we receive from them.
     subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::DialPeer(peer)).await?;
     Ok(())
 }
 
@@ -237,25 +239,38 @@ async fn send_friend_request(
     if peer == me.peer_id {
         return Err("cannot send a friend request to yourself".into());
     }
-    // Include our profile in the request so the recipient knows who we are.
-    let profile = state.profile.lock().unwrap();
+    // Include our profile and identity card in the request so the recipient
+    // can verify us and establish a DM key without a prior server encounter.
+    let (display_name, avatar_hash) = {
+        let profile = state.profile.lock().unwrap();
+        (
+            profile
+                .as_ref()
+                .map(|p| p.display_name.clone())
+                .unwrap_or_default(),
+            profile.as_ref().and_then(|p| p.avatar_hash.clone()),
+        )
+    };
     let envelope = crate::p2p::FriendRequestEnvelope {
-        display_name: profile
-            .as_ref()
-            .map(|p| p.display_name.clone())
-            .unwrap_or_default(),
-        avatar_hash: profile.as_ref().and_then(|p| p.avatar_hash.clone()),
+        kind: "request".to_string(),
+        display_name,
+        avatar_hash,
+        card: PeerCard::sign(&me).map_err(|e| e.to_string())?,
     };
     let payload = serde_json::to_vec(&envelope)
         .map_err(|e| format!("failed to serialize friend request: {e}"))?;
-    // Publish to the target's friend-request topic.
+    // Publish to the target's friend-request topic and listen on our own
+    // topic for the signed acceptance that completes key exchange.
     let topic = format!("{FRIEND_REQUEST_TOPIC_PREFIX}{peer}");
+    subscribe_with_relay(&state, format!("{FRIEND_REQUEST_TOPIC_PREFIX}{me.peer_id}")).await?;
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Publish { topic, data: payload })
         .await?;
     // Also subscribe to their DM topic so we get their reply once they accept.
     subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::DialPeer(peer)).await?;
     Ok(())
 }
 
@@ -277,16 +292,26 @@ async fn accept_friend(state: State<'_, AppState>, peer_id: String) -> Result<()
     }
     // Subscribe to the requester's DM topic so we receive their messages.
     subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::DialPeer(peer)).await?;
     // Send a confirmation back to the requester's request topic so they know
     // we accepted and should also subscribe to our DM topic (they likely
     // already did when sending the request, but this closes the loop).
-    let profile = state.profile.lock().unwrap();
+    let (display_name, avatar_hash) = {
+        let profile = state.profile.lock().unwrap();
+        (
+            profile
+                .as_ref()
+                .map(|p| p.display_name.clone())
+                .unwrap_or_default(),
+            profile.as_ref().and_then(|p| p.avatar_hash.clone()),
+        )
+    };
     let envelope = crate::p2p::FriendRequestEnvelope {
-        display_name: profile
-            .as_ref()
-            .map(|p| p.display_name.clone())
-            .unwrap_or_default(),
-        avatar_hash: profile.as_ref().and_then(|p| p.avatar_hash.clone()),
+        kind: "accept".to_string(),
+        display_name,
+        avatar_hash,
+        card: PeerCard::sign(&me).map_err(|e| e.to_string())?,
     };
     let payload = serde_json::to_vec(&envelope)
         .map_err(|e| format!("failed to serialize friend accept: {e}"))?;
@@ -310,6 +335,9 @@ async fn init_from_phrase(
 ) -> Result<IdentityInfo, String> {
     if state.identity.lock().unwrap().is_some() {
         return Err("already unlocked".into());
+    }
+    if state.keystore.exists() {
+        return Err("an identity already exists; unlock it instead of replacing it".into());
     }
     let id = state.keystore.create_from_phrase(&phrase)?;
     finish_unlock(state, app, id, &phrase).await
@@ -430,15 +458,25 @@ async fn finish_unlock(
                     from_peer,
                     from_name,
                     from_avatar,
+                    from_card,
+                    accepted,
                 } => {
-                    let _ = app2.emit(
-                        "friend://request",
-                        serde_json::json!({
-                            "peerId": from_peer,
-                            "displayName": from_name,
-                            "avatarHash": from_avatar,
-                        }),
-                    );
+                    let st = app2.state::<AppState>();
+                    if from_card.verify_for_peer(from_peer).is_ok() {
+                        if let Some(dir) = st.dir.lock().unwrap().as_mut() {
+                            dir.remember_contact(from_peer, from_card);
+                        }
+                        if !accepted {
+                            let _ = app2.emit(
+                                "friend://request",
+                                serde_json::json!({
+                                    "peerId": from_peer,
+                                    "displayName": from_name,
+                                    "avatarHash": from_avatar,
+                                }),
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -566,6 +604,7 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.identity.lock().unwrap() = None;
     *state.history.lock().unwrap() = History::default();
     *state.presence.lock().unwrap() = HashSet::new();
+    *state.addrs.lock().unwrap() = Vec::new();
     *state.profile.lock().unwrap() = None;
     *state.profiles.lock().unwrap() = HashMap::new();
     *state.plaza.lock().unwrap() = VecDeque::new();
@@ -619,6 +658,7 @@ async fn mutate_server(
             return Err(PeersError::NotOwner.into());
         }
         f(rec)?;
+        rec.revision = rec.revision.saturating_add(1);
     }
     publish_list(state, server_id).await?;
     persist(state);
@@ -854,9 +894,20 @@ async fn set_channel(
 #[tauri::command]
 async fn leave_server(state: State<'_, AppState>, server_id: String) -> Result<(), String> {
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    let channels = {
+        let servers = state.servers.lock().unwrap();
+        servers
+            .get(&server_id)
+            .map(|rec| rec.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
     state.servers.lock().unwrap().remove(&server_id);
     node.send(NodeCommand::Unsubscribe(server_topic(&server_id)))
         .await?;
+    for channel in channels {
+        node.send(NodeCommand::Unsubscribe(channel_topic(&server_id, &channel)))
+            .await?;
+    }
     persist(&state);
     Ok(())
 }
@@ -1092,10 +1143,11 @@ async fn import_snapshot(
         for msg in messages {
             let key = format!("{server_id}/{}", msg.channel);
             let list = history.server.entry(key).or_default();
-            if list.iter().any(|m| m.ts == msg.ts && m.from == msg.from) {
+            if list.iter().any(|m| m.sig == msg.sig) {
                 continue;
             }
             list.push(msg);
+            list.sort_by_key(|m| m.ts);
             imported += 1;
         }
         imported
@@ -1426,7 +1478,11 @@ pub fn run() {
                                                 .members
                                                 .iter()
                                                 .filter_map(|m| {
-                                                    m.card.clone().map(|c| (m.peer_id.clone(), c))
+                                                    m.card.clone().filter_map(|c| {
+                                                        c.verify_for_peer(&m.peer_id)
+                                                            .ok()
+                                                            .map(|_| (m.peer_id.clone(), c))
+                                                    })
                                                 })
                                                 .collect();
                                             // ...and every verified profile too.
@@ -1477,6 +1533,11 @@ pub fn run() {
                                 let _ = app_handle.emit("server://list", v);
                             }
                         } else if let Ok(notice) = serde_json::from_slice::<JoinNotice>(&data) {
+                            if notice.peer_id != from
+                                || notice.card.verify_for_peer(&from).is_err()
+                            {
+                                return;
+                            }
                             let state = app_handle.state::<AppState>();
                             // Cache the joiner's card so anyone with the notice
                             // can DM them; only the owner acts on the request.

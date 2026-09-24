@@ -75,6 +75,9 @@ pub enum PeersError {
     #[error("server key epoch is unknown")]
     UnknownEpoch,
 
+    #[error("server list revision is stale")]
+    StaleRevision,
+
     #[error("you are not allowed to do that in this channel")]
     Forbidden,
 

@@ -64,7 +64,9 @@ pub struct ListPayload {
     pub version: u8,
     pub server_id: String,
     pub epoch: u64,
-    /// Key that produced `sig`; must equal the `next_pub` we knew.
+    /// Monotonic revision for every owner-approved state change.
+    #[serde(default)]
+    pub revision: u64,
     pub signing_pub: [u8; 32],
     /// Key that will sign the next list (after the next rotation).
     pub next_pub: [u8; 32],
@@ -228,6 +230,8 @@ pub struct ServerRecord {
     pub keys: Option<ServerKeys>,
     /// The key we last verified; lists must be signed by it.
     pub known_pub: [u8; 32],
+    /// Highest owner-signed list revision applied by this peer.
+    pub revision: u64,
     pub members: Vec<Member>,
     pub channels: Vec<ChannelConfig>,
 }
@@ -257,6 +261,7 @@ impl ServerRecord {
             version: 1,
             server_id: self.id.clone(),
             epoch: keys.epoch,
+            revision: self.revision,
             signing_pub: keys.signing_pub(),
             next_pub: keys.next_pub(),
             members: self.members.clone(),
@@ -274,9 +279,13 @@ impl ServerRecord {
         if list.payload.signing_pub != self.known_pub {
             return Err(PeersError::UnknownEpoch);
         }
+        if list.payload.revision < self.revision {
+            return Err(PeersError::StaleRevision);
+        }
         Self::verify_sig(&self.known_pub, &list.payload, &list.sig)?;
         self.members = list.payload.members.clone();
         self.channels = list.payload.channels.clone();
+        self.revision = list.payload.revision;
         self.known_pub = list.payload.next_pub;
         Ok(())
     }
@@ -355,6 +364,8 @@ pub struct PersistedServer {
     pub name: String,
     pub owner_peer: String,
     pub known_pub: Vec<u8>,
+    #[serde(default)]
+    pub revision: u64,
     pub members: Vec<Member>,
     pub channels: Vec<ChannelConfig>,
     pub keys: Option<PersistedKeys>,
@@ -368,6 +379,7 @@ impl ServerRecord {
             name: self.name.clone(),
             owner_peer: self.owner_peer.clone(),
             known_pub: self.known_pub.to_vec(),
+            revision: self.revision,
             members: self.members.clone(),
             channels: self.channels.clone(),
             keys: self.keys.as_ref().map(|k| k.to_persisted()),
@@ -383,6 +395,7 @@ impl ServerRecord {
             name: p.name.clone(),
             owner_peer: p.owner_peer.clone(),
             known_pub,
+            revision: p.revision,
             members: p.members.clone(),
             channels: p.channels.clone(),
             keys: match &p.keys {
@@ -487,6 +500,7 @@ impl ServerRecord {
         }];
         Self {
             known_pub: keys.signing_pub(),
+            revision: 0,
             keys: Some(keys),
             id,
             name,
@@ -505,6 +519,7 @@ impl ServerRecord {
             owner_peer: invite.payload.owner_peer.clone(),
             keys: None,
             known_pub: invite.payload.next_pub,
+            revision: 0,
             members: Vec::new(),
             channels: Vec::new(),
         }
@@ -930,6 +945,17 @@ mod tests {
             joiner.verify_list(&list0),
             Err(PeersError::UnknownEpoch)
         ));
+    }
+
+    #[test]
+    fn stale_same_epoch_list_is_rejected() {
+        let mut owner = rec("revision");
+        let old = owner.signed_list().unwrap();
+        owner.revision = 1;
+        let new = owner.signed_list().unwrap();
+        let mut joiner = ServerRecord::new_joined(&owner.invite().unwrap());
+        joiner.verify_list(&new).unwrap();
+        assert!(matches!(joiner.verify_list(&old), Err(PeersError::StaleRevision)));
     }
 
     #[test]

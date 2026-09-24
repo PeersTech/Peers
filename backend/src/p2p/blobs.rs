@@ -6,7 +6,9 @@ use libp2p::request_response::Codec;
 use libp2p::StreamProtocol;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
 use std::io;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub const BLOB_PROTOCOL: StreamProtocol = StreamProtocol::new("/peers/blob/1.0.0");
@@ -18,27 +20,80 @@ pub const MAX_BLOB_SIZE: usize = 64 * 1024;
 pub type BlobHash = [u8; 32];
 
 /// Local seed cache: content-addressed by SHA-256. Holds only ciphertext
-/// in production use.
-#[derive(Clone, Default)]
+/// in production use and persists blobs under the platform config directory.
+#[derive(Clone)]
 pub struct BlobStore {
     inner: Arc<Mutex<HashMap<BlobHash, Vec<u8>>>>,
+    root: Option<PathBuf>,
 }
 
 impl BlobStore {
     pub fn new() -> Self {
-        Self::default()
+        let root = dirs::config_dir()
+            .or_else(dirs::data_local_dir())
+            .map(|base| base.join("peers").join("blobs"))
+            .filter(|path| fs::create_dir_all(path).is_ok());
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            root,
+        }
+    }
+
+    /// In-memory store for tests and callers that explicitly do not want disk.
+    pub fn memory() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            root: None,
+        }
     }
 
     /// Stores data and returns its hash. Duplicate content dedupes.
     pub fn put(&self, data: &[u8]) -> BlobHash {
         let hash: BlobHash = Sha256::digest(data).into();
         self.inner.lock().unwrap().insert(hash, data.to_vec());
+        if let Some(root) = &self.root {
+            let path = root.join(hex_name(&hash));
+            let _ = fs::write(path, data);
+        }
         hash
     }
 
     pub fn get(&self, hash: &BlobHash) -> Option<Vec<u8>> {
-        self.inner.lock().unwrap().get(hash).cloned()
+        if let Some(data) = self.inner.lock().unwrap().get(hash).cloned() {
+            return Some(data);
+        }
+        let root = self.root.as_ref()?;
+        let data = fs::read(root.join(hex_name(hash))).ok()?;
+        self.inner.lock().unwrap().insert(*hash, data.clone());
+        Some(data)
     }
+
+    /// Hashes already persisted on disk, used to restore provider state after
+    /// a process restart.
+    pub fn hashes(&self) -> Vec<BlobHash> {
+        let Some(root) = &self.root else { return Vec::new() };
+        let Ok(entries) = fs::read_dir(root) else { return Vec::new() };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.strip_suffix(".blob")?.to_string();
+                parse_hex_name(&name)
+            })
+            .collect()
+    }
+}
+
+fn hex_name(hash: &BlobHash) -> String {
+    format!("{}.blob", hash.iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+fn parse_hex_name(name: &str) -> Option<BlobHash> {
+    if name.len() != 64 { return None; }
+    let mut hash = [0u8; 32];
+    for (i, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&name[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(hash)
 }
 
 /// Frame: [u32 BE length][payload].
@@ -127,7 +182,7 @@ mod tests {
 
     #[test]
     fn dedup_by_hash() {
-        let store = BlobStore::new();
+        let store = BlobStore::memory();
         let h1 = store.put(b"same content");
         let h2 = store.put(b"same content");
         assert_eq!(h1, h2);

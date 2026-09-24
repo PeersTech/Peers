@@ -257,8 +257,12 @@ impl RelayCaps {
         }
         if serve_relay {
             Self::node()
-        } else {
+        } else if super::battery_relay_ok() {
             Self::citizen()
+        } else {
+            // A battery-powered client that is not charging must not become a
+            // relay by accident. Dedicated --node processes remain explicit.
+            Self::off()
         }
     }
 }

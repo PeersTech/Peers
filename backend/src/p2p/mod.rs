@@ -2,6 +2,7 @@ pub mod behaviour;
 pub mod blobs;
 pub mod bootstrap;
 
+use crate::crypto::card::PeerCard;
 use crate::crypto::identity::Identity;
 use crate::error::{PeersError, Result};
 use behaviour::Behaviour;
@@ -9,6 +10,7 @@ use blobs::{BlobHash, BlobStore};
 use futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
 use libp2p::multiaddr::Protocol;
+use libp2p::dial_opts::DialOpts;
 use libp2p::request_response::{
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
@@ -44,6 +46,11 @@ const OBSERVED_CONFIRMATIONS: usize = 3;
 /// new address on every identify exchange cannot grow the map without bound.
 const MAX_OBSERVED_TRACKED: usize = 32;
 
+/// A public relay must not let arbitrary peers turn it into an unbounded
+/// topic relay. Only the application namespace is eligible.
+const MAX_RELAY_TOPICS: usize = 256;
+const MAX_RELAY_TOPIC_LEN: usize = 256;
+
 /// Gossip topic shared by relay nodes and clients. Clients publish tiny
 /// "please mesh topic X for me" notices on it so always-on relay nodes
 /// know which server/channel/DM topics they must subscribe to (and thus
@@ -63,12 +70,14 @@ struct RelayControl {
     topic: String,
 }
 
-/// A friend request envelope published to `peers/v1/fr/<target_peer_id>`.
+/// A friend request or acceptance published to `peers/v1/fr/<peer_id>`.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct FriendRequestEnvelope {
-    display_name: String,
+pub(crate) struct FriendRequestEnvelope {
+    pub(crate) kind: String,
+    pub(crate) display_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    avatar_hash: Option<String>,
+    pub(crate) avatar_hash: Option<String>,
+    pub(crate) card: PeerCard,
 }
 
 /// Commands sent from the app layer into the swarm loop.
@@ -91,6 +100,8 @@ pub enum NodeCommand {
     Announce(Vec<Multiaddr>),
     /// Dial bootstrap multiaddrs, seed the DHT routing table, bootstrap.
     Bootstrap(Vec<Multiaddr>),
+    /// Dial a peer through addresses already learned by identify/Kademlia.
+    DialPeer(PeerId),
     /// Dial a single peer directly (e.g. the owner behind an invite).
     Dial(Multiaddr),
     /// Reserve a circuit slot on a relay node: `listen_on(addr + /p2p-circuit)`
@@ -173,6 +184,8 @@ pub enum NodeEvent {
         from_peer: String,
         from_name: String,
         from_avatar: Option<String>,
+        from_card: PeerCard,
+        accepted: bool,
     },
     /// AutoNAT reached (or revised) a verdict on whether peers can dial us.
     /// `"public"`, `"private"` or `"unknown"`.
@@ -292,6 +305,14 @@ pub fn spawn(identity: Identity, serve_relay: bool) -> Result<NodeHandle> {
     Ok(NodeHandle { tx, events })
 }
 
+fn valid_relay_topic(topic: &str) -> bool {
+    topic.len() <= MAX_RELAY_TOPIC_LEN
+        && (topic.starts_with("peers/v1/srv/")
+            || topic.starts_with("peers/v1/ch/")
+            || topic.starts_with("peers/v1/fr/")
+            || topic == crate::crypto::server::PLAZA_TOPIC)
+}
+
 /// Hex-encodes a blob hash.
 pub fn hex_hash(h: &BlobHash) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
@@ -323,6 +344,8 @@ struct Node {
     in_flight: HashSet<BlobHash>,
     /// Hashes we already announced as providers.
     announced: HashSet<BlobHash>,
+    /// Topics requested through the public relay-control topic.
+    relay_topics: HashSet<String>,
     /// Addresses learned from DHT routing updates + identify.
     peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     /// Relays we currently hold a circuit reservation with. A set, not a
@@ -420,15 +443,18 @@ impl Node {
         mut cmds: mpsc::Receiver<NodeCommand>,
         events: broadcast::Sender<NodeEvent>,
     ) {
+        let blobs = BlobStore::new();
+        let announced = blobs.hashes().into_iter().collect();
         let mut node = Node {
             swarm,
-            blobs: BlobStore::new(),
+            blobs,
             topics: HashMap::new(),
             pending_fetches: HashMap::new(),
             pending_codes: HashMap::new(),
             fetch_requests: HashMap::new(),
             in_flight: HashSet::new(),
-            announced: HashSet::new(),
+            announced,
+            relay_topics: HashSet::new(),
             peer_addresses: HashMap::new(),
             relay_reservations: HashSet::new(),
             external_addrs: HashSet::new(),
@@ -597,6 +623,9 @@ impl Node {
                 }
                 let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
             }
+            NodeCommand::DialPeer(peer) => {
+                let _ = self.swarm.dial(DialOpts::peer_id(peer).build());
+            }
             NodeCommand::Dial(addr) => {
                 let _ = self.swarm.dial(addr);
             }
@@ -638,6 +667,7 @@ impl Node {
                 }
             }
             NodeCommand::Unsubscribe(topic_name) => {
+                self.relay_topics.remove(&topic_name);
                 if let Some(topic) = self.topics.remove(&topic_name) {
                     self.swarm.behaviour_mut().gossipsub.unsubscribe(&topic);
                 }
@@ -681,6 +711,13 @@ impl Node {
                         }),
                     }
                 } else {
+                    // A persisted blob may have lost its provider record while
+                    // the process was offline; refresh the DHT announcement.
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .start_providing(kad::RecordKey::new(&hash));
                     self.emit(NodeEvent::BlobParked {
                         hash: hex_hash(&hash),
                     });
@@ -876,15 +913,24 @@ impl Node {
                     // peers that only meet through them still gossip.
                     if self.relay && message.topic == control_hash {
                         if let Ok(ctrl) = serde_json::from_slice::<RelayControl>(&message.data) {
-                            if ctrl.op == "subscribe" && !ctrl.topic.is_empty() {
-                                let topic = Sha256Topic::new(ctrl.topic.clone());
-                                match self.swarm.behaviour_mut().gossipsub.subscribe(&topic) {
-                                    Ok(_) => {
-                                        self.topics.insert(ctrl.topic.clone(), topic);
+                            if ctrl.op == "subscribe" && valid_relay_topic(&ctrl.topic) {
+                                if self.relay_topics.len() >= MAX_RELAY_TOPICS
+                                    && !self.relay_topics.contains(&ctrl.topic)
+                                {
+                                    self.emit(NodeEvent::Error {
+                                        message: "relay topic limit reached".into(),
+                                    });
+                                } else {
+                                    let topic = Sha256Topic::new(ctrl.topic.clone());
+                                    match self.swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+                                        Ok(_) => {
+                                            self.relay_topics.insert(ctrl.topic.clone());
+                                            self.topics.insert(ctrl.topic.clone(), topic);
+                                        }
+                                        Err(e) => self.emit(NodeEvent::Error {
+                                            message: format!("relay subscribe {}: {e}", ctrl.topic),
+                                        }),
                                     }
-                                    Err(e) => self.emit(NodeEvent::Error {
-                                        message: format!("relay subscribe {}: {e}", ctrl.topic),
-                                    }),
                                 }
                             }
                         }
@@ -913,10 +959,16 @@ impl Node {
                             if let Ok(req) =
                                 serde_json::from_slice::<FriendRequestEnvelope>(&message.data)
                             {
+                                let from_string = from.to_string();
+                                if req.card.verify_for_peer(&from_string).is_err() {
+                                    return;
+                                }
                                 self.emit(NodeEvent::FriendRequest {
-                                    from_peer: from.to_string(),
+                                    from_peer: from_string,
                                     from_name: req.display_name,
                                     from_avatar: req.avatar_hash,
+                                    from_card: req.card,
+                                    accepted: req.kind == "accept",
                                 });
                             }
                         }
@@ -990,6 +1042,11 @@ impl Node {
                         Ok(kad::GetProvidersOk::FoundProviders { providers, .. }) => {
                             if let Some(peer) = providers.into_iter().next() {
                                 self.pending_codes.remove(&id);
+                                // The provider record identifies the peer, and the
+                                // routing table supplies addresses learned through
+                                // identify/Kademlia. Dial it now so the UI can
+                                // establish a direct connection after verification.
+                                let _ = self.swarm.dial(DialOpts::peer_id(peer).build());
                                 // The code only *locates* a peer. Whoever answers
                                 // still has to prove who they are before the user
                                 // accepts them — see crypto::code.
@@ -1090,6 +1147,14 @@ mod status_tests {
     #[test]
     fn reachability_unknown_when_nothing_known() {
         assert_eq!(reachability(0, 0, Nat::Unknown), "unknown");
+    }
+
+    #[test]
+    fn relay_only_accepts_application_topics() {
+        assert!(valid_relay_topic("peers/v1/ch/server/general"));
+        assert!(valid_relay_topic(crate::crypto::server::PLAZA_TOPIC));
+        assert!(!valid_relay_topic("peers/v1/relay"));
+        assert!(!valid_relay_topic("other/v1/ch/server/general"));
     }
 
     /// AutoNAT actually dialed us and got through, so this is not a guess.

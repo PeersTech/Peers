@@ -164,8 +164,17 @@ impl StoreHandle {
     pub fn load(&self) -> Result<PersistedState> {
         let raw = fs::read(&self.path)?;
         let file: StoreFile = serde_json::from_slice(&raw)?;
+        if file.version != 1 {
+            return Err(PeersError::Keystore(format!(
+                "state version {} is not supported",
+                file.version
+            )));
+        }
         let nonce = decode(&file.nonce)?;
         let sealed = decode(&file.sealed)?;
+        if nonce.len() != 24 || sealed.is_empty() {
+            return Err(PeersError::Keystore("malformed encrypted state".into()));
+        }
         let plain = self.decrypt(&nonce, &sealed)?;
         Ok(serde_json::from_slice(&plain)?)
     }

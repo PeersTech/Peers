@@ -147,6 +147,9 @@ impl Keystore {
         let salt = base64_decode(&file.kdf.salt)?;
         let nonce = base64_decode(&file.nonce)?;
         let sealed = base64_decode(&file.sealed)?;
+        if salt.len() != SALT_LEN || nonce.len() != 24 || sealed.is_empty() {
+            return Err(PeersError::Keystore("malformed encrypted file".into()));
+        }
 
         let params = Params::new(
             file.kdf.memory,
