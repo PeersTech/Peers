@@ -658,6 +658,11 @@ async fn mutate_server(
             return Err(PeersError::NotOwner.into());
         }
         f(rec)?;
+        if let Some(keys) = rec.keys.as_ref() {
+            // The owner is also a verifier after restart; keep its trusted
+            // chain head aligned with the keys it just mutated.
+            rec.known_pub = keys.signing_pub();
+        }
         rec.revision = rec.revision.saturating_add(1);
     }
     publish_list(state, server_id).await?;
