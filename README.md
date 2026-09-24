@@ -150,7 +150,7 @@ Trigger a manual build or release anytime from the **Actions** tab.
 - [x] **M5** — Channels + roles: ACLs, live bindings, UI wiring
 - [x] **M6** — Snapshots: owner-signed history export/import
 - [x] **M6.5** — Persistence, presence, deterministic invite dialing
-- [ ] **M7** — Packaging + open-source release (installers build in CI; release not cut yet)
+- [~] **M7** — Packaging + open-source release (MIT and release workflow ready; no release tag published yet)
 
 ### Node network (international chat — see [`PLAN.md`](PLAN.md))
 
