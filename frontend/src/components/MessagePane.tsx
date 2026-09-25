@@ -75,17 +75,37 @@ function MentionComposer({
     placeholder,
     replyTo,
     onCancelReply,
+    draftKey,
 }: {
     members: Contact[];
     onSend: (text: string) => void;
     placeholder: string;
     replyTo?: UiMessage;
     onCancelReply: () => void;
+    draftKey: string;
 }) {
     const [value, setValue] = useState("");
     const [query, setQuery] = useState<{at: number; term: string} | null>(null);
     const [sel, setSel] = useState(0);
     const taRef = useRef<HTMLTextAreaElement>(null);
+
+    useEffect(() => {
+        try {
+            setValue(window.localStorage.getItem(`peers-draft:${draftKey}`) ?? "");
+        } catch {
+            setValue("");
+        }
+        setQuery(null);
+    }, [draftKey]);
+
+    useEffect(() => {
+        try {
+            if (value) window.localStorage.setItem(`peers-draft:${draftKey}`, value);
+            else window.localStorage.removeItem(`peers-draft:${draftKey}`);
+        } catch {
+            // Draft persistence is best effort.
+        }
+    }, [draftKey, value]);
 
     const mentions = useMemo(() => parseMentions(value, members), [value, members]);
     const segs = useMemo(() => splitText(value, mentions), [value, mentions]);
@@ -498,6 +518,7 @@ export function MessagePane({
                 placeholder={`Message #${channelName}`}
                 replyTo={replyTo}
                 onCancelReply={() => setReplyTo(undefined)}
+                draftKey={channelName}
             />
         </div>
     );
