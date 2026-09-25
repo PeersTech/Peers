@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useRef, useState, type KeyboardEvent} from "react";
 import {
-    colorFor, memberName, parseMentions, shortId, type Contact, type Mention, type ServerMessageKind,
+    bytesToBase64, colorFor, memberName, parseMentions, shortId, type Contact, type Mention, type ServerMessageKind,
     type UiMessage,
 } from "../lib/api";
 
@@ -24,6 +24,7 @@ interface Props {
     attachmentsEnabled?: boolean;
     onAttach: (file: File) => void;
     onDownloadAttachment: (hash: string, name: string) => void;
+    getAttachmentData?: (hash: string) => number[] | undefined;
     uploadingAttachment?: string | null;
     outboxPending?: number;
     onRetryOutbox?: () => void;
@@ -298,7 +299,7 @@ function MentionComposer({
 }
 
 export function MessagePane({
-    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, uploadingAttachment, outboxPending = 0, onRetryOutbox, avatarFor,
+    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, getAttachmentData, uploadingAttachment, outboxPending = 0, onRetryOutbox, avatarFor,
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const canAct = actionsEnabled ?? false;
@@ -444,6 +445,12 @@ export function MessagePane({
                     const firstInBlock = i === 0 || displayedMessages[i - 1].author !== m.author;
                     const mine = m.mine;
                     const pinged = m.mentionsMe && !mine;
+                    const attachmentData = m.attachmentHash && m.attachmentMime?.startsWith("image/")
+                        ? getAttachmentData?.(m.attachmentHash)
+                        : undefined;
+                    const preview = attachmentData
+                        ? `data:${m.attachmentMime};base64,${bytesToBase64(attachmentData)}`
+                        : undefined;
                     return (
                         <div
                             key={m.id}
@@ -526,7 +533,11 @@ export function MessagePane({
                                                     title={`${m.attachmentName || "attachment"} · ${m.attachmentEncrypted ? "E2E encrypted attachment" : "DHT attachment; not E2E encrypted"}`}
                                                     className="mt-2 flex w-full items-center gap-2 rounded border border-white/20 bg-black/10 px-2 py-1 text-left text-xs hover:bg-black/20"
                                                 >
-                                                    <span>▧</span>
+                                                    {preview ? (
+                                                        <img src={preview} alt={m.attachmentName || "image attachment"} className="max-h-48 max-w-full rounded object-contain" />
+                                                    ) : (
+                                                        <span>▧</span>
+                                                    )}
                                                     <span className="min-w-0 flex-1 truncate">{m.attachmentName || "attachment"}</span>
                                                     <span className="opacity-70">{m.attachmentEncrypted ? "E2E encrypted" : "DHT · not E2E"}</span>
                                                     <span className="opacity-70">{m.attachmentSize ? `${Math.ceil((m.attachmentSize || 0) / 1024)} KiB` : ""}</span>

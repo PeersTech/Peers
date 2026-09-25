@@ -2095,6 +2095,7 @@ export default function App() {
                 attachmentsEnabled={Boolean((server && activeChannel) || activeDm)}
                 onAttach={(file) => void uploadAttachment(file)}
                 onDownloadAttachment={downloadAttachment}
+                getAttachmentData={(hash) => blobs[hash]}
                 uploadingAttachment={uploadingAttachment}
                 outboxPending={net?.outboxPending ?? 0}
                 onRetryOutbox={retryQueued}

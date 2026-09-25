@@ -126,13 +126,24 @@
 
 ### Remaining roadmap
 
-- Rust compile, test, clippy, and multi-network verification
+- Rust compile, test, clippy, and multi-network verification — deferred by user instruction
 - Multi-device state synchronization
 - Directory client discovery integration
-- Larger channel attachments with an explicit privacy model
-- Calls and plugin interfaces
+- Larger server-channel attachments with an explicit privacy model
+- Actual WebRTC voice/video calls with libp2p signaling
+- Constrained plugin manifest/runtime with explicit capabilities
 
-**Status:** pending
+**Status:** in progress
+
+### Completion sequence
+
+1. Photo previews and attachment UX
+2. Directory discovery client integration
+3. Chunked server-channel attachments
+4. Multi-device encrypted state transfer
+5. WebRTC call signaling, media UI, and call state
+6. Capability-restricted plugin manifests and runtime
+7. Documentation and release verification (without Cargo commands)
 
 
 
