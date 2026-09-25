@@ -24,6 +24,8 @@ interface Props {
     attachmentsEnabled?: boolean;
     onAttach: (file: File) => void;
     onDownloadAttachment: (hash: string, name: string) => void;
+    outboxPending?: number;
+    onRetryOutbox?: () => void;
     /** Returns an avatar data URL for a peer id, or null to show the color dot. */
     avatarFor?: (peerId: string) => string | null;
 }
@@ -288,7 +290,7 @@ function MentionComposer({
 }
 
 export function MessagePane({
-    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, avatarFor,
+    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, outboxPending = 0, onRetryOutbox, avatarFor,
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const canAct = actionsEnabled ?? false;
@@ -366,6 +368,16 @@ export function MessagePane({
             <div className="flex h-12 shrink-0 items-center gap-2 border-b border-edge px-4 shadow-sm">
                 <span className="text-lg leading-none text-muted">#</span>
                 <span className="font-semibold text-ink">{channelName}</span>
+                {outboxPending > 0 && onRetryOutbox && (
+                    <button
+                        type="button"
+                        onClick={onRetryOutbox}
+                        title="Retry queued messages"
+                        className="whitespace-nowrap rounded bg-warn/15 px-2 py-1 text-[10px] font-semibold text-warn hover:bg-warn/25"
+                    >
+                        Retry {outboxPending} queued
+                    </button>
+                )}
                 {searchOpen && (
                     <div className="ml-3 flex min-w-0 flex-1 items-center gap-2">
                         <input

@@ -178,6 +178,12 @@ export default function App() {
         };
     }, [phase]);
 
+    const retryQueued = useCallback(() => {
+        void retryOutbox()
+            .then(() => netStatus().then(setNet))
+            .catch((e) => setError(String(e)));
+    }, []);
+
     // Our short peer code, for sharing.
     useEffect(() => {
         if (phase !== 'ready') return;
@@ -2013,6 +2019,8 @@ export default function App() {
                 attachmentsEnabled={Boolean((server && activeChannel) || activeDm)}
                 onAttach={(file) => void uploadAttachment(file)}
                 onDownloadAttachment={downloadAttachment}
+                outboxPending={net?.outboxPending ?? 0}
+                onRetryOutbox={retryQueued}
                 avatarFor={avatarFor}
             />
             </div>

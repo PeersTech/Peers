@@ -39,6 +39,16 @@
 
 **Status:** done — read state now survives reloads and only explicit read receipts set it.
 
+### Delivery controls — current slice
+
+- Expose the pending outbox count in network status
+- Add an explicit retry control to the message header
+- Keep queued messages visible when the live publish attempt fails
+- Enqueue only after recipient keys and local encryption succeed
+- Verify with frontend typecheck/tests; heavy Rust verification remains deferred
+
+**Status:** done — queued messages remain visible and can be retried explicitly.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

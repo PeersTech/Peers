@@ -240,6 +240,8 @@ export interface NetStatus {
     /** How many always-on nodes are configured. 0 means cross-NAT chat
      *  will not work — see docs/running-a-node.md. */
     knownNodes: number;
+    /** Messages queued locally until a live publish succeeds or an ack arrives. */
+    outboxPending: number;
 }
 
 /** Our short 12-digit peer code: a lookup hint, never proof of identity. */

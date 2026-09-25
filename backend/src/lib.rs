@@ -723,6 +723,8 @@ pub struct NetStatus {
     /// `reachability` is "unknown", cross-NAT chat will not work — see
     /// docs/running-a-node.md.
     pub known_nodes: usize,
+    /// Number of locally queued messages still waiting for delivery.
+    pub outbox_pending: usize,
 }
 
 /// Current connectivity snapshot for the UI.
@@ -738,6 +740,7 @@ fn net_status(state: State<AppState>) -> Result<NetStatus, String> {
     let external: Vec<String> = state.external_addrs.lock().unwrap().iter().cloned().collect();
     let relay_reservations = state.relay_reservations.lock().unwrap().len();
     let peers = state.presence.lock().unwrap().len();
+    let outbox_pending = state.outbox.lock().unwrap().len();
     let nat = *state.nat.lock().unwrap();
     Ok(NetStatus {
         peers,
@@ -747,6 +750,7 @@ fn net_status(state: State<AppState>) -> Result<NetStatus, String> {
         external_addrs: external,
         relay_reservations,
         known_nodes: crate::p2p::bootstrap::known_nodes().len(),
+        outbox_pending,
     })
 }
 
@@ -971,19 +975,6 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         "text": text.clone(),
     }))
     .map_err(|e| e.to_string())?;
-    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-        id: id.clone(),
-        peer: format!("group:{group_id}"),
-        payload: outbox_payload.clone(),
-        topic: topic.clone(),
-        group_id: Some(group_id.clone()),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        attempts: 0,
-    });
-    persist(&state);
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
@@ -998,9 +989,23 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         }
         dir.seal(&identity, &recipients, topic.as_bytes(), outbox_payload.as_bytes())?
     };
-    subscribe_with_relay(&state, topic.clone()).await?;
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+        id: id.clone(),
+        peer: format!("group:{group_id}"),
+        payload: outbox_payload,
+        topic: topic.clone(),
+        group_id: Some(group_id.clone()),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        attempts: 0,
+    });
+    persist(&state);
+    let _ = subscribe_with_relay(&state, topic.clone()).await;
+    if let Some(node) = state.node.lock().unwrap().clone() {
+        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+    }
     state.history.lock().unwrap().push_dm(
         &format!("group:{group_id}"),
         DmMessage {
@@ -1594,19 +1599,6 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         "text": text.clone(),
     }))
     .map_err(|e| e.to_string())?;
-    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-        id: id.clone(),
-        peer: channel.clone(),
-        payload: outbox_payload,
-        topic: format!("peers/v1/ch/{channel}"),
-        group_id: None,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        attempts: 0,
-    });
-    persist(&state);
     // The DM topic for a peer is `peers/v1/ch/<their peer id>`; that full
     // topic string is also the AEAD binding the recipient uses to open the
     // envelope, so seal and publish must share it.
@@ -1630,16 +1622,26 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         // envelope cannot be opened by anyone else subscribed to this topic.
         dir.seal(&identity, &[rcpt], topic.as_bytes(), &body)?
     };
+    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+        id: id.clone(),
+        peer: channel.clone(),
+        payload: outbox_payload,
+        topic: topic.clone(),
+        group_id: None,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        attempts: 0,
+    });
+    persist(&state);
     // Subscribe (and ask relay nodes to mesh) first: a DM whose entry was
     // auto-created by an incoming message never had `subscribe()` called for
     // it, and gossipsub refuses to publish to an unsubscribed topic.
-    subscribe_with_relay(&state, topic.clone()).await?;
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish {
-        topic,
-        data: payload,
-    })
-    .await?;
+    let _ = subscribe_with_relay(&state, topic.clone()).await;
+    if let Some(node) = state.node.lock().unwrap().clone() {
+        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+    }
     {
         let mut history = state.history.lock().unwrap();
         history.push_dm(
@@ -1696,6 +1698,18 @@ async fn publish_attachment(
         "data": B64.encode(&data),
     });
     let outbox_payload = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipient = dir.recipient_key(&peer).ok_or_else(|| {
+            PeersError::Crypto(
+                "no encryption key for this peer yet — meet them on a server or the Plaza first"
+                    .into(),
+            )
+        })?;
+        let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+        dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
+    };
     state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
         id: id.clone(),
         peer: peer.clone(),
@@ -1709,21 +1723,10 @@ async fn publish_attachment(
         attempts: 0,
     });
     persist(&state);
-    let payload = {
-        let mut dir = state.dir.lock().unwrap();
-        let dir = dir.as_mut().ok_or("not unlocked")?;
-        let recipient = dir.recipient_key(&peer).ok_or_else(|| {
-            PeersError::Crypto(
-                "no encryption key for this peer yet — meet them on a server or the Plaza first"
-                    .into(),
-            )
-        })?;
-        let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-        dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
-    };
-    subscribe_with_relay(&state, topic.clone()).await?;
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    let _ = subscribe_with_relay(&state, topic.clone()).await;
+    if let Some(node) = state.node.lock().unwrap().clone() {
+        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+    }
     {
         let mut history = state.history.lock().unwrap();
         history.push_dm(
@@ -2802,6 +2805,7 @@ mod tests {
             reachability: "relayed",
             reachability_measured: false,
             known_nodes: 0,
+            outbox_pending: 0,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"listenAddrs\""), "frontend expects camelCase");
@@ -2809,6 +2813,7 @@ mod tests {
         assert!(json.contains("\"relayReservations\""));
         assert!(json.contains("\"reachabilityMeasured\""));
         assert!(json.contains("\"knownNodes\""));
+        assert!(json.contains("\"outboxPending\""));
     }
 
     #[test]
