@@ -21,6 +21,9 @@ interface Props {
         reaction?: string,
     ) => void;
     actionsEnabled?: boolean;
+    attachmentsEnabled?: boolean;
+    onAttach: (file: File) => void;
+    onDownloadAttachment: (hash: string, name: string) => void;
     /** Returns an avatar data URL for a peer id, or null to show the color dot. */
     avatarFor?: (peerId: string) => string | null;
 }
@@ -76,6 +79,8 @@ function MentionComposer({
     replyTo,
     onCancelReply,
     draftKey,
+    onAttach,
+    canAttach,
 }: {
     members: Contact[];
     onSend: (text: string) => void;
@@ -83,6 +88,8 @@ function MentionComposer({
     replyTo?: UiMessage;
     onCancelReply: () => void;
     draftKey: string;
+    onAttach: (file: File) => void;
+    canAttach: boolean;
 }) {
     const [value, setValue] = useState("");
     const [query, setQuery] = useState<{at: number; term: string} | null>(null);
@@ -233,9 +240,25 @@ function MentionComposer({
             </div>
             <div className="mt-1 flex items-center justify-between">
                 <span className="text-[10px] text-faint">@ for mention · ctrl+k</span>
-                <button onClick={submit} className="rounded-md bg-accent px-3 py-1 text-sm font-semibold text-white hover:bg-accent-hover">
-                    Send
-                </button>
+                <div className="flex items-center gap-1">
+                    {canAttach && (
+                        <label className="cursor-pointer rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-4 hover:text-ink" title="Attach a file (max 64 KiB)">
+                            Attach
+                            <input
+                                type="file"
+                                className="hidden"
+                                onChange={(event) => {
+                                    const file = event.target.files?.[0];
+                                    if (file) onAttach(file);
+                                    event.target.value = "";
+                                }}
+                            />
+                        </label>
+                    )}
+                    <button onClick={submit} className="rounded-md bg-accent px-3 py-1 text-sm font-semibold text-white hover:bg-accent-hover">
+                        Send
+                    </button>
+                </div>
             </div>
             {query && candidates.length > 0 && (
                 <div className="absolute bottom-full left-4 right-4 mb-2 max-h-48 overflow-y-auto rounded-lg border border-surface-1 bg-surface-2 p-1 shadow-xl">
@@ -265,10 +288,11 @@ function MentionComposer({
 }
 
 export function MessagePane({
-    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, avatarFor,
+    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, avatarFor,
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const canAct = actionsEnabled ?? false;
+    const canAttach = attachmentsEnabled ?? false;
     const searchRef = useRef<HTMLInputElement>(null);
     const [searchOpen, setSearchOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
@@ -472,6 +496,18 @@ export function MessagePane({
                                             mine ? "bg-accent text-white" : "bg-surface-3 text-ink"
                                         }`}>
                                             {mine ? <MentionText text={m.text} members={members} dim/> : <MentionText text={m.text} members={members}/>}
+                                            {m.attachmentHash && (
+                                                <button
+                                                    onClick={() => onDownloadAttachment(m.attachmentHash as string, m.attachmentName || "attachment")}
+                                                    title={`${m.attachmentName || "attachment"} · DHT attachment; not E2E encrypted`}
+                                                    className="mt-2 flex w-full items-center gap-2 rounded border border-white/20 bg-black/10 px-2 py-1 text-left text-xs hover:bg-black/20"
+                                                >
+                                                    <span>▧</span>
+                                                    <span className="min-w-0 flex-1 truncate">{m.attachmentName || "attachment"}</span>
+                                                    <span className="opacity-70">DHT · not E2E</span>
+                                                    <span className="opacity-70">{m.attachmentSize ? `${Math.ceil((m.attachmentSize || 0) / 1024)} KiB` : ""}</span>
+                                                </button>
+                                            )}
                                         </div>
                                     )}
                                     {canAct && (
@@ -519,6 +555,8 @@ export function MessagePane({
                 replyTo={replyTo}
                 onCancelReply={() => setReplyTo(undefined)}
                 draftKey={channelName}
+                onAttach={onAttach}
+                canAttach={canAttach}
             />
         </div>
     );

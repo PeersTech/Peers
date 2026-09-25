@@ -61,6 +61,7 @@ export type ServerMessageKind =
     | "edit"
     | "delete"
     | "reaction"
+    | "attachment"
     | "pin"
     | "unpin";
 
@@ -74,6 +75,10 @@ export interface ServerMessage {
     kind: ServerMessageKind | "";
     targetSig: string;
     reaction: string;
+    attachmentHash: string;
+    attachmentName: string;
+    attachmentMime: string;
+    attachmentSize: number;
 }
 
 export interface NodeMessage {
@@ -102,6 +107,10 @@ export interface SignedMessageDto {
     kind: ServerMessageKind | "";
     targetSig: string;
     reaction: string;
+    attachmentHash: string;
+    attachmentName: string;
+    attachmentMime: string;
+    attachmentSize: number;
     ts: number;
     sig: string;
 }
@@ -132,6 +141,10 @@ export interface UiMessage {
     pinned?: boolean;
     reactions?: Record<string, number>;
     myReaction?: string;
+    attachmentHash?: string;
+    attachmentName?: string;
+    attachmentMime?: string;
+    attachmentSize?: number;
 }
 
 /** A verified Plaza message as stored/returned by the backend. */
@@ -251,6 +264,16 @@ export const subscribeChannel = (serverId: string, channel: string) =>
     invoke<void>("subscribe_channel", {serverId, channel});
 export const publishChannel = (serverId: string, channel: string, text: string) =>
     invoke<void>("publish_channel", {serverId, channel, text});
+export const publishChannelAttachment = (
+    serverId: string,
+    channel: string,
+    text: string,
+    hash: string,
+    name: string,
+    mime: string,
+    size: number,
+) => invoke<SignedMessageDto>("publish_channel_attachment", {serverId, channel, text, hash, name, mime, size});
+
 export const publishChannelAction = (
     serverId: string,
     channel: string,

@@ -45,6 +45,7 @@ const MAX_ABOUT_BYTES: usize = 512;
 const MAX_CHANNEL_NAME_BYTES: usize = 128;
 const MAX_PLAZA_FUTURE_SKEW_SECS: u64 = 300;
 const MAX_PLAZA_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+const MAX_BLOB_BYTES: usize = 64 * 1024;
 
 fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
     if value.len() > max {
@@ -1112,6 +1113,54 @@ async fn publish_channel_action(
 }
 
 #[tauri::command]
+async fn publish_channel_attachment(
+    state: State<'_, AppState>,
+    server_id: String,
+    channel: String,
+    text: String,
+    hash: String,
+    name: String,
+    mime: String,
+    size: u64,
+) -> Result<SignedMessage, String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    validate_text(&channel, MAX_CHANNEL_NAME_BYTES, "channel")?;
+    validate_text(&text, MAX_TEXT_BYTES, "attachment caption")?;
+    validate_text(&name, 255, "attachment name")?;
+    validate_text(&mime, 127, "attachment type")?;
+    if p2p::parse_hex_hash(&hash).is_none() {
+        return Err("invalid attachment hash".into());
+    }
+    if size == 0 || size > MAX_BLOB_BYTES as u64 {
+        return Err(format!("attachment must be between 1 and {MAX_BLOB_BYTES} bytes"));
+    }
+    let me = identity.peer_id.to_string();
+    {
+        let servers = state.servers.lock().unwrap();
+        let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
+        if !rec.can_write(&me, &channel) {
+            return Err(PeersError::Forbidden.into());
+        }
+    }
+    let msg = SignedMessage::sign_attachment(
+        &identity.keypair,
+        &server_id,
+        &channel,
+        &text,
+        &hash,
+        &name,
+        &mime,
+        size,
+    )?;
+    publish_server_message(&state, msg).await
+}
+
+#[tauri::command]
 fn server_history(
     state: State<'_, AppState>,
     server_id: String,
@@ -1439,12 +1488,11 @@ fn plaza_who(state: State<'_, AppState>) -> Result<Vec<PlazaPresence>, String> {
 /// implemented).
 #[tauri::command]
 async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<(), String> {
-    const MAX_BLOB: usize = 64 * 1024;
-    if data.len() > MAX_BLOB {
+    if data.len() > MAX_BLOB_BYTES {
         return Err(format!(
             "blob too large: {} bytes (max {})",
             data.len(),
-            MAX_BLOB
+            MAX_BLOB_BYTES
         ));
     }
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
@@ -1506,6 +1554,7 @@ pub fn run() {
             unsubscribe_channel,
             publish_channel,
             publish_channel_action,
+            publish_channel_attachment,
             server_history,
             dm_history,
             online_peers,
@@ -1804,6 +1853,10 @@ pub fn run() {
                                         "kind": msg.kind,
                                         "targetSig": msg.target_sig,
                                         "reaction": msg.reaction,
+                                        "attachmentHash": msg.attachment_hash,
+                                        "attachmentName": msg.attachment_name,
+                                        "attachmentMime": msg.attachment_mime,
+                                        "attachmentSize": msg.attachment_size,
                                     }),
                                 );
                             }

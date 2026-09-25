@@ -50,7 +50,7 @@ backend**, and the frontend never sees a secret.
 | End-to-end direct messages | ChaCha20-Poly1305, per-session HKDF hash-chain keys, forward secrecy |
 | Serverless | No backend, no accounts, no phone number, no database |
 | P2P messaging | gossipsub live topics on the public libp2p network |
-| Blob parking | Share small blobs and media up to 64 KiB via the Kademlia DHT |
+| Blob parking | Share small blobs and media up to 64 KiB via the Kademlia DHT; attachment bytes are not E2E encrypted yet |
 | Multi-recipient envelopes | One sealed message addressed to any number of peers, each with their own key |
 | Local keystore | Argon2id + XChaCha20-Poly1305 sealed `identity.json`, permissions `0600` |
 | At-rest state | Sealed `state.json` — servers, keychains, DM sessions and bounded message history survive restart |

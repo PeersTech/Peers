@@ -6,7 +6,7 @@ import {
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    publishChannel, publishChannelAction, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
+    publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type ServerMessageKind, type SignedMessageDto, type SignedProfile, type UiMessage,
@@ -87,6 +87,8 @@ export default function App() {
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
     const seenServerActions = useRef(new Set<string>());
+    const pendingAttachment = useRef<{serverId: string; channel: string; name: string; mime: string; size: number} | null>(null);
+    const pendingDownload = useRef<{hash: string; name: string} | null>(null);
     const blobsRef = useRef<Record<string, number[]>>({});
 
     const live = useRef({
@@ -208,6 +210,10 @@ export default function App() {
         signature: message.sig,
         kind: messageKind(message),
         targetSignature: message.targetSig || undefined,
+        attachmentHash: message.attachmentHash || undefined,
+        attachmentName: message.attachmentName || undefined,
+        attachmentMime: message.attachmentMime || undefined,
+        attachmentSize: message.attachmentSize || undefined,
         author: peerName(message.from, members),
         authorColor: colorFor(message.from),
         time: timeFor(message.ts),
@@ -224,7 +230,7 @@ export default function App() {
         myPeerId: string,
     ): UiMessage[] => {
         const kind = messageKind(message);
-        if (kind === "chat" || kind === "reply") {
+        if (kind === "chat" || kind === "reply" || kind === "attachment") {
             if (messages.some((existing) => existing.signature === message.sig)) return messages;
             const next = uiFromServerMessage(message, members, myPeerId);
             if (kind === "reply" && message.targetSig) {
@@ -258,11 +264,11 @@ export default function App() {
     ): UiMessage[] => {
         const chats = messages.filter((message) => {
             const kind = messageKind(message);
-            return kind === "chat" || kind === "reply";
+            return kind === "chat" || kind === "reply" || kind === "attachment";
         });
         const actions = messages.filter((message) => {
             const kind = messageKind(message);
-            return kind !== "chat" && kind !== "reply";
+            return kind !== "chat" && kind !== "reply" && kind !== "attachment";
         });
         const list = chats.reduce(
             (current, message) => applyServerMessage(current, message, members, myPeerId),
@@ -465,6 +471,80 @@ export default function App() {
         void channelAction("reply", target, text).catch((error) => setError(String(error)));
     };
 
+    const finishAttachmentUpload = async (hash: string) => {
+        const pending = pendingAttachment.current;
+        pendingAttachment.current = null;
+        if (!pending) return;
+        try {
+            const action = await publishChannelAttachment(
+                pending.serverId,
+                pending.channel,
+                "",
+                hash,
+                pending.name,
+                pending.mime,
+                pending.size,
+            );
+            const members = live.current.servers[pending.serverId]?.members ?? [];
+            setHistory((h) => ({
+                ...h,
+                [`${pending.serverId}/${pending.channel}`]: applyServerMessage(
+                    h[`${pending.serverId}/${pending.channel}`] ?? [],
+                    action,
+                    members,
+                    live.current.me?.peerId ?? "",
+                ),
+            }));
+        } catch (error) {
+            setError(String(error));
+        }
+    };
+
+    const uploadAttachment = async (file: File) => {
+        if (!activeServer || !activeChannel) {
+            setError("Open a server channel before attaching a file");
+            return;
+        }
+        if (file.size === 0 || file.size > 64 * 1024) {
+            setError("Attachments must be between 1 byte and 64 KiB in this version");
+            return;
+        }
+        const serverId = activeServer;
+        const channel = activeChannel;
+        pendingAttachment.current = {
+            serverId,
+            channel,
+            name: file.name.slice(0, 255) || "attachment",
+            mime: file.type.slice(0, 127) || "application/octet-stream",
+            size: file.size,
+        };
+        try {
+            await parkBlob(Array.from(new Uint8Array(await file.arrayBuffer())));
+        } catch (error) {
+            pendingAttachment.current = null;
+            setError(String(error));
+        }
+    };
+
+    const downloadAttachment = (hash: string, name: string) => {
+        const data = blobs[hash];
+        if (data?.length) {
+            triggerDownload(data, name);
+            return;
+        }
+        pendingDownload.current = {hash, name};
+        void fetchBlob(hash).catch((error) => setError(String(error)));
+    };
+
+    const triggerDownload = (data: number[], name: string) => {
+        const url = URL.createObjectURL(new Blob([new Uint8Array(data)], {type: "application/octet-stream"}));
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = name || "attachment";
+        anchor.click();
+        URL.revokeObjectURL(url);
+    };
+
     const loadDmHistory = async (peer: string) => {
         const key = `dm:${peer}`;
         if (historyLoaded.current.has(key)) return;
@@ -566,6 +646,10 @@ export default function App() {
                     kind: m.kind,
                     targetSig: m.targetSig,
                     reaction: m.reaction,
+                    attachmentHash: m.attachmentHash,
+                    attachmentName: m.attachmentName,
+                    attachmentMime: m.attachmentMime,
+                    attachmentSize: m.attachmentSize,
                     ts: m.ts,
                     sig: m.sig,
                 };
@@ -575,7 +659,7 @@ export default function App() {
                 }));
                 const act = activeRef.current;
                 if (act.server !== m.serverId || act.channel !== m.channel) {
-                    if (!m.kind || m.kind === "chat" || m.kind === "reply") {
+                    if (!m.kind || m.kind === "chat" || m.kind === "reply" || m.kind === "attachment") {
                         setUnread((u) => ({...u, [key]: (u[key] ?? 0) + 1}));
                     }
                 }
@@ -673,6 +757,11 @@ export default function App() {
             onBlobFetched((e) => {
                 blobQueued.current.delete(e.hash);
                 setBlobs((old) => ({...old, [e.hash]: e.data}));
+                if (pendingDownload.current?.hash === e.hash) {
+                    const pending = pendingDownload.current;
+                    pendingDownload.current = null;
+                    triggerDownload(e.data, pending.name);
+                }
             }),
         );
         track(
@@ -683,6 +772,10 @@ export default function App() {
         );
         track(
             onBlobParked((e) => {
+                if (pendingAttachment.current) {
+                    void finishAttachmentUpload(e.hash);
+                    return;
+                }
                 setPendingHash((h) => h ?? e.hash);
                 setAvatarUploading(false);
             }),
@@ -1629,6 +1722,9 @@ export default function App() {
                     void channelAction(kind, target, text, reaction).catch((error) => setError(String(error)))
                 }
                 actionsEnabled={Boolean(server && activeChannel)}
+                attachmentsEnabled={Boolean(server && activeChannel)}
+                onAttach={(file) => void uploadAttachment(file)}
+                onDownloadAttachment={downloadAttachment}
                 avatarFor={avatarFor}
             />
             </div>

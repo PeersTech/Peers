@@ -827,6 +827,15 @@ pub struct SignedMessage {
     /// Emoji/reaction token used by reaction actions.
     #[serde(default)]
     pub reaction: String,
+    /// Content-addressed attachment metadata for `attachment` messages.
+    #[serde(default)]
+    pub attachment_hash: String,
+    #[serde(default)]
+    pub attachment_name: String,
+    #[serde(default)]
+    pub attachment_mime: String,
+    #[serde(default)]
+    pub attachment_size: u64,
     pub ts: u64,
     pub sig: String,
 }
@@ -863,6 +872,10 @@ impl SignedMessage {
             kind: kind.to_string(),
             target_sig: target_sig.to_string(),
             reaction: reaction.to_string(),
+            attachment_hash: String::new(),
+            attachment_name: String::new(),
+            attachment_mime: String::new(),
+            attachment_size: 0,
             ts: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -877,21 +890,66 @@ impl SignedMessage {
         Ok(msg)
     }
 
+    pub fn sign_attachment(
+        keypair: &Keypair,
+        server_id: &str,
+        channel: &str,
+        text: &str,
+        hash: &str,
+        name: &str,
+        mime: &str,
+        size: u64,
+    ) -> Result<Self> {
+        let mut msg = Self::sign_action(keypair, server_id, channel, "attachment", "", text, "")?;
+        msg.attachment_hash = hash.to_string();
+        msg.attachment_name = name.to_string();
+        msg.attachment_mime = mime.to_string();
+        msg.attachment_size = size;
+        // Re-sign after adding attachment metadata; the first signature only
+        // covered the empty metadata fields.
+        let bytes = serde_json::to_vec(&msg).map_err(PeersError::Serde)?;
+        msg.sig.clear();
+        let sig = keypair
+            .sign(&bytes)
+            .map_err(|e| PeersError::Crypto(format!("attachment sign: {e}")))?;
+        msg.sig = B64.encode(sig);
+        Ok(msg)
+    }
+
     /// Verifies the signature, action shape, server/channel binding, and ACL.
     pub fn verify(&self, rec: &ServerRecord) -> Result<()> {
-        if self.target_sig.len() > 256 || self.reaction.len() > 16 || self.text.len() > 16 * 1024 {
+        if self.target_sig.len() > 256
+            || self.reaction.len() > 16
+            || self.text.len() > 16 * 1024
+            || self.attachment_hash.len() > 64
+            || self.attachment_name.len() > 255
+            || self.attachment_mime.len() > 127
+            || self.attachment_size > 64 * 1024
+        {
             return Err(PeersError::SnapshotCorrupt);
         }
         let kind = if self.kind.is_empty() { "chat" } else { self.kind.as_str() };
+        let has_attachment_metadata = !self.attachment_hash.is_empty()
+            || !self.attachment_name.is_empty()
+            || !self.attachment_mime.is_empty()
+            || self.attachment_size > 0;
         let valid_shape = match kind {
-            "chat" => self.target_sig.is_empty() && self.reaction.is_empty(),
-            "reply" => !self.target_sig.is_empty() && self.reaction.is_empty(),
-            "edit" => !self.target_sig.is_empty() && self.reaction.is_empty() && !self.text.is_empty(),
+            "chat" => self.target_sig.is_empty() && self.reaction.is_empty() && !has_attachment_metadata,
+            "reply" => !self.target_sig.is_empty() && self.reaction.is_empty() && !has_attachment_metadata,
+            "edit" => !self.target_sig.is_empty() && self.reaction.is_empty() && !self.text.is_empty() && !has_attachment_metadata,
             "delete" | "pin" | "unpin" => {
-                !self.target_sig.is_empty() && self.reaction.is_empty() && self.text.is_empty()
+                !self.target_sig.is_empty() && self.reaction.is_empty() && self.text.is_empty() && !has_attachment_metadata
             }
             "reaction" => {
-                !self.target_sig.is_empty() && !self.reaction.is_empty() && self.text.is_empty()
+                !self.target_sig.is_empty() && !self.reaction.is_empty() && self.text.is_empty() && !has_attachment_metadata
+            }
+            "attachment" => {
+                self.target_sig.is_empty()
+                    && self.reaction.is_empty()
+                    && self.attachment_hash.len() == 64
+                    && !self.attachment_name.is_empty()
+                    && !self.attachment_mime.is_empty()
+                    && self.attachment_size > 0
             }
             _ => false,
         };
