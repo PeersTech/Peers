@@ -339,7 +339,9 @@ export function MessagePane({
     const displayedMessages = useMemo(() => {
         const query = searchQuery.trim().toLowerCase();
         if (!query) return messages;
-        return messages.filter((message) => message.text.toLowerCase().includes(query));
+        return messages.filter((message) =>
+            `${message.text} ${message.attachmentName ?? ""}`.toLowerCase().includes(query),
+        );
     }, [messages, searchQuery]);
 
     const closeSearch = () => {

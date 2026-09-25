@@ -87,6 +87,14 @@
 
 **Status:** done — delivery labels now survive reloads and chunked transfers complete only after final acknowledgement.
 
+### Conversation search refinement — current slice
+
+- Include attachment names in conversation search
+- Keep search case-insensitive across text and file metadata
+- Preserve the existing result count and keyboard controls
+
+**Status:** done — search now covers message text and attachment names.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of
