@@ -117,7 +117,7 @@ for the complete model.
 |---|---|
 | Identity | Ed25519 peer IDs + X25519 ECDH |
 | Key agreement | X25519 ECDH + HKDF session root |
-| Session keys | Directional HKDF hash-chain keys with replay protection |
+| Session keys | Directional HKDF hash-chain keys with per-process envelope nonces and replay protection |
 | Message encryption | ChaCha20-Poly1305 AEAD with authenticated topic context |
 | Keystore | Argon2id KDF + XChaCha20-Poly1305 at rest |
 | Transport | libp2p Noise, TCP, QUIC, relay, and DCUtR |
