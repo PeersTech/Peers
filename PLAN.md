@@ -18,9 +18,19 @@
 
 **Testing policy:** Feature work lands before the full verification pass. Each stage still gets lightweight checks where they are cheap; heavy Rust/Docker/build verification is deferred to the dedicated test pass.
 
+### Group DM protocol — next implementation slice
+
+- Signed group descriptor with owner, group ID, member peer cards, and membership revision
+- Private group invite delivered inside the existing sealed DM envelope
+- Group topic derived from the group ID; no central group server
+- Multi-recipient sealed messages using `SessionDir`
+- Persisted group membership and message history
+- Accept/decline/leave flows in the UI
+- Reject removed members from newly issued group messages
+
 **Status:** in progress
 
-## Goal
+
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of
 always-on **Peers nodes**, the way a cryptocurrency network is a mesh of
