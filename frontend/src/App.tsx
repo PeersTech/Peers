@@ -6,7 +6,7 @@ import {
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     markDmRead, markGroupRead, onDmAck, onDmRead, onGroupRead, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
+    acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupAttachment, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type GroupDescriptor, type GroupInvite, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type ServerMessageKind, type SignedMessageDto, type SignedProfile, type UiMessage,
@@ -561,6 +561,42 @@ export default function App() {
         } catch (error) {
             setUploadingAttachment(null);
             setError(String(error));
+            return;
+        }
+        if (activeGroup) {
+            if (bytes.length === 0 || bytes.length > 40 * 1024) {
+                setUploadingAttachment(null);
+                setError("Group attachments must be between 1 byte and 40 KiB");
+                return;
+            }
+            const groupId = activeGroup;
+            const localHash = `group:${groupId}:${crypto.randomUUID()}`;
+            const mime = file.type.slice(0, 127) || "application/octet-stream";
+            try {
+                const messageId = await sendGroupAttachment(groupId, name, mime, bytes);
+                setBlobs((old) => ({...old, [localHash]: bytes}));
+                const key = `group:${groupId}`;
+                const msg: UiMessage = {
+                    id: messageId,
+                    author: me?.peerIdShort ?? "you",
+                    authorColor: THEME.online,
+                    time: new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}),
+                    text: "",
+                    mine: true,
+                    authorPeer: me?.peerId,
+                    attachmentHash: localHash,
+                    attachmentName: name,
+                    attachmentMime: mime,
+                    attachmentSize: bytes.length,
+                    attachmentEncrypted: true,
+                    delivery: "sent",
+                };
+                setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
+                setUploadingAttachment(null);
+            } catch (error) {
+                setUploadingAttachment(null);
+                setError(String(error));
+            }
             return;
         }
         if (activeDm) {

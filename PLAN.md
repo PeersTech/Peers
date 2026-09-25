@@ -95,6 +95,16 @@
 
 **Status:** done — search now covers message text and attachment names.
 
+### Group attachments — current slice
+
+- Add small encrypted attachments to group DMs
+- Carry the membership revision with the attachment payload
+- Reuse group outbox retries and delivery acknowledgements
+- Add group attachment upload UI with the existing DM limit
+- Leave large group attachments for a later chunked protocol
+
+**Status:** done — small group attachments are encrypted, revision-bound, retryable, and acknowledged.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

@@ -75,6 +75,18 @@ struct GroupMessagePayload {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GroupAttachmentPayload {
+    kind: String,
+    group_id: String,
+    revision: u64,
+    id: String,
+    name: String,
+    mime: String,
+    data: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GroupAckPayload {
     kind: String,
     group_id: String,
@@ -1074,6 +1086,99 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
             attachment_name: None,
             attachment_mime: None,
             attachment_data: None,
+        },
+    );
+    persist(&state);
+    Ok(id)
+}
+
+#[tauri::command]
+async fn send_group_attachment(
+    state: State<'_, AppState>,
+    group_id: String,
+    name: String,
+    mime: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() || data.len() > MAX_DM_ATTACHMENT_BYTES {
+        return Err(format!(
+            "Group attachments must be between 1 and {MAX_DM_ATTACHMENT_BYTES} bytes"
+        ));
+    }
+    validate_text(&name, 255, "attachment name")?;
+    validate_text(&mime, 127, "attachment type")?;
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let me = identity.peer_id.to_string();
+    let descriptor = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or("group not found")?;
+    if !descriptor.members.iter().any(|member| member.peer_id == me) {
+        return Err("you are not a member of this group".into());
+    }
+    let id = new_message_id();
+    let topic = group_topic(&group_id);
+    let body = serde_json::json!({
+        "kind": "group-attachment",
+        "groupId": group_id.clone(),
+        "revision": descriptor.revision,
+        "id": id.clone(),
+        "name": name.clone(),
+        "mime": mime.clone(),
+        "data": B64.encode(&data),
+    });
+    let outbox_payload = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipients: Vec<[u8; 32]> = descriptor
+            .members
+            .iter()
+            .filter(|member| member.peer_id != me)
+            .filter_map(|member| dir.recipient_key(&member.peer_id))
+            .collect();
+        if recipients.is_empty() {
+            return Err("no group members have validated encryption keys".into());
+        }
+        dir.seal(&identity, &recipients, topic.as_bytes(), outbox_payload.as_bytes())?
+    };
+    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+        id: id.clone(),
+        peer: format!("group:{group_id}"),
+        payload: outbox_payload,
+        topic: topic.clone(),
+        group_id: Some(group_id.clone()),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        attempts: 0,
+    });
+    persist(&state);
+    let _ = subscribe_with_relay(&state, topic.clone()).await;
+    if let Some(node) = state.node.lock().unwrap().clone() {
+        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+    }
+    state.history.lock().unwrap().push_dm(
+        &format!("group:{group_id}"),
+        DmMessage {
+            peer: format!("group:{group_id}"),
+            text: String::new(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            mine: true,
+            sender: Some(me),
+            id: id.clone(),
+            read: false,
+            delivered: false,
+            attachment_name: Some(name),
+            attachment_mime: Some(mime),
+            attachment_data: Some(data),
         },
     );
     persist(&state);
@@ -2449,6 +2554,7 @@ pub fn run() {
             leave_group,
             accept_group,
             send_group,
+            send_group_attachment,
             create_server,
             list_servers,
             create_invite,
@@ -3014,7 +3120,51 @@ pub fn run() {
                                     }
                                 }
                             }
-                            let group_text = if let Some(group_id) = &group_id {
+                            let group_attachment = if let Some(group_id) = &group_id {
+                                match serde_json::from_slice::<GroupAttachmentPayload>(&plaintext) {
+                                    Ok(payload) if payload.kind == "group-attachment" => {
+                                        if payload.group_id != *group_id
+                                            || payload.name.is_empty()
+                                            || payload.name.len() > 255
+                                            || payload.mime.is_empty()
+                                            || payload.mime.len() > 127
+                                        {
+                                            return;
+                                        }
+                                        let current_revision = state
+                                            .groups
+                                            .lock()
+                                            .unwrap()
+                                            .get(group_id)
+                                            .map(|group| group.revision)
+                                            .unwrap_or(0);
+                                        if payload.revision < current_revision {
+                                            return;
+                                        }
+                                        let bytes = match B64.decode(&payload.data) {
+                                            Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_DM_ATTACHMENT_BYTES => bytes,
+                                            _ => return,
+                                        };
+                                        incoming_id = Some(payload.id.clone());
+                                        Some((
+                                            DmAttachmentPayload {
+                                                kind: "attachment".into(),
+                                                id: payload.id,
+                                                name: payload.name,
+                                                mime: payload.mime,
+                                                data: payload.data,
+                                            },
+                                            bytes,
+                                        ))
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let group_text = if group_attachment.is_some() {
+                                None
+                            } else if let Some(group_id) = &group_id {
                                 let payload: GroupMessagePayload = match serde_json::from_slice(&plaintext) {
                                     Ok(payload) => payload,
                                     Err(_) => return,
@@ -3051,7 +3201,10 @@ pub fn run() {
                                 let _ = app_handle.emit("group://invite", invite);
                                 return;
                             }
-                            let attachment = match serde_json::from_slice::<DmAttachmentPayload>(&plaintext) {
+                            let attachment = if let Some(attachment) = group_attachment {
+                                Some(attachment)
+                            } else {
+                                match serde_json::from_slice::<DmAttachmentPayload>(&plaintext) {
                                 Ok(payload) if payload.kind == "attachment" => {
                                     if payload.name.is_empty()
                                         || payload.name.len() > 255
@@ -3068,6 +3221,7 @@ pub fn run() {
                                     Some((payload, bytes))
                                 }
                                 _ => None,
+                                }
                             };
                             let text = if let Some(text) = incoming_text {
                                 text
