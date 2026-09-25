@@ -55,12 +55,25 @@ export interface IdentityInfo {
     defaultName?: string;
 }
 
+export type ServerMessageKind =
+    | "chat"
+    | "reply"
+    | "edit"
+    | "delete"
+    | "reaction"
+    | "pin"
+    | "unpin";
+
 export interface ServerMessage {
     serverId: string;
     channel: string;
     from: string;
     text: string;
     ts: number;
+    sig: string;
+    kind: ServerMessageKind | "";
+    targetSig: string;
+    reaction: string;
 }
 
 export interface NodeMessage {
@@ -86,6 +99,9 @@ export interface SignedMessageDto {
     from: string;
     pubkey: number[];
     text: string;
+    kind: ServerMessageKind | "";
+    targetSig: string;
+    reaction: string;
     ts: number;
     sig: string;
 }
@@ -108,6 +124,14 @@ export interface UiMessage {
     authorPeer?: string;
     /** True when this server message @-mentions our own peer id (a ping). */
     mentionsMe?: boolean;
+    signature?: string;
+    kind?: ServerMessageKind | "";
+    targetSignature?: string;
+    replyText?: string;
+    edited?: boolean;
+    pinned?: boolean;
+    reactions?: Record<string, number>;
+    myReaction?: string;
 }
 
 /** A verified Plaza message as stored/returned by the backend. */
@@ -227,6 +251,14 @@ export const subscribeChannel = (serverId: string, channel: string) =>
     invoke<void>("subscribe_channel", {serverId, channel});
 export const publishChannel = (serverId: string, channel: string, text: string) =>
     invoke<void>("publish_channel", {serverId, channel, text});
+export const publishChannelAction = (
+    serverId: string,
+    channel: string,
+    kind: Exclude<ServerMessageKind, "chat" | "">,
+    targetSig: string,
+    text = "",
+    reaction = "",
+) => invoke<SignedMessageDto>("publish_channel_action", {serverId, channel, kind, targetSig, text, reaction});
 
 export const subscribe = (channel: string) => invoke<void>("subscribe", {channel});
 export const publish = (channel: string, text: string) => invoke<void>("publish", {channel, text});

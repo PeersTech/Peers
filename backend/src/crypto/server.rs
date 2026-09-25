@@ -817,14 +817,37 @@ pub struct SignedMessage {
     /// Ed25519 public key of the sender, 32 bytes.
     pub pubkey: [u8; 32],
     pub text: String,
+    /// Message type: chat, reply, edit, delete, reaction, pin, or unpin.
+    /// Empty is treated as chat for compatibility with pre-v1.1 messages.
+    #[serde(default)]
+    pub kind: String,
+    /// Signature of the message this action targets, for non-chat actions.
+    #[serde(default)]
+    pub target_sig: String,
+    /// Emoji/reaction token used by reaction actions.
+    #[serde(default)]
+    pub reaction: String,
     pub ts: u64,
     pub sig: String,
 }
 
 impl SignedMessage {
-    /// Signs `text` with the caller's identity key. The signature covers
-    /// every field except `sig` itself (canonical JSON, declared order).
+    /// Signs a normal channel message with the caller's identity key.
     pub fn sign(keypair: &Keypair, server_id: &str, channel: &str, text: &str) -> Result<Self> {
+        Self::sign_action(keypair, server_id, channel, "chat", "", text, "")
+    }
+
+    /// Signs a channel action such as a reply, edit, reaction, or pin.
+    /// The action fields are covered by the same signature as the text.
+    pub fn sign_action(
+        keypair: &Keypair,
+        server_id: &str,
+        channel: &str,
+        kind: &str,
+        target_sig: &str,
+        text: &str,
+        reaction: &str,
+    ) -> Result<Self> {
         let mut msg = Self {
             version: 1,
             server_id: server_id.to_string(),
@@ -837,6 +860,9 @@ impl SignedMessage {
                 .map_err(|_| PeersError::Identity("expected ed25519 key".into()))?
                 .to_bytes(),
             text: text.to_string(),
+            kind: kind.to_string(),
+            target_sig: target_sig.to_string(),
+            reaction: reaction.to_string(),
             ts: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -851,10 +877,27 @@ impl SignedMessage {
         Ok(msg)
     }
 
-    /// Verifies the signature and that the embedded key matches `from`'s
-    /// peer ID, the message belongs to this server/channel, and the sender
-    /// satisfies the channel write ACL.
+    /// Verifies the signature, action shape, server/channel binding, and ACL.
     pub fn verify(&self, rec: &ServerRecord) -> Result<()> {
+        if self.target_sig.len() > 256 || self.reaction.len() > 16 || self.text.len() > 16 * 1024 {
+            return Err(PeersError::SnapshotCorrupt);
+        }
+        let kind = if self.kind.is_empty() { "chat" } else { self.kind.as_str() };
+        let valid_shape = match kind {
+            "chat" => self.target_sig.is_empty() && self.reaction.is_empty(),
+            "reply" => !self.target_sig.is_empty() && self.reaction.is_empty(),
+            "edit" => !self.target_sig.is_empty() && self.reaction.is_empty() && !self.text.is_empty(),
+            "delete" | "pin" | "unpin" => {
+                !self.target_sig.is_empty() && self.reaction.is_empty() && self.text.is_empty()
+            }
+            "reaction" => {
+                !self.target_sig.is_empty() && !self.reaction.is_empty() && self.text.is_empty()
+            }
+            _ => false,
+        };
+        if !valid_shape {
+            return Err(PeersError::SnapshotCorrupt);
+        }
         if self.server_id != rec.id {
             return Err(PeersError::ServerNotFound);
         }

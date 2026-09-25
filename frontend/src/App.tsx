@@ -6,10 +6,10 @@ import {
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    publishChannel, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
+    publishChannel, publishChannelAction, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
-    type ServerView, type SignedProfile, type UiMessage,
+    type ServerView, type ServerMessageKind, type SignedMessageDto, type SignedProfile, type UiMessage,
 } from './lib/api';
 import {ServerRail} from './components/ServerRail';
 import {ChannelList} from './components/ChannelList';
@@ -86,6 +86,7 @@ export default function App() {
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
+    const seenServerActions = useRef(new Set<string>());
     const blobsRef = useRef<Record<string, number[]>>({});
 
     const live = useRef({
@@ -183,22 +184,96 @@ export default function App() {
                 return;
             }
             const members = live.current.servers[serverId]?.members ?? [];
-            const list: UiMessage[] = msgs.map((d, i) => ({
-                id: `${d.from}:${d.ts}:${i}`,
-                author: peerName(d.from, members),
-                authorColor: colorFor(d.from),
-                time: timeFor(d.ts),
-                text: d.text,
-                mine: d.from === live.current.me?.peerId,
-                authorPeer: d.from,
-                mentionsMe: mentionsMe(d.text, live.current.me?.peerId ?? ''),
-            }));
-            setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
+            const list = reduceServerHistory(msgs, members, live.current.me?.peerId ?? '');
+            setHistory((h) => ({...h, [key]: reduceServerHistory(
+                msgs,
+                members,
+                live.current.me?.peerId ?? '',
+            ).concat((h[key] ?? []).filter((message) => !list.some((item) => item.id === message.id)))}));
         } catch (e) {
             historyLoaded.current.delete(key);
             setError(String(e));
         }
     };
+
+    const messageKind = (message: SignedMessageDto): ServerMessageKind =>
+        (message.kind || "chat") as ServerMessageKind;
+
+    const uiFromServerMessage = (
+        message: SignedMessageDto,
+        members: Contact[],
+        myPeerId: string,
+    ): UiMessage => ({
+        id: message.sig || `${message.from}:${message.ts}:${message.text}`,
+        signature: message.sig,
+        kind: messageKind(message),
+        targetSignature: message.targetSig || undefined,
+        author: peerName(message.from, members),
+        authorColor: colorFor(message.from),
+        time: timeFor(message.ts),
+        text: message.text,
+        mine: message.from === myPeerId,
+        authorPeer: message.from,
+        mentionsMe: mentionsMe(message.text, myPeerId),
+    });
+
+    const applyServerMessage = (
+        messages: UiMessage[],
+        message: SignedMessageDto,
+        members: Contact[],
+        myPeerId: string,
+    ): UiMessage[] => {
+        const kind = messageKind(message);
+        if (kind === "chat" || kind === "reply") {
+            if (messages.some((existing) => existing.signature === message.sig)) return messages;
+            const next = uiFromServerMessage(message, members, myPeerId);
+            if (kind === "reply" && message.targetSig) {
+                next.replyText = messages.find((item) => item.signature === message.targetSig)?.text;
+            }
+            return [...messages, next];
+        }
+        const target = message.targetSig;
+        return messages.map((existing) => {
+            if (existing.signature !== target) return existing;
+            if (kind === "edit") return {...existing, text: message.text, edited: true};
+            if (kind === "pin") return {...existing, pinned: true};
+            if (kind === "unpin") return {...existing, pinned: false};
+            if (kind === "reaction") {
+                const reactions = {...(existing.reactions ?? {})};
+                reactions[message.reaction] = (reactions[message.reaction] ?? 0) + 1;
+                return {
+                    ...existing,
+                    reactions,
+                    ...(message.from === myPeerId ? {myReaction: message.reaction} : {}),
+                };
+            }
+            return existing;
+        }).filter((existing) => kind !== "delete" || existing.signature !== target);
+    };
+
+    const reduceServerHistory = (
+        messages: SignedMessageDto[],
+        members: Contact[],
+        myPeerId: string,
+    ): UiMessage[] => {
+        const chats = messages.filter((message) => {
+            const kind = messageKind(message);
+            return kind === "chat" || kind === "reply";
+        });
+        const actions = messages.filter((message) => {
+            const kind = messageKind(message);
+            return kind !== "chat" && kind !== "reply";
+        });
+        const list = chats.reduce(
+            (current, message) => applyServerMessage(current, message, members, myPeerId),
+            [] as UiMessage[],
+        );
+        return actions.reduce(
+            (current, message) => applyServerMessage(current, message, members, myPeerId),
+            list,
+        );
+    };
+
 
     const ensureBlob = (hash: string) => {
         if (!hash || blobsRef.current[hash] || blobQueued.current.has(hash)) return;
@@ -358,6 +433,38 @@ export default function App() {
         }
     };
 
+    const channelAction = async (
+        kind: Exclude<ServerMessageKind, "chat" | "">,
+        target: UiMessage,
+        text = "",
+        reaction = "",
+    ) => {
+        if (!activeServer || !activeChannel || !target.signature) return;
+        const key = `${activeServer}/${activeChannel}`;
+        const action = await publishChannelAction(
+            activeServer,
+            activeChannel,
+            kind,
+            target.signature,
+            text,
+            reaction,
+        );
+        const members = live.current.servers[activeServer]?.members ?? [];
+        setHistory((h) => ({
+            ...h,
+            [key]: applyServerMessage(
+                h[key] ?? [],
+                action,
+                members,
+                live.current.me?.peerId ?? "",
+            ),
+        }));
+    };
+
+    const sendReply = (text: string, target: UiMessage) => {
+        void channelAction("reply", target, text).catch((error) => setError(String(error)));
+    };
+
     const loadDmHistory = async (peer: string) => {
         const key = `dm:${peer}`;
         if (historyLoaded.current.has(key)) return;
@@ -445,19 +552,32 @@ export default function App() {
                 if (m.from === live.current.me?.peerId) return;
                 const key = `${m.serverId}/${m.channel}`;
                 const members = live.current.servers[m.serverId]?.members ?? [];
-                const msg: UiMessage = {
-                    id: crypto.randomUUID(),
-                    author: peerName(m.from, members),
-                    authorColor: colorFor(m.from),
-                    time: timeFor(m.ts),
+                if (m.sig && m.kind && m.kind !== "chat" && m.kind !== "reply") {
+                    if (seenServerActions.current.has(m.sig)) return;
+                    seenServerActions.current.add(m.sig);
+                }
+                const message: SignedMessageDto = {
+                    version: 1,
+                    serverId: m.serverId,
+                    channel: m.channel,
+                    from: m.from,
+                    pubkey: [],
                     text: m.text,
-                    mine: live.current.me?.peerId === m.from,
-                    mentionsMe: mentionsMe(m.text, live.current.me?.peerId ?? ''),
+                    kind: m.kind,
+                    targetSig: m.targetSig,
+                    reaction: m.reaction,
+                    ts: m.ts,
+                    sig: m.sig,
                 };
-                setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
+                setHistory((h) => ({
+                    ...h,
+                    [key]: applyServerMessage(h[key] ?? [], message, members, live.current.me?.peerId ?? ''),
+                }));
                 const act = activeRef.current;
                 if (act.server !== m.serverId || act.channel !== m.channel) {
-                    setUnread((u) => ({...u, [key]: (u[key] ?? 0) + 1}));
+                    if (!m.kind || m.kind === "chat" || m.kind === "reply") {
+                        setUnread((u) => ({...u, [key]: (u[key] ?? 0) + 1}));
+                    }
                 }
             }),
         );
@@ -1493,7 +1613,7 @@ export default function App() {
                         : dm
                           ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}`
                           : server
-                            ? `E2E encrypted · ${onlineCount}/${server.memberCount} online`
+                            ? `Signed broadcast · ${onlineCount}/${server.memberCount} online`
                             : '',
                     netLabel(),
                 ]
@@ -1504,6 +1624,11 @@ export default function App() {
                 members={paneMembers}
                 myPeerId={me?.peerId ?? ''}
                 onSend={send}
+                onReply={sendReply}
+                onAction={(kind, target, text, reaction) =>
+                    void channelAction(kind, target, text, reaction).catch((error) => setError(String(error)))
+                }
+                actionsEnabled={Boolean(server && activeChannel)}
                 avatarFor={avatarFor}
             />
             </div>

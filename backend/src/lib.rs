@@ -997,6 +997,25 @@ async fn unsubscribe_channel(
 
 /// Publishes a signed (unencrypted) message to a server channel. Writing
 /// is gated by the channel ACL from the latest signed list.
+async fn publish_server_message(
+    state: &AppState,
+    msg: SignedMessage,
+) -> Result<SignedMessage, String> {
+    let data = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish {
+        topic: channel_topic(&msg.server_id, &msg.channel),
+        data,
+    })
+    .await?;
+    {
+        let mut history = state.history.lock().unwrap();
+        history.push_server(&format!("{}/{}", msg.server_id, msg.channel), msg.clone());
+    }
+    persist(state);
+    Ok(msg)
+}
+
 #[tauri::command]
 async fn publish_channel(
     state: State<'_, AppState>,
@@ -1021,19 +1040,75 @@ async fn publish_channel(
         }
     }
     let msg = SignedMessage::sign(&identity.keypair, &server_id, &channel, &text)?;
-    let data = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
-    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish {
-        topic: channel_topic(&server_id, &channel),
-        data,
-    })
-    .await?;
-    {
-        let mut history = state.history.lock().unwrap();
-        history.push_server(&format!("{server_id}/{channel}"), msg);
+    publish_server_message(&state, msg).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn publish_channel_action(
+    state: State<'_, AppState>,
+    server_id: String,
+    channel: String,
+    kind: String,
+    target_sig: String,
+    text: String,
+    reaction: String,
+) -> Result<SignedMessage, String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    validate_text(&channel, MAX_CHANNEL_NAME_BYTES, "channel")?;
+    if target_sig.is_empty() || target_sig.len() > 256 {
+        return Err("a valid target message is required".into());
     }
-    persist(&state);
-    Ok(())
+    if reaction.len() > 16 {
+        return Err("reaction is too long".into());
+    }
+    if matches!(kind.as_str(), "reply" | "edit") {
+        validate_text(&text, MAX_TEXT_BYTES, "message")?;
+    } else if !text.is_empty() {
+        return Err("this action does not accept message text".into());
+    }
+    if !matches!(
+        kind.as_str(),
+        "reply" | "edit" | "delete" | "reaction" | "pin" | "unpin"
+    ) {
+        return Err("unsupported message action".into());
+    }
+
+    let me = identity.peer_id.to_string();
+    {
+        let servers = state.servers.lock().unwrap();
+        let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
+        if !rec.can_write(&me, &channel) {
+            return Err(PeersError::Forbidden.into());
+        }
+        let can_moderate = rec.role_of(&me).is_some_and(|role| role >= Role::Admin);
+        let history = state.history.lock().unwrap();
+        let target = history
+            .server_messages(&format!("{server_id}/{channel}"))
+            .iter()
+            .find(|message| message.sig == target_sig)
+            .ok_or("target message not found")?;
+        if matches!(kind.as_str(), "edit" | "delete" | "pin" | "unpin")
+            && target.from != me
+            && !can_moderate
+        {
+            return Err("only the author or an admin can change this message".into());
+        }
+    }
+    let msg = SignedMessage::sign_action(
+        &identity.keypair,
+        &server_id,
+        &channel,
+        &kind,
+        &target_sig,
+        &text,
+        &reaction,
+    )?;
+    publish_server_message(&state, msg).await
 }
 
 #[tauri::command]
@@ -1430,6 +1505,7 @@ pub fn run() {
             subscribe_channel,
             unsubscribe_channel,
             publish_channel,
+            publish_channel_action,
             server_history,
             dm_history,
             online_peers,
@@ -1724,6 +1800,10 @@ pub fn run() {
                                         "from": msg.from,
                                         "text": msg.text,
                                         "ts": msg.ts,
+                                        "sig": msg.sig,
+                                        "kind": msg.kind,
+                                        "targetSig": msg.target_sig,
+                                        "reaction": msg.reaction,
                                     }),
                                 );
                             }

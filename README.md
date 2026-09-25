@@ -55,6 +55,7 @@ backend**, and the frontend never sees a secret.
 | Local keystore | Argon2id + XChaCha20-Poly1305 sealed `identity.json`, permissions `0600` |
 | At-rest state | Sealed `state.json` — servers, keychains, DM sessions and bounded message history survive restart |
 | Presence | Live online/offline dots per member across the mesh |
+| Signed message actions | Replies, reactions, edits, deletes, and pin/unpin are signed and replayable through the channel history |
 | Signed snapshots | Owner-signed server history export/import (verify before merging) |
 | Deterministic dialing | Invites carry the owner's listen addresses; joiners dial them directly |
 | NAT-friendly | TCP + QUIC transports, noise encryption, public bootstrap nodes |

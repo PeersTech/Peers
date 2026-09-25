@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useRef, useState, type KeyboardEvent} from "react";
 import {
-    colorFor, memberName, parseMentions, shortId, type Contact, type Mention, type UiMessage,
+    colorFor, memberName, parseMentions, shortId, type Contact, type Mention, type ServerMessageKind,
+    type UiMessage,
 } from "../lib/api";
 
 interface Props {
@@ -12,6 +13,14 @@ interface Props {
     members: Contact[];
     myPeerId: string;
     onSend: (text: string) => void;
+    onReply: (text: string, target: UiMessage) => void;
+    onAction: (
+        kind: Exclude<ServerMessageKind, "chat" | "">,
+        target: UiMessage,
+        text?: string,
+        reaction?: string,
+    ) => void;
+    actionsEnabled?: boolean;
     /** Returns an avatar data URL for a peer id, or null to show the color dot. */
     avatarFor?: (peerId: string) => string | null;
 }
@@ -64,10 +73,14 @@ function MentionComposer({
     members,
     onSend,
     placeholder,
+    replyTo,
+    onCancelReply,
 }: {
     members: Contact[];
     onSend: (text: string) => void;
     placeholder: string;
+    replyTo?: UiMessage;
+    onCancelReply: () => void;
 }) {
     const [value, setValue] = useState("");
     const [query, setQuery] = useState<{at: number; term: string} | null>(null);
@@ -159,6 +172,13 @@ function MentionComposer({
 
     return (
         <div className="relative shrink-0 px-4 pb-4 pt-1">
+            {replyTo && (
+                <div className="mb-1 flex items-center gap-2 rounded-md border-l-2 border-accent bg-surface-3 px-2 py-1 text-xs text-muted">
+                    <span className="shrink-0 text-faint">Replying to {replyTo.author}</span>
+                    <span className="min-w-0 flex-1 truncate">{replyTo.text}</span>
+                    <button onClick={onCancelReply} className="text-faint hover:text-ink" title="Cancel reply">×</button>
+                </div>
+            )}
             <div className="relative rounded-lg bg-surface-3 focus-within:ring-1 focus-within:ring-accent/50">
                 {/* Back layer: the visual text with inline blue mention pills. */}
                 <div
@@ -224,11 +244,16 @@ function MentionComposer({
     );
 }
 
-export function MessagePane({channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, avatarFor}: Props) {
+export function MessagePane({
+    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, avatarFor,
+}: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
+    const canAct = actionsEnabled ?? false;
     const searchRef = useRef<HTMLInputElement>(null);
     const [searchOpen, setSearchOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
+    const [replyTo, setReplyTo] = useState<UiMessage | undefined>();
+    const [editing, setEditing] = useState<{id: string; value: string} | null>(null);
     /** True when the user is parked at the bottom and wants to follow along.
      *  Scrolling up to read history sets this false, so an incoming message
      *  no longer yanks the view back down. */
@@ -268,6 +293,15 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
         setSearchOpen(false);
     };
 
+    const submit = (text: string) => {
+        if (replyTo) {
+            onReply(text, replyTo);
+            setReplyTo(undefined);
+        } else {
+            onSend(text);
+        }
+    };
+
     // Follow new messages, and always jump to the bottom when the view swaps.
     useEffect(() => {
         const el = scrollRef.current;
@@ -277,6 +311,8 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
 
     useEffect(() => {
         following.current = true;
+        setReplyTo(undefined);
+        setEditing(null);
         const el = scrollRef.current;
         el?.scrollTo({top: el.scrollHeight});
     }, [channelName]);
@@ -375,19 +411,74 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
                                 )
                             )}
                             {!firstInBlock && <div className="w-8 shrink-0"/>}
-                            <div className={`min-w-0 max-w-[70%] ${mine ? "text-right" : ""}`}>
+                            <div className={`group relative min-w-0 max-w-[70%] ${mine ? "text-right" : ""}`}>
                                 {firstInBlock && (
                                     <div className="mb-0.5 flex items-baseline gap-2">
                                         <span className="text-sm font-semibold" style={{color: m.authorColor}}>{m.author}</span>
                                         <span className="text-[10px] text-faint">{m.time}</span>
                                         {pinged && <span className="text-[10px] font-bold text-warn">@ you</span>}
+                                        {m.edited && <span className="text-[10px] text-faint">edited</span>}
                                     </div>
                                 )}
-                                <div className={`inline-block rounded-lg px-3 py-1.5 text-left text-sm ${
-                                    mine ? "bg-accent text-white" : "bg-surface-3 text-ink"
-                                }`}>
-                                    {mine ? <MentionText text={m.text} members={members} dim/> : <MentionText text={m.text} members={members}/>}
+                                {m.pinned && <div className="mb-1 text-[10px] font-bold text-accent">Pinned</div>}
+                                {m.replyText && (
+                                    <div className="mb-1 border-l-2 border-accent pl-2 text-left text-[11px] text-muted">
+                                        Replying to {m.author}: {m.replyText}
+                                    </div>
+                                )}
+                                <div className="relative inline-block max-w-full text-left">
+                                    {editing?.id === m.id ? (
+                                        <div className="min-w-64 rounded-lg bg-surface-3 p-2">
+                                            <textarea
+                                                value={editing.value}
+                                                onChange={(event) => setEditing({id: m.id, value: event.target.value})}
+                                                rows={3}
+                                                autoFocus
+                                                className="w-full resize-none rounded bg-surface-1 p-2 text-sm text-ink outline-none"
+                                            />
+                                            <div className="mt-1 flex justify-end gap-1 text-xs">
+                                                <button onClick={() => setEditing(null)} className="rounded px-2 py-1 text-muted hover:bg-surface-4">Cancel</button>
+                                                <button
+                                                    onClick={() => {
+                                                        onAction("edit", m, editing.value);
+                                                        setEditing(null);
+                                                    }}
+                                                    className="rounded bg-accent px-2 py-1 font-semibold text-white"
+                                                >Save</button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className={`inline-block max-w-full rounded-lg px-3 py-1.5 text-left text-sm ${
+                                            mine ? "bg-accent text-white" : "bg-surface-3 text-ink"
+                                        }`}>
+                                            {mine ? <MentionText text={m.text} members={members} dim/> : <MentionText text={m.text} members={members}/>}
+                                        </div>
+                                    )}
+                                    {canAct && (
+                                        <div className={`absolute -top-7 z-10 flex gap-0.5 rounded bg-surface-2 p-0.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 ${mine ? "right-0" : "left-0"}`}>
+                                            <button onClick={() => setReplyTo(m)} title="Reply" className="rounded px-1.5 py-0.5 text-xs text-muted hover:bg-surface-4 hover:text-ink">↩</button>
+                                            <button onClick={() => onAction("reaction", m, "", "👍")} title="React" className="rounded px-1.5 py-0.5 text-xs hover:bg-surface-4">👍</button>
+                                            {m.mine && (
+                                                <>
+                                                    <button onClick={() => setEditing({id: m.id, value: m.text})} title="Edit" className="rounded px-1.5 py-0.5 text-xs text-muted hover:bg-surface-4 hover:text-ink">✎</button>
+                                                    <button onClick={() => onAction("delete", m)} title="Delete" className="rounded px-1.5 py-0.5 text-xs text-danger hover:bg-surface-4">×</button>
+                                                </>
+                                            )}
+                                            <button onClick={() => onAction(m.pinned ? "unpin" : "pin", m)} title={m.pinned ? "Unpin" : "Pin"} className="rounded px-1.5 py-0.5 text-xs text-muted hover:bg-surface-4 hover:text-ink">⌖</button>
+                                        </div>
+                                    )}
                                 </div>
+                                {m.reactions && Object.keys(m.reactions).length > 0 && (
+                                    <div className="mt-1 flex flex-wrap justify-end gap-1">
+                                        {Object.entries(m.reactions).map(([reaction, count]) => (
+                                            <button
+                                                key={reaction}
+                                                onClick={() => onAction("reaction", m, "", reaction)}
+                                                className={`rounded-full border px-1.5 py-0.5 text-[10px] ${m.myReaction === reaction ? "border-accent bg-accent/20 text-accent" : "border-edge text-muted"}`}
+                                            >{reaction} {count}</button>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     );
@@ -401,7 +492,13 @@ export function MessagePane({channelName, subtitle, subtitleTitle, messages, mem
                 )}
             </div>
 
-            <MentionComposer members={members} onSend={onSend} placeholder={`Message #${channelName}`}/>
+            <MentionComposer
+                members={members}
+                onSend={submit}
+                placeholder={`Message #${channelName}`}
+                replyTo={replyTo}
+                onCancelReply={() => setReplyTo(undefined)}
+            />
         </div>
     );
 }
