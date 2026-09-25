@@ -10,6 +10,6 @@ pub mod server;
 pub mod session;
 
 pub use card::SessionDir;
-pub use group::{GroupDescriptor, GroupInvite};
+pub use group::{group_topic, GroupDescriptor, GroupInvite, GROUP_TOPIC_PREFIX};
 pub use identity::Identity;
 pub use keystore::Keystore;

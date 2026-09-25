@@ -14,7 +14,7 @@ use crate::crypto::server::{
     PLAZA_TOPIC, PlazaMessage, ProfileNotice, Role, ServerDir, ServerRecord, ServerView,
     SignedList, SignedMessage, Snapshot,
 };
-use crate::crypto::{GroupDescriptor, GroupInvite, Identity, Keystore, SessionDir};
+use crate::crypto::{group_topic, GroupDescriptor, GroupInvite, Identity, Keystore, SessionDir};
 use crate::error::PeersError;
 use crate::p2p::{NodeCommand, NodeEvent, NodeHandle};
 use crate::store::{
@@ -96,6 +96,8 @@ pub struct AppState {
     node: Mutex<Option<NodeHandle>>,
     dir: Mutex<Option<SessionDir>>,
     servers: Mutex<ServerDir>,
+    groups: Mutex<HashMap<String, GroupDescriptor>>,
+    group_invites: Mutex<Vec<GroupInvite>>,
     store: Store,
     storage: Mutex<Option<StoreHandle>>,
     history: Mutex<History>,
@@ -131,6 +133,8 @@ impl Default for AppState {
             node: Mutex::new(None),
             dir: Mutex::new(None),
             servers: Mutex::new(ServerDir::new()),
+            groups: Mutex::new(HashMap::new()),
+            group_invites: Mutex::new(Vec::new()),
             store: Store::new(Store::default_path()),
             storage: Mutex::new(None),
             history: Mutex::new(History::default()),
@@ -421,9 +425,18 @@ async fn finish_unlock(
         )?;
     }
 
+    *state.groups.lock().unwrap() = persisted
+        .groups
+        .iter()
+        .filter(|group| group.members.iter().any(|member| member.peer_id == id.peer_id.to_string()))
+        .map(|group| (group.group_id.clone(), group.clone()))
+        .collect();
     let handle = p2p::spawn(id.clone(), false)?;
     *state.identity.lock().unwrap() = Some(id.clone());
     *state.node.lock().unwrap() = Some(handle.clone());
+    for group in state.groups.lock().unwrap().values() {
+        let _ = subscribe_with_relay(&state, group_topic(&group.group_id)).await;
+    }
     *state.storage.lock().unwrap() = Some(store_handle);
     *state.history.lock().unwrap() = history;
     *state.profile.lock().unwrap() = persisted.profile.clone();
@@ -575,9 +588,10 @@ fn persist(state: &AppState) {
         let dir = state.dir.lock().unwrap();
         let history = state.history.lock().unwrap();
         let profile = state.profile.lock().unwrap();
+        let groups: Vec<_> = state.groups.lock().unwrap().values().cloned().collect();
         let servers: Vec<_> = servers.records().iter().map(|r| r.to_persisted()).collect();
         match dir.as_ref() {
-            Some(dir) => state_from(dir, &servers, &history, &profile),
+            Some(dir) => state_from(dir, &servers, &history, &profile, &groups),
             None => PersistedState {
                 servers,
                 history: history.clone(),
@@ -635,6 +649,8 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.node.lock().unwrap() = None;
     *state.dir.lock().unwrap() = None;
     *state.servers.lock().unwrap() = ServerDir::new();
+    *state.groups.lock().unwrap() = HashMap::new();
+    *state.group_invites.lock().unwrap() = Vec::new();
     *state.storage.lock().unwrap() = None;
     *state.identity.lock().unwrap() = None;
     *state.history.lock().unwrap() = History::default();
@@ -711,7 +727,7 @@ async fn mutate_server(
 }
 
 #[tauri::command]
-fn create_group_descriptor(
+async fn create_group_descriptor(
     state: State<'_, AppState>,
     name: String,
     peer_ids: Vec<String>,
@@ -734,7 +750,12 @@ fn create_group_descriptor(
             .ok_or_else(|| format!("no validated encryption key for {peer_id}"))?;
         members.push(crate::crypto::group::GroupMember {peer_id, x25519_pub: key});
     }
-    GroupDescriptor::sign(&identity, &new_server_id(), &name, members).map_err(|e| e.to_string())
+    let descriptor = GroupDescriptor::sign(&identity, &new_server_id(), &name, members)
+        .map_err(|e| e.to_string())?;
+    let group_id = descriptor.group_id.clone();
+    state.groups.lock().unwrap().insert(group_id.clone(), descriptor.clone());
+    subscribe_with_relay(&state, group_topic(&group_id)).await?;
+    Ok(descriptor)
 }
 
 #[tauri::command]
@@ -742,6 +763,125 @@ fn verify_group_invite(invite_json: String) -> Result<GroupInvite, String> {
     let invite: GroupInvite = serde_json::from_str(&invite_json).map_err(|e| e.to_string())?;
     invite.verify().map_err(|e| e.to_string())?;
     Ok(invite)
+}
+
+#[tauri::command]
+fn list_groups(state: State<'_, AppState>) -> Result<Vec<GroupDescriptor>, String> {
+    let me = state.identity.lock().unwrap().clone().ok_or("not unlocked")?.peer_id.to_string();
+    Ok(state
+        .groups
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|group| group.members.iter().any(|member| member.peer_id == me))
+        .cloned()
+        .collect())
+}
+
+#[tauri::command]
+async fn send_group_invite(
+    state: State<'_, AppState>,
+    group_id: String,
+    peer_id: String,
+) -> Result<(), String> {
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let descriptor = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or("group not found")?;
+    if !descriptor.members.iter().any(|member| member.peer_id == peer_id) {
+        return Err("peer is not a group member".into());
+    }
+    let topic = format!("peers/v1/ch/{peer_id}");
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipient = dir.recipient_key(&peer_id).ok_or("no encryption key for this peer")?;
+        let invite = serde_json::to_vec(&GroupInvite::new(descriptor)).map_err(|e| e.to_string())?;
+        dir.seal(&identity, &[recipient], topic.as_bytes(), &invite)?
+    };
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn accept_group(state: State<'_, AppState>, invite_json: String) -> Result<GroupDescriptor, String> {
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let invite: GroupInvite = serde_json::from_str(&invite_json).map_err(|e| e.to_string())?;
+    invite.verify().map_err(|e| e.to_string())?;
+    let me = identity.peer_id.to_string();
+    if !invite.descriptor.members.iter().any(|member| member.peer_id == me) {
+        return Err("this group invitation does not include you".into());
+    }
+    let group_id = invite.descriptor.group_id.clone();
+    {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        for member in &invite.descriptor.members {
+            dir.remember_recipient_key(&member.peer_id, member.x25519_pub);
+        }
+    }
+    state.groups.lock().unwrap().insert(group_id.clone(), invite.descriptor.clone());
+    subscribe_with_relay(&state, group_topic(&group_id)).await?;
+    Ok(invite.descriptor)
+}
+
+#[tauri::command]
+async fn send_group(state: State<'_, AppState>, group_id: String, text: String) -> Result<(), String> {
+    validate_text(&text, MAX_TEXT_BYTES, "group message")?;
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let me = identity.peer_id.to_string();
+    let descriptor = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or("group not found")?;
+    if !descriptor.members.iter().any(|member| member.peer_id == me) {
+        return Err("you are not a member of this group".into());
+    }
+    let topic = group_topic(&group_id);
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipients: Vec<[u8; 32]> = descriptor
+            .members
+            .iter()
+            .filter(|member| member.peer_id != me)
+            .filter_map(|member| dir.recipient_key(&member.peer_id))
+            .collect();
+        if recipients.is_empty() {
+            return Err("no group members have validated encryption keys".into());
+        }
+        dir.seal(&identity, &recipients, topic.as_bytes(), text.as_bytes())?
+    };
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    state.history.lock().unwrap().push_dm(
+        &format!("group:{group_id}"),
+        DmMessage {
+            peer: format!("group:{group_id}"),
+            text,
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            mine: true,
+            sender: Some(me.clone()),
+            attachment_name: None,
+            attachment_mime: None,
+            attachment_data: None,
+        },
+    );
+    persist(&state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1279,6 +1419,7 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
                 mine: true,
+                sender: Some(me.clone()),
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -1344,6 +1485,7 @@ async fn publish_attachment(
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
                 mine: true,
+                sender: Some(me.clone()),
                 attachment_name: Some(name),
                 attachment_mime: Some(mime),
                 attachment_data: Some(data),
@@ -1654,6 +1796,10 @@ pub fn run() {
             fetch_blob,
             create_group_descriptor,
             verify_group_invite,
+            list_groups,
+            send_group_invite,
+            accept_group,
+            send_group,
             create_server,
             list_servers,
             create_invite,
@@ -2066,6 +2212,22 @@ pub fn run() {
                     }
                     let identity = state.identity.lock().unwrap().clone();
                     let Some(identity) = identity else { return };
+                    let group_id = topic
+                        .strip_prefix(crate::crypto::GROUP_TOPIC_PREFIX)
+                        .map(str::to_string);
+                    if let Some(group_id) = &group_id {
+                        let member = state
+                            .groups
+                            .lock()
+                            .unwrap()
+                            .get(group_id)
+                            .is_some_and(|group| {
+                                group.members.iter().any(|member| member.peer_id == identity.peer_id.to_string())
+                            });
+                        if !member {
+                            return;
+                        }
+                    }
                     // Bind the envelope's self-authenticating card to the
                     // authenticated gossipsub source. Otherwise a valid
                     // envelope could be replayed by another peer as if it
@@ -2088,6 +2250,20 @@ pub fn run() {
                     match result {
                         Ok(plaintext) => {
                             if plaintext.len() > MAX_DM_ATTACHMENT_BYTES * 2 + 4096 {
+                                return;
+                            }
+                            if let Ok(invite) = serde_json::from_slice::<GroupInvite>(&plaintext) {
+                                if invite.verify().is_err() {
+                                    return;
+                                }
+                                let mut invites = state.group_invites.lock().unwrap();
+                                if !invites.iter().any(|existing| {
+                                    existing.descriptor.group_id == invite.descriptor.group_id
+                                }) {
+                                    invites.push(invite.clone());
+                                }
+                                drop(invites);
+                                let _ = app_handle.emit("group://invite", invite);
                                 return;
                             }
                             let attachment = match serde_json::from_slice::<DmAttachmentPayload>(&plaintext) {
@@ -2126,16 +2302,25 @@ pub fn run() {
                             }
                             {
                                 let mut history = state.history.lock().unwrap();
+                                let history_key = group_id
+                                    .as_ref()
+                                    .map(|id| format!("group:{id}"))
+                                    .unwrap_or_else(|| from.clone());
+                                let history_peer = group_id
+                                    .as_ref()
+                                    .map(|id| format!("group:{id}"))
+                                    .unwrap_or_else(|| from.clone());
                                 history.push_dm(
-                                    &from,
+                                    &history_key,
                                     DmMessage {
-                                        peer: from.clone(),
+                                        peer: history_peer,
                                         text: text.clone(),
                                         ts: std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .map(|d| d.as_secs())
                                             .unwrap_or(0),
                                         mine: false,
+                                        sender: Some(from.clone()),
                                         attachment_name: attachment.as_ref().map(|(payload, _)| payload.name.clone()),
                                         attachment_mime: attachment.as_ref().map(|(payload, _)| payload.mime.clone()),
                                         attachment_data: attachment.as_ref().map(|(_, bytes)| bytes.clone()),

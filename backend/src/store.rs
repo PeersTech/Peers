@@ -9,6 +9,7 @@
 
 use crate::atomic;
 use crate::crypto::card::{SessionDir, SignedProfile};
+use crate::crypto::group::GroupDescriptor;
 use crate::crypto::server::{PersistedServer, SignedMessage};
 use crate::error::{PeersError, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -38,6 +39,8 @@ pub struct DmMessage {
     pub text: String,
     pub ts: u64,
     pub mine: bool,
+    #[serde(default)]
+    pub sender: Option<String>,
     #[serde(default)]
     pub attachment_name: Option<String>,
     #[serde(default)]
@@ -133,6 +136,8 @@ pub struct PersistedState {
     /// restart without re-signing.
     #[serde(default)]
     pub profile: Option<SignedProfile>,
+    #[serde(default)]
+    pub groups: Vec<GroupDescriptor>,
 }
 
 /// The file on disk: version + salt + one sealed payload.
@@ -288,6 +293,7 @@ pub fn state_from(
     servers: &[PersistedServer],
     history: &History,
     profile: &Option<SignedProfile>,
+    groups: &[GroupDescriptor],
 ) -> PersistedState {
     let (sessions, contacts) = dir.export();
     PersistedState {
@@ -296,6 +302,7 @@ pub fn state_from(
         servers: servers.to_vec(),
         history: history.clone(),
         profile: profile.clone(),
+        groups: groups.to_vec(),
     }
 }
 
@@ -337,6 +344,7 @@ mod tests {
                 text: "hello".into(),
                 ts: 1,
                 mine: true,
+                sender: None,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -373,6 +381,7 @@ mod tests {
                 text: "super secret contents".into(),
                 ts: 1,
                 mine: true,
+                sender: None,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,

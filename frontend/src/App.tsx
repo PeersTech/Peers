@@ -6,9 +6,9 @@ import {
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
+    acceptGroup, createGroupDescriptor, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupInvite, serverHistory, setChannel, setProfile,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
-    type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
+    type Contact, type GroupDescriptor, type GroupInvite, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type ServerMessageKind, type SignedMessageDto, type SignedProfile, type UiMessage,
 } from './lib/api';
 import {ServerRail} from './components/ServerRail';
@@ -44,6 +44,9 @@ export default function App() {
     const [me, setMe] = useState<IdentityInfo | null>(null);
     const [servers, setServers] = useState<Record<string, ServerView>>({});
     const [dms, setDms] = useState<DM[]>([]);
+    const [groups, setGroups] = useState<GroupDescriptor[]>([]);
+    const [groupInvites, setGroupInvites] = useState<GroupInvite[]>([]);
+    const [activeGroup, setActiveGroup] = useState<string | null>(null);
     const [dmOpen, setDmOpen] = useState(false);
     const [activeServer, setActiveServer] = useState<string | null>(null);
     const [activeDm, setActiveDm] = useState<string | null>(null);
@@ -94,19 +97,20 @@ export default function App() {
     const live = useRef({
         me: null as IdentityInfo | null,
         servers: {} as Record<string, ServerView>,
+        groups: [] as GroupDescriptor[],
         profiles: {} as Record<string, SignedProfile>,
     });
     useEffect(() => {
-        live.current = {me, servers, profiles};
+        live.current = {me, servers, groups, profiles};
         blobsRef.current = blobs;
-    }, [me, servers, profiles, blobs]);
+    }, [me, servers, groups, profiles, blobs]);
 
-    const activeRef = useRef({server: null as string | null, channel: null as string | null, dm: null as string | null});
+    const activeRef = useRef({server: null as string | null, channel: null as string | null, dm: null as string | null, group: null as string | null});
     const closeAddFriend = useCallback(() => setAddOpen(false), []);
     const closeSettings = useCallback(() => setSettingsOpen(false), []);
     useEffect(() => {
-        activeRef.current = {server: activeServer, channel: activeChannel, dm: activeDm};
-    }, [activeServer, activeChannel, activeDm]);
+        activeRef.current = {server: activeServer, channel: activeChannel, dm: activeDm, group: activeGroup};
+    }, [activeServer, activeChannel, activeDm, activeGroup]);
 
     useEffect(() => {
         if (!notice) return;
@@ -172,6 +176,14 @@ export default function App() {
             setServers((old) => ({...old, ...map}));
         } catch (e) {
             setError(String(e));
+        }
+    };
+
+    const refreshGroups = async () => {
+        try {
+            setGroups(await listGroups());
+        } catch (error) {
+            setError(String(error));
         }
     };
 
@@ -362,6 +374,7 @@ export default function App() {
         setDmOpen(false);
         setActiveServer(null);
         setActiveDm(null);
+        setActiveGroup(null);
         setActiveChannel(null);
         void loadPlaza();
     };
@@ -579,8 +592,8 @@ export default function App() {
         URL.revokeObjectURL(url);
     };
 
-    const loadDmHistory = async (peer: string) => {
-        const key = `dm:${peer}`;
+    const loadDmHistory = async (peer: string, historyKey = `dm:${peer}`) => {
+        const key = historyKey;
         if (historyLoaded.current.has(key)) return;
         historyLoaded.current.add(key);
         try {
@@ -596,14 +609,15 @@ export default function App() {
                 if (localAttachment && d.attachmentData) {
                     setBlobs((old) => ({...old, [localAttachment]: d.attachmentData as number[]}));
                 }
+                const sender = d.sender ?? (d.mine ? me?.peerId ?? '' : peer);
                 return {
                     id: `${d.peer}:${d.ts}:${i}`,
-                    author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(peer),
-                    authorColor: d.mine ? THEME.online : colorFor(peer),
+                    author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(sender),
+                    authorColor: d.mine ? THEME.online : colorFor(sender),
                     time: timeFor(d.ts),
                     text: d.text,
                     mine: d.mine,
-                    authorPeer: d.mine ? (me?.peerId ?? '') : peer,
+                    authorPeer: sender,
                     mentionsMe: mentionsMe(d.text, me?.peerId ?? ''),
                     attachmentHash: localAttachment,
                     attachmentName: d.attachmentName ?? undefined,
@@ -634,6 +648,7 @@ export default function App() {
                 }
                 setPhase('ready');
                 await refreshServers();
+                await refreshGroups();
                 await loadProfiles();
                 try {
                     setOnline(new Set(await onlinePeers()));
@@ -716,12 +731,18 @@ export default function App() {
         track(
             onNodeMessage((m) => {
                 if (m.from === live.current.me?.peerId) return;
-                const chan = m.from;
+                const groupId = m.channel.startsWith("peers/v1/group/")
+                    ? m.channel.slice("peers/v1/group/".length)
+                    : null;
+                const chan = groupId ?? m.from;
+                const group = groupId ? live.current.groups.find((item) => item.groupId === groupId) : undefined;
                 setDms((old) =>
-                    old.some((d) => d.id === chan) ? old : [...old, {id: chan, name: shortId(chan), unread: 0}],
+                    old.some((d) => d.id === chan)
+                        ? old
+                        : [...old, {id: chan, name: group?.name ?? shortId(chan), unread: 0}],
                 );
                 if (m.text !== undefined || m.attachmentData?.length) {
-                    const key = `dm:${chan}`;
+                    const key = groupId ? `group:${groupId}` : `dm:${chan}`;
                     const localHash = m.attachmentData?.length ? `dm:${chan}:${crypto.randomUUID()}` : undefined;
                     if (localHash && m.attachmentData) {
                         setBlobs((old) => ({...old, [localHash]: m.attachmentData as number[]}));
@@ -742,7 +763,7 @@ export default function App() {
                         attachmentEncrypted: Boolean(localHash),
                     };
                     setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
-                    if (activeRef.current.dm !== chan) {
+                    if (groupId ? activeRef.current.group !== groupId : activeRef.current.dm !== chan) {
                         setUnread((u) => ({...u, [key]: (u[key] ?? 0) + 1}));
                         setDms((old) => old.map((d) => (d.id === chan ? {...d, unread: d.unread + 1} : d)));
                     }
@@ -757,6 +778,16 @@ export default function App() {
                     old.some((x) => x.peerId === n.peerId && x.serverId === n.serverId) ? old : [...old, n],
                 ),
             ),
+        );
+        track(
+            onGroupInvite((invite) => {
+                setGroupInvites((old) =>
+                    old.some((item) => item.descriptor.groupId === invite.descriptor.groupId)
+                        ? old
+                        : [...old, invite],
+                );
+                setNotice(`Group invitation: ${invite.descriptor.name}`);
+            }),
         );
         track(
             onPeerConnected((peerId) =>
@@ -870,6 +901,7 @@ export default function App() {
         setPlazaOpen(false);
         setActiveServer(serverId);
         setActiveDm(null);
+        setActiveGroup(null);
         setDmOpen(false);
         setActiveChannel(channel);
         setUnread((u) => ({...u, [`${serverId}/${channel}`]: 0}));
@@ -884,6 +916,7 @@ export default function App() {
         } else {
             setActiveServer(id);
             setActiveDm(null);
+            setActiveGroup(null);
             setDmOpen(false);
             setActiveChannel(null);
         }
@@ -899,10 +932,62 @@ export default function App() {
             setDmOpen(true);
             setActiveServer(null);
             setActiveChannel(null);
+            setActiveGroup(null);
             if (dms.length > 0) setActiveDm(dms[0].id);
             return;
         }
         void selectServer(id);
+    };
+
+    const selectGroup = (groupId: string) => {
+        setPlazaOpen(false);
+        setDmOpen(true);
+        setActiveServer(null);
+        setActiveChannel(null);
+        setActiveDm(null);
+        setActiveGroup(groupId);
+        setUnread((u) => ({...u, [`group:${groupId}`]: 0}));
+        void loadDmHistory(`group:${groupId}`, `group:${groupId}`);
+    };
+
+    const acceptGroupInvite = async (invite: GroupInvite) => {
+        try {
+            const group = await acceptGroup(JSON.stringify(invite));
+            setGroups((old) => [...old.filter((item) => item.groupId !== group.groupId), group]);
+            setGroupInvites((old) => old.filter((item) => item.descriptor.groupId !== group.groupId));
+            selectGroup(group.groupId);
+            setNotice(`Joined ${group.name}`);
+        } catch (error) {
+            setError(String(error));
+        }
+    };
+
+    const createGroup = async () => {
+        const input = await promptDialog({
+            title: "Create encrypted group",
+            body: "Enter a group name and the peer IDs to invite. Everyone must already have a verified encryption key.",
+            label: "Group name and member peer IDs",
+            placeholder: "Weekend crew\n12D3KooW..., 12D3KooX...",
+            multiline: true,
+            validate: validateRequired("Group name and members", 3),
+        });
+        if (!input) return;
+        const parts = input.split(/[\n,]/).map((part) => part.trim()).filter(Boolean);
+        const name = parts.shift() ?? "";
+        const members = parts;
+        if (!name || members.length === 0) {
+            setError("Enter a group name and at least one member peer ID");
+            return;
+        }
+        try {
+            const group = await createGroupDescriptor(name.slice(0, 64), members);
+            setGroups((old) => [...old.filter((item) => item.groupId !== group.groupId), group]);
+            await Promise.all(members.map((peerId) => sendGroupInvite(group.groupId, peerId)));
+            selectGroup(group.groupId);
+            setNotice(`Created and invited ${group.name}`);
+        } catch (error) {
+            setError(String(error));
+        }
     };
 
     const selectChannel = (name: string) => {
@@ -955,7 +1040,14 @@ export default function App() {
             text: t,
             mine: true,
         };
-        if (activeDm) {
+        if (activeGroup) {
+            const key = `group:${activeGroup}`;
+            setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
+            void sendGroup(activeGroup, t).catch((e) => {
+                setHistory((h) => ({...h, [key]: (h[key] ?? []).filter((m) => m.id !== id)}));
+                setError(String(e));
+            });
+        } else if (activeDm) {
             const key = `dm:${activeDm}`;
             setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
             void publish(activeDm, t).catch((e) => {
@@ -1519,20 +1611,24 @@ export default function App() {
     }));
     const paneKey = plazaOpen
         ? 'plaza'
-        : dm
-          ? `dm:${dm.id}`
-          : server && activeChannel
-            ? `${server.id}/${activeChannel}`
-            : null;
+        : activeGroup
+          ? `group:${activeGroup}`
+          : dm
+            ? `dm:${dm.id}`
+            : server && activeChannel
+              ? `${server.id}/${activeChannel}`
+              : null;
     const paneMessages = plazaOpen ? plazaMessages : paneKey ? history[paneKey] ?? [] : [];
     const paneName = plazaOpen
         ? 'plaza'
-        : dm
-          ? (profiles[dm.id]?.displayName ?? dm.name)
-          : server?.channels.find((c) => c.name === activeChannel)?.name ?? '';
+        : activeGroup
+          ? groups.find((group) => group.groupId === activeGroup)?.name ?? 'group'
+          : dm
+            ? (profiles[dm.id]?.displayName ?? dm.name)
+            : server?.channels.find((c) => c.name === activeChannel)?.name ?? '';
     const onlineCount = server ? server.members.filter((m) => online.has(m.peerId)).length : 0;
     const dmOnline = dm ? online.has(dm.id) : false;
-    const paneMembers: Contact[] = plazaOpen || dm
+    const paneMembers: Contact[] = plazaOpen || dm || activeGroup
         ? contactsFor()
         : (server?.members ?? []);
     const plazaHere = plazaRoster.length + (me ? 1 : 0);
@@ -1644,13 +1740,22 @@ export default function App() {
                 <div className="flex h-full w-[248px] flex-col bg-surface-2">
                     <div className="flex h-12 shrink-0 items-center justify-between border-b border-surface-1 px-4">
                         <span className="font-semibold">Direct messages</span>
-                        <button
-                            onClick={() => void addDm()}
-                            title="Message a peer by ID"
-                            className="flex h-6 w-6 items-center justify-center rounded text-lg font-light text-online hover:bg-surface-3"
-                        >
-                            +
-                        </button>
+                        <div className="flex items-center gap-1">
+                            <button
+                                onClick={() => void createGroup()}
+                                title="Create encrypted group"
+                                className="rounded px-1.5 py-0.5 text-xs text-accent hover:bg-surface-3"
+                            >
+                                Group
+                            </button>
+                            <button
+                                onClick={() => void addDm()}
+                                title="Message a peer by ID"
+                                className="flex h-6 w-6 items-center justify-center rounded text-lg font-light text-online hover:bg-surface-3"
+                            >
+                                +
+                            </button>
+                        </div>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2">
                         {friendRequests.length > 0 && (
@@ -1685,7 +1790,37 @@ export default function App() {
                                 ))}
                             </div>
                         )}
-                        {dms.length === 0 && friendRequests.length === 0 && (
+                        {groupInvites.length > 0 && (
+                            <div className="mb-2 px-2 pt-2">
+                                <div className="pb-1 text-[10px] font-bold uppercase tracking-wide text-warn">Group invitations</div>
+                                {groupInvites.map((invite) => (
+                                    <div key={invite.descriptor.groupId} className="mb-1 flex items-center gap-1 rounded bg-surface-1 px-2 py-1">
+                                        <span className="min-w-0 flex-1 truncate text-xs text-ink">{invite.descriptor.name}</span>
+                                        <button onClick={() => void acceptGroupInvite(invite)} className="rounded px-1.5 py-0.5 text-[10px] font-bold text-online hover:bg-surface-4">Join</button>
+                                        <button onClick={() => setGroupInvites((old) => old.filter((item) => item.descriptor.groupId !== invite.descriptor.groupId))} className="rounded px-1.5 py-0.5 text-[10px] text-faint hover:bg-surface-4">×</button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {groups.length > 0 && (
+                            <>
+                                <div className="px-2 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wide text-faint">Groups</div>
+                                {groups.map((group) => (
+                                    <button
+                                        key={group.groupId}
+                                        onClick={() => selectGroup(group.groupId)}
+                                        className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
+                                            group.groupId === activeGroup ? "bg-surface-4 text-ink" : "text-ink-dim hover:bg-surface-3"
+                                        }`}
+                                    >
+                                        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-accent/20 text-xs text-accent">#</span>
+                                        <span className="flex-1 truncate">{group.name}</span>
+                                        <span className="text-[10px] text-faint">{group.members.length}</span>
+                                    </button>
+                                ))}
+                            </>
+                        )}
+                        {dms.length === 0 && friendRequests.length === 0 && groups.length === 0 && (
                             <div className="px-2 py-4 text-xs text-muted">
                                 No DMs yet — add a peer ID to start an encrypted channel.
                             </div>
@@ -1694,6 +1829,7 @@ export default function App() {
                             <button
                                 key={d.id}
                                 onClick={() => {
+                                    setActiveGroup(null);
                                     setActiveDm(d.id);
                                     setUnread((u) => ({...u, [`dm:${d.id}`]: 0}));
                                     setDms((old) => old.map((x) => (x.id === d.id ? {...x, unread: 0} : x)));
@@ -1759,11 +1895,13 @@ export default function App() {
                 subtitle={[
                     plazaOpen
                         ? `Public · ${plazaHere} here`
-                        : dm
-                          ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}`
-                          : server
-                            ? `Signed broadcast · ${onlineCount}/${server.memberCount} online`
-                            : '',
+                        : activeGroup
+                          ? `Encrypted group · ${groups.find((group) => group.groupId === activeGroup)?.members.length ?? 0} members`
+                          : dm
+                            ? `E2E encrypted · direct · ${dmOnline ? 'online' : 'offline'}`
+                            : server
+                              ? `Signed broadcast · ${onlineCount}/${server.memberCount} online`
+                              : '',
                     netLabel(),
                 ]
                     .filter(Boolean)

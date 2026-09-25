@@ -145,6 +145,7 @@ export interface DmMessageDto {
     text: string;
     ts: number;
     mine: boolean;
+    sender?: string | null;
     attachmentName?: string | null;
     attachmentMime?: string | null;
     attachmentData?: number[] | null;
@@ -283,6 +284,15 @@ export const createGroupDescriptor = (name: string, peerIds: string[]) =>
     invoke<GroupDescriptor>("create_group_descriptor", {name, peerIds});
 export const verifyGroupInvite = (inviteJson: string) =>
     invoke<GroupInvite>("verify_group_invite", {inviteJson});
+export const listGroups = () => invoke<GroupDescriptor[]>("list_groups");
+export const sendGroupInvite = (groupId: string, peerId: string) =>
+    invoke<void>("send_group_invite", {groupId, peerId});
+export const acceptGroup = (inviteJson: string) =>
+    invoke<GroupDescriptor>("accept_group", {inviteJson});
+export const sendGroup = (groupId: string, text: string) =>
+    invoke<void>("send_group", {groupId, text});
+export const onGroupInvite = (cb: (invite: GroupInvite) => void) =>
+    listen<GroupInvite>("group://invite", (e) => cb(e.payload));
 export const listServers = () => invoke<ServerView[]>("list_servers");
 export const createInvite = (serverId: string) => invoke<string>("create_invite", {serverId});
 export const joinServer = (inviteJson: string, name: string) =>

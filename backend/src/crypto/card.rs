@@ -202,6 +202,12 @@ impl SessionDir {
         Ok(self.sessions.get_mut(&their_pub).expect("just inserted"))
     }
 
+    /// Remembers a validated X25519 key for a peer whose full card is not
+    /// available (for example, after accepting a signed group descriptor).
+    pub fn remember_recipient_key(&mut self, peer_id: &str, x25519_pub: [u8; 32]) {
+        self.contacts.insert(peer_id.to_string(), x25519_pub);
+    }
+
     /// Remembers a validated card so future sends can encrypt to this peer.
     pub fn remember_contact(&mut self, peer_id: &str, card: &PeerCard) {
         self.contacts.insert(peer_id.to_string(), card.x25519_pub);

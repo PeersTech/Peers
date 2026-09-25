@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 const GROUP_DOMAIN: &[u8] = b"peers/v1/group";
 const MAX_GROUP_NAME: usize = 64;
 const MAX_GROUP_MEMBERS: usize = 64;
+pub const GROUP_TOPIC_PREFIX: &str = "peers/v1/group/";
+
+pub fn group_topic(group_id: &str) -> String {
+    format!("{GROUP_TOPIC_PREFIX}{group_id}")
+}
 
 /// A member of a group DM. The X25519 key is enough for multi-recipient
 /// sealing; the owner authenticates the membership set with `owner_pub`.
@@ -109,7 +114,7 @@ impl GroupDescriptor {
         for member in &self.members {
             if member.peer_id.is_empty()
                 || member.peer_id.len() > 128
-                || member.peer_id <= previous
+                || member.peer_id.as_str() <= previous
             {
                 return Err(PeersError::Other("group members must be sorted and unique".into()));
             }
