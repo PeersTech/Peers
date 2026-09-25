@@ -18,7 +18,8 @@ use crate::crypto::{group_topic, GroupDescriptor, GroupInvite, Identity, Keystor
 use crate::error::PeersError;
 use crate::p2p::{NodeCommand, NodeEvent, NodeHandle};
 use crate::store::{
-    state_apply, state_from, DmMessage, History, PersistedState, Store, StoreHandle,
+    state_apply, state_from, DmMessage, History, IncomingTransfer, PersistedState, Store,
+    StoreHandle,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -50,6 +51,11 @@ const MAX_PLAZA_FUTURE_SKEW_SECS: u64 = 300;
 const MAX_PLAZA_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_BLOB_BYTES: usize = 64 * 1024;
 const MAX_DM_ATTACHMENT_BYTES: usize = 40 * 1024;
+const MAX_DM_ATTACHMENT_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DM_ATTACHMENT_CHUNK_BYTES: usize = 24 * 1024;
+const MAX_DM_ATTACHMENT_CHUNKS: usize = 512;
+const MAX_INCOMING_TRANSFERS: usize = 32;
+const MAX_DM_ENVELOPE_PLAINTEXT_BYTES: usize = 96 * 1024;
 
 fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
     if value.len() > max {
@@ -59,6 +65,7 @@ fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GroupMessagePayload {
     group_id: String,
     revision: u64,
@@ -67,6 +74,7 @@ struct GroupMessagePayload {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GroupAckPayload {
     kind: String,
     group_id: String,
@@ -92,6 +100,20 @@ struct DmAttachmentPayload {
     id: String,
     name: String,
     mime: String,
+    data: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DmAttachmentChunkPayload {
+    kind: String,
+    id: String,
+    transfer_id: String,
+    name: String,
+    mime: String,
+    total_size: usize,
+    chunk_index: usize,
+    chunk_count: usize,
     data: String,
 }
 
@@ -139,6 +161,7 @@ pub struct AppState {
     storage: Mutex<Option<StoreHandle>>,
     history: Mutex<History>,
     outbox: Mutex<Vec<crate::store::OutboxEntry>>,
+    incoming_transfers: Mutex<HashMap<String, IncomingTransfer>>,
     /// Peer ids with an open connection right now (presence).
     presence: Mutex<HashSet<String>>,
     /// Our own listen multiaddrs, learned from node `Listening` events.
@@ -177,6 +200,7 @@ impl Default for AppState {
             storage: Mutex::new(None),
             history: Mutex::new(History::default()),
             outbox: Mutex::new(Vec::new()),
+            incoming_transfers: Mutex::new(HashMap::new()),
             presence: Mutex::new(HashSet::new()),
             addrs: Mutex::new(Vec::new()),
             profile: Mutex::new(None),
@@ -465,6 +489,11 @@ async fn finish_unlock(
     }
 
     *state.outbox.lock().unwrap() = persisted.outbox.clone();
+    *state.incoming_transfers.lock().unwrap() = persisted
+        .incoming_transfers
+        .iter()
+        .map(|transfer| (transfer.message_id.clone(), transfer.clone()))
+        .collect();
     *state.groups.lock().unwrap() = persisted
         .groups
         .iter()
@@ -631,17 +660,26 @@ fn persist(state: &AppState) {
         let profile = state.profile.lock().unwrap();
         let groups: Vec<_> = state.groups.lock().unwrap().values().cloned().collect();
         let outbox = state.outbox.lock().unwrap().clone();
+        let incoming_transfers: Vec<_> = state
+            .incoming_transfers
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
         let servers: Vec<_> = servers.records().iter().map(|r| r.to_persisted()).collect();
         match dir.as_ref() {
             Some(dir) => {
                 let mut persisted = state_from(dir, &servers, &history, &profile, &groups);
                 persisted.outbox = outbox;
+                persisted.incoming_transfers = incoming_transfers;
                 persisted
             }
             None => PersistedState {
                 servers,
                 history: history.clone(),
                 outbox,
+                incoming_transfers,
                 profile: profile.clone(),
                 ..PersistedState::default()
             },
@@ -655,6 +693,7 @@ async fn retry_outbox(state: &AppState) {
     if entries.is_empty() {
         return;
     }
+    let mut subscribed = HashSet::new();
     for entry in entries {
         let identity = state.identity.lock().unwrap().clone();
         let Some(identity) = identity else { continue };
@@ -689,8 +728,11 @@ async fn retry_outbox(state: &AppState) {
                 Err(_) => continue,
             }
         };
-        if subscribe_with_relay(state, topic.clone()).await.is_err() {
-            continue;
+        if !subscribed.contains(&topic) {
+            if subscribe_with_relay(state, topic.clone()).await.is_err() {
+                continue;
+            }
+            subscribed.insert(topic.clone());
         }
         let node = state.node.lock().unwrap().clone();
         let Some(node) = node else { continue };
@@ -766,6 +808,7 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.identity.lock().unwrap() = None;
     *state.history.lock().unwrap() = History::default();
     *state.outbox.lock().unwrap() = Vec::new();
+    *state.incoming_transfers.lock().unwrap() = HashMap::new();
     *state.presence.lock().unwrap() = HashSet::new();
     *state.addrs.lock().unwrap() = Vec::new();
     *state.profile.lock().unwrap() = None;
@@ -1667,6 +1710,92 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
     Ok(id)
 }
 
+async fn publish_attachment_chunked(
+    state: &AppState,
+    peer: String,
+    name: String,
+    mime: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() || data.len() > MAX_DM_ATTACHMENT_TOTAL_BYTES {
+        return Err(format!(
+            "DM attachments must be between 1 and {MAX_DM_ATTACHMENT_TOTAL_BYTES} bytes"
+        ));
+    }
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    let me = identity.peer_id.to_string();
+    {
+        let dir = state.dir.lock().unwrap();
+        let Some(dir) = dir.as_ref() else {
+            return Err("not unlocked".into());
+        };
+        if dir.recipient_key(&peer).is_none() {
+            return Err("no encryption key for this peer yet — meet them on a server or the Plaza first".into());
+        }
+    }
+    let message_id = new_message_id();
+    let topic = format!("peers/v1/ch/{peer}");
+    let chunk_count = data.len().div_ceil(MAX_DM_ATTACHMENT_CHUNK_BYTES);
+    if chunk_count > MAX_DM_ATTACHMENT_CHUNKS {
+        return Err("attachment has too many chunks".into());
+    }
+    for (chunk_index, chunk) in data.chunks(MAX_DM_ATTACHMENT_CHUNK_BYTES).enumerate() {
+        let chunk_id = format!("{message_id}:{chunk_index}");
+        let payload = serde_json::to_string(&serde_json::json!({
+            "kind": "attachment-chunk",
+            "id": chunk_id.clone(),
+            "transferId": message_id.clone(),
+            "name": name.clone(),
+            "mime": mime.clone(),
+            "totalSize": data.len(),
+            "chunkIndex": chunk_index,
+            "chunkCount": chunk_count,
+            "data": B64.encode(chunk),
+        }))
+        .map_err(|e| e.to_string())?;
+        state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+            id: chunk_id,
+            peer: peer.clone(),
+            payload,
+            topic: topic.clone(),
+            group_id: None,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            attempts: 0,
+        });
+    }
+    persist(state);
+    let _ = subscribe_with_relay(state, topic).await;
+    retry_outbox(state).await;
+    state.history.lock().unwrap().push_dm(
+        &peer,
+        DmMessage {
+            peer: peer.clone(),
+            text: String::new(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            mine: true,
+            sender: Some(me),
+            id: message_id.clone(),
+            read: false,
+            attachment_name: Some(name),
+            attachment_mime: Some(mime),
+            attachment_data: Some(data),
+        },
+    );
+    persist(state);
+    Ok(message_id)
+}
+
 #[tauri::command]
 async fn publish_attachment(
     state: State<'_, AppState>,
@@ -1681,13 +1810,16 @@ async fn publish_attachment(
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
-    if data.is_empty() || data.len() > MAX_DM_ATTACHMENT_BYTES {
+    if data.is_empty() || data.len() > MAX_DM_ATTACHMENT_TOTAL_BYTES {
         return Err(format!(
-            "DM attachments must be between 1 and {MAX_DM_ATTACHMENT_BYTES} bytes"
+            "DM attachments must be between 1 and {MAX_DM_ATTACHMENT_TOTAL_BYTES} bytes"
         ));
     }
     validate_text(&name, 255, "attachment name")?;
     validate_text(&mime, 127, "attachment type")?;
+    if data.len() > MAX_DM_ATTACHMENT_BYTES {
+        return publish_attachment_chunked(&state, peer, name, mime, data).await;
+    }
     let id = new_message_id();
     let topic = format!("peers/v1/ch/{peer}");
     let body = serde_json::json!({
@@ -2043,6 +2175,169 @@ async fn fetch_blob(state: State<'_, AppState>, hash: String) -> Result<(), Stri
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     let hash = p2p::parse_hex_hash(&hash).ok_or("invalid hash")?;
     node.send(NodeCommand::FetchBlob(hash)).await?;
+    Ok(())
+}
+
+async fn receive_attachment_chunk(
+    state: &AppState,
+    app: &AppHandle,
+    identity: &Identity,
+    topic: &str,
+    from: &str,
+    envelope: &[u8],
+    chunk: DmAttachmentChunkPayload,
+) -> Result<(), String> {
+    if chunk.kind != "attachment-chunk"
+        || chunk.id.is_empty()
+        || chunk.id.len() > 64
+        || chunk.transfer_id.is_empty()
+        || chunk.transfer_id.len() > 64
+        || chunk.name.is_empty()
+        || chunk.name.len() > 255
+        || chunk.mime.is_empty()
+        || chunk.mime.len() > 127
+        || chunk.total_size == 0
+        || chunk.total_size > MAX_DM_ATTACHMENT_TOTAL_BYTES
+        || chunk.chunk_count == 0
+        || chunk.chunk_count > MAX_DM_ATTACHMENT_CHUNKS
+        || chunk.chunk_index >= chunk.chunk_count
+    {
+        return Err("invalid attachment chunk metadata".into());
+    }
+    let expected_chunks = chunk.total_size.div_ceil(MAX_DM_ATTACHMENT_CHUNK_BYTES);
+    if expected_chunks != chunk.chunk_count {
+        return Err("attachment chunk count does not match size".into());
+    }
+    let bytes = B64
+        .decode(&chunk.data)
+        .map_err(|_| "invalid attachment chunk encoding".to_string())?;
+    let expected_size = if chunk.chunk_index + 1 == chunk.chunk_count {
+        chunk
+            .total_size
+            .checked_sub(chunk.chunk_index * MAX_DM_ATTACHMENT_CHUNK_BYTES)
+            .ok_or("attachment chunk offset overflow")?
+    } else {
+        MAX_DM_ATTACHMENT_CHUNK_BYTES
+    };
+    if bytes.len() != expected_size || bytes.is_empty() {
+        return Err("attachment chunk has the wrong size".into());
+    }
+
+    if let Ok(card) = crate::crypto::card::card_from_envelope(envelope) {
+        let mut dir = state.dir.lock().unwrap();
+        if let Some(dir) = dir.as_mut() {
+            dir.remember_contact(from, &card);
+        }
+    }
+
+    let already_stored = state
+        .history
+        .lock()
+        .unwrap()
+        .dm_messages(from)
+        .iter()
+        .any(|message| message.id == chunk.transfer_id);
+    let mut completed: Option<DmMessage> = None;
+    {
+        let mut transfers = state.incoming_transfers.lock().unwrap();
+        if let Some(existing) = transfers.get(&chunk.transfer_id) {
+            if existing.peer != from
+                || existing.message_id != chunk.transfer_id
+                || existing.name != chunk.name
+                || existing.mime != chunk.mime
+                || existing.total_size != chunk.total_size
+                || existing.chunk_count != chunk.chunk_count
+            {
+                return Err("attachment transfer metadata changed".into());
+            }
+        } else {
+            if transfers.len() >= MAX_INCOMING_TRANSFERS {
+                return Err("too many incomplete attachment transfers".into());
+            }
+            transfers.insert(
+                chunk.transfer_id.clone(),
+                IncomingTransfer {
+                    peer: from.to_string(),
+                    message_id: chunk.transfer_id.clone(),
+                    name: chunk.name.clone(),
+                    mime: chunk.mime.clone(),
+                    total_size: chunk.total_size,
+                    chunk_count: chunk.chunk_count,
+                    chunks: vec![None; chunk.chunk_count],
+                },
+            );
+        }
+        let transfer = transfers
+            .get_mut(&chunk.transfer_id)
+            .ok_or("attachment transfer disappeared")?;
+        transfer.chunks[chunk.chunk_index] = Some(bytes);
+        if transfer.chunks.iter().all(|chunk| chunk.is_some()) {
+            let transfer = transfers
+                .remove(&chunk.transfer_id)
+                .ok_or("attachment transfer disappeared")?;
+            let mut data = Vec::with_capacity(transfer.total_size);
+            for part in transfer.chunks.into_iter().flatten() {
+                data.extend_from_slice(&part);
+            }
+            if data.len() != transfer.total_size {
+                return Err("assembled attachment has the wrong size".into());
+            }
+            if !already_stored {
+                completed = Some(DmMessage {
+                    peer: transfer.peer.clone(),
+                    text: String::new(),
+                    ts: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    mine: false,
+                    sender: Some(transfer.peer),
+                    id: transfer.message_id,
+                    read: false,
+                    attachment_name: Some(transfer.name),
+                    attachment_mime: Some(transfer.mime),
+                    attachment_data: Some(data),
+                });
+            }
+        }
+    }
+    persist(state);
+    if let Some(message) = completed {
+        let peer = message.peer.clone();
+        let event = serde_json::json!({
+            "from": peer.clone(),
+            "channel": topic,
+            "text": "",
+            "attachmentName": message.attachment_name.clone(),
+            "attachmentMime": message.attachment_mime.clone(),
+            "attachmentData": message.attachment_data.clone(),
+        });
+        state.history.lock().unwrap().push_dm(&peer, message);
+        persist(state);
+        let _ = app.emit("node://message", event);
+    }
+
+    let ack_body = serde_json::to_vec(&serde_json::json!({
+        "kind": "ack",
+        "id": chunk.id,
+    }))
+    .map_err(|e| e.to_string())?;
+    let ack_payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let Some(dir) = dir.as_mut() else { return Ok(()) };
+        let Some(recipient) = dir.recipient_key(from) else { return Ok(()) };
+        dir.seal(identity, &[recipient], topic.as_bytes(), &ack_body).ok()
+    };
+    if let Some(ack_payload) = ack_payload {
+        if let Some(node) = state.node.lock().unwrap().clone() {
+            let _ = node
+                .send(NodeCommand::Publish {
+                    topic: topic.to_string(),
+                    data: ack_payload,
+                })
+                .await;
+        }
+    }
     Ok(())
 }
 
@@ -2537,8 +2832,25 @@ pub fn run() {
                     let Some(result) = opened else { return };
                     match result {
                         Ok(plaintext) => {
-                            if plaintext.len() > MAX_DM_ATTACHMENT_BYTES * 2 + 4096 {
+                            if plaintext.len() > MAX_DM_ENVELOPE_PLAINTEXT_BYTES {
                                 return;
+                            }
+                            if group_id.is_none() {
+                                if let Ok(chunk) = serde_json::from_slice::<DmAttachmentChunkPayload>(&plaintext) {
+                                    if chunk.kind == "attachment-chunk" {
+                                        let _ = receive_attachment_chunk(
+                                            &state,
+                                            &app_handle,
+                                            &identity,
+                                            &topic,
+                                            &from,
+                                            &data,
+                                            chunk,
+                                        )
+                                        .await;
+                                        return;
+                                    }
+                                }
                             }
                             let mut incoming_text = None;
                             let mut incoming_id = None;

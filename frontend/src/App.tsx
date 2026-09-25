@@ -540,8 +540,8 @@ export default function App() {
     const uploadAttachment = async (file: File) => {
         const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
         if (activeDm) {
-            if (bytes.length === 0 || bytes.length > 40 * 1024) {
-                setError("DM attachments must be between 1 byte and 40 KiB");
+            if (bytes.length === 0 || bytes.length > 8 * 1024 * 1024) {
+                setError("DM attachments must be between 1 byte and 8 MiB");
                 return;
             }
             const peer = activeDm;

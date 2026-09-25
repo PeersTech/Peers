@@ -147,6 +147,20 @@ impl History {
     }
 }
 
+/// A partially received encrypted DM attachment. Chunks are retained so a
+/// transfer can resume after the receiving app restarts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncomingTransfer {
+    pub peer: String,
+    pub message_id: String,
+    pub name: String,
+    pub mime: String,
+    pub total_size: usize,
+    pub chunk_count: usize,
+    pub chunks: Vec<Option<Vec<u8>>>,
+}
+
 /// Everything that survives a restart, serialized into one sealed blob.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,6 +171,8 @@ pub struct PersistedState {
     pub history: History,
     #[serde(default)]
     pub outbox: Vec<OutboxEntry>,
+    #[serde(default)]
+    pub incoming_transfers: Vec<IncomingTransfer>,
     /// Our own signed display profile, so name/avatar/about survive a
     /// restart without re-signing.
     #[serde(default)]
@@ -326,6 +342,7 @@ pub fn state_from(
         contacts,
         servers: servers.to_vec(),
         history: history.clone(),
+        incoming_transfers: Vec::new(),
         profile: profile.clone(),
         groups: groups.to_vec(),
     }
@@ -377,12 +394,23 @@ mod tests {
                 attachment_data: None,
             },
         );
+        state.incoming_transfers.push(IncomingTransfer {
+            peer: "peer1".into(),
+            message_id: "transfer1".into(),
+            name: "resume.bin".into(),
+            mime: "application/octet-stream".into(),
+            total_size: 2,
+            chunk_count: 1,
+            chunks: vec![Some(vec![1, 2])],
+        });
         handle.save(&state).unwrap();
 
         let handle2 = store.open("hunter2hunter").unwrap();
         let state2 = handle2.load().unwrap();
         assert_eq!(state2.history.dm_messages("peer1").len(), 1);
         assert!(state2.history.dm_messages("peer1")[0].read);
+        assert_eq!(state2.incoming_transfers.len(), 1);
+        assert_eq!(state2.incoming_transfers[0].chunks[0], Some(vec![1, 2]));
     }
 
     #[test]

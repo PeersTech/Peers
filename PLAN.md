@@ -49,6 +49,17 @@
 
 **Status:** done — queued messages remain visible and can be retried explicitly.
 
+### Chunked DM attachments — current slice
+
+- Preserve the sealed single-envelope path for small attachments
+- Split larger DM attachments into bounded encrypted chunks
+- Persist incomplete incoming transfers across restart
+- Acknowledge each chunk and deduplicate retransmissions
+- Keep sender chunks in the existing outbox for retry
+- Expose the larger attachment limit in the frontend
+
+**Status:** done — large DM attachments now use encrypted, persisted, retryable chunks.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of
