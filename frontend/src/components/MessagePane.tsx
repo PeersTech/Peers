@@ -24,6 +24,7 @@ interface Props {
     attachmentsEnabled?: boolean;
     onAttach: (file: File) => void;
     onDownloadAttachment: (hash: string, name: string) => void;
+    uploadingAttachment?: string | null;
     outboxPending?: number;
     onRetryOutbox?: () => void;
     /** Returns an avatar data URL for a peer id, or null to show the color dot. */
@@ -83,6 +84,7 @@ function MentionComposer({
     draftKey,
     onAttach,
     canAttach,
+    uploadingAttachment,
 }: {
     members: Contact[];
     onSend: (text: string) => void;
@@ -92,6 +94,7 @@ function MentionComposer({
     draftKey: string;
     onAttach: (file: File) => void;
     canAttach: boolean;
+    uploadingAttachment?: string | null;
 }) {
     const [value, setValue] = useState("");
     const [query, setQuery] = useState<{at: number; term: string} | null>(null);
@@ -243,7 +246,12 @@ function MentionComposer({
             <div className="mt-1 flex items-center justify-between">
                 <span className="text-[10px] text-faint">@ for mention · ctrl+k</span>
                 <div className="flex items-center gap-1">
-                    {canAttach && (
+                    {uploadingAttachment && (
+                        <span className="max-w-[15rem] truncate px-2 py-1 text-[10px] text-faint" title={uploadingAttachment}>
+                            Uploading {uploadingAttachment}…
+                        </span>
+                    )}
+                    {canAttach && !uploadingAttachment && (
                         <label className="cursor-pointer rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-4 hover:text-ink" title="Attach a file (max 64 KiB)">
                             Attach
                             <input
@@ -290,7 +298,7 @@ function MentionComposer({
 }
 
 export function MessagePane({
-    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, outboxPending = 0, onRetryOutbox, avatarFor,
+    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, uploadingAttachment, outboxPending = 0, onRetryOutbox, avatarFor,
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const canAct = actionsEnabled ?? false;
@@ -571,6 +579,7 @@ export function MessagePane({
                 draftKey={channelName}
                 onAttach={onAttach}
                 canAttach={canAttach}
+                uploadingAttachment={uploadingAttachment}
             />
         </div>
     );

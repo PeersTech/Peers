@@ -84,6 +84,7 @@ export default function App() {
     const [avatarBytes, setAvatarBytes] = useState<number[] | null>(null);
     const [pendingHash, setPendingHash] = useState<string | null>(null);
     const [avatarUploading, setAvatarUploading] = useState(false);
+    const [uploadingAttachment, setUploadingAttachment] = useState<string | null>(null);
     /** Incoming friend requests from peers who scanned our code. */
     const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
     const booted = useRef(false);
@@ -522,6 +523,7 @@ export default function App() {
     };
 
     const finishAttachmentUpload = async (hash: string) => {
+        setUploadingAttachment(null);
         const pending = pendingAttachment.current;
         pendingAttachment.current = null;
         if (!pending) return;
@@ -551,15 +553,24 @@ export default function App() {
     };
 
     const uploadAttachment = async (file: File) => {
-        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        const name = file.name.slice(0, 255) || "attachment";
+        setUploadingAttachment(name);
+        let bytes: number[];
+        try {
+            bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        } catch (error) {
+            setUploadingAttachment(null);
+            setError(String(error));
+            return;
+        }
         if (activeDm) {
             if (bytes.length === 0 || bytes.length > 8 * 1024 * 1024) {
+                setUploadingAttachment(null);
                 setError("DM attachments must be between 1 byte and 8 MiB");
                 return;
             }
             const peer = activeDm;
             const localHash = `dm:${peer}:${crypto.randomUUID()}`;
-            const name = file.name.slice(0, 255) || "attachment";
             const mime = file.type.slice(0, 127) || "application/octet-stream";
             try {
                 const messageId = await publishAttachment(peer, name, mime, bytes);
@@ -581,16 +592,20 @@ export default function App() {
                     delivery: "sent",
                 };
                 setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
+                setUploadingAttachment(null);
             } catch (error) {
+                setUploadingAttachment(null);
                 setError(String(error));
             }
             return;
         }
         if (!activeServer || !activeChannel) {
+            setUploadingAttachment(null);
             setError("Open a conversation before attaching a file");
             return;
         }
         if (bytes.length === 0 || bytes.length > 64 * 1024) {
+            setUploadingAttachment(null);
             setError("Server attachments must be between 1 byte and 64 KiB");
             return;
         }
@@ -607,6 +622,7 @@ export default function App() {
             await parkBlob(bytes);
         } catch (error) {
             pendingAttachment.current = null;
+            setUploadingAttachment(null);
             setError(String(error));
         }
     };
@@ -2042,6 +2058,7 @@ export default function App() {
                 attachmentsEnabled={Boolean((server && activeChannel) || activeDm)}
                 onAttach={(file) => void uploadAttachment(file)}
                 onDownloadAttachment={downloadAttachment}
+                uploadingAttachment={uploadingAttachment}
                 outboxPending={net?.outboxPending ?? 0}
                 onRetryOutbox={retryQueued}
                 avatarFor={avatarFor}

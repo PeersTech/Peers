@@ -69,6 +69,15 @@
 
 **Status:** done — group delivery acknowledgements and read receipts remain separate.
 
+### Attachment transfer UX — current slice
+
+- Show the active attachment name while upload work is in progress
+- Prevent duplicate attachment selection during an active transfer
+- Clear transfer status on success, validation failure, or backend failure
+- Keep DM chunking and channel attachment flows behind the same UI state
+
+**Status:** done — active attachment work is visible and duplicate selection is blocked.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of
