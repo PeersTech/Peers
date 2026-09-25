@@ -44,21 +44,21 @@ pub fn seal(session: &mut Session, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u
 /// never corrupt session state; successful opens are recorded for replay
 /// detection.
 pub fn open(session: &mut Session, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
-    let (seq, key, body) = if sealed.starts_with(ENVELOPE_V2) {
+    let (seq, key, body, incoming_nonce) = if sealed.starts_with(ENVELOPE_V2) {
         if sealed.len() < ENVELOPE_V2_HEADER + 16 {
             return Err(PeersError::BadCipher);
         }
         let session_nonce: [u8; 16] = sealed[3..19].try_into().map_err(|_| PeersError::BadCipher)?;
         let seq = u64::from_be_bytes(sealed[19..27].try_into().map_err(|_| PeersError::BadCipher)?);
         let key = session.incoming_key_at_with_nonce(seq, session_nonce)?;
-        (seq, key, &sealed[ENVELOPE_V2_HEADER..])
+        (seq, key, &sealed[ENVELOPE_V2_HEADER..], Some(session_nonce))
     } else {
         if sealed.len() < 8 + 16 {
             return Err(PeersError::BadCipher);
         }
         let seq = u64::from_be_bytes(sealed[..8].try_into().map_err(|_| PeersError::BadCipher)?);
         let key = session.incoming_key_at(seq)?;
-        (seq, key, &sealed[8..])
+        (seq, key, &sealed[8..], None)
     };
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let nf = nonce_for(seq);
@@ -70,6 +70,9 @@ pub fn open(session: &mut Session, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>>
     let pt = cipher
         .decrypt(nonce, payload)
         .map_err(|_| PeersError::BadCipher)?;
+    if let Some(session_nonce) = incoming_nonce {
+        session.accept_incoming_nonce(session_nonce);
+    }
     if session.check_replay(seq) {
         return Err(PeersError::Replay);
     }

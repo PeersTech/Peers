@@ -158,21 +158,24 @@ impl Session {
     }
 
     pub(crate) fn incoming_key_at_with_nonce(
-        &mut self,
+        &self,
         n: u64,
         session_nonce: [u8; 16],
     ) -> Result<[u8; 32]> {
-        if self.inbound_nonce != Some(session_nonce) {
-            self.inbound_nonce = Some(session_nonce);
-            self.opened.clear();
-            self.max_opened = 0;
-        }
         let direction = if self.local_is_low {
             b"high-to-low"
         } else {
             b"low-to-high"
         };
         self.key_at_with_direction_and_nonce(n, direction, session_nonce)
+    }
+
+    pub(crate) fn accept_incoming_nonce(&mut self, session_nonce: [u8; 16]) {
+        if self.inbound_nonce != Some(session_nonce) {
+            self.inbound_nonce = Some(session_nonce);
+            self.opened.clear();
+            self.max_opened = 0;
+        }
     }
 
     /// Key for an outgoing message at `n`.
