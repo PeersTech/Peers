@@ -337,7 +337,7 @@ export const publishChannelAction = (
 export const subscribe = (channel: string) => invoke<void>("subscribe", {channel});
 export const publish = (channel: string, text: string) => invoke<string>("publish", {channel, text});
 export const publishAttachment = (peer: string, name: string, mime: string, data: number[]) =>
-    invoke<void>("publish_attachment", {peer, name, mime, data});
+    invoke<string>("publish_attachment", {peer, name, mime, data});
 
 export const setProfile = (displayName: string, about: string, avatarHash: string | null) =>
     invoke<SignedProfile>("set_profile", {displayName, about, avatarHash});

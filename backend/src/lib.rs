@@ -1664,7 +1664,7 @@ async fn publish_attachment(
     name: String,
     mime: String,
     data: Vec<u8>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let identity = state
         .identity
         .lock()
@@ -1680,6 +1680,27 @@ async fn publish_attachment(
     validate_text(&mime, 127, "attachment type")?;
     let id = new_message_id();
     let topic = format!("peers/v1/ch/{peer}");
+    let body = serde_json::json!({
+        "kind": "attachment",
+        "id": id.clone(),
+        "name": name.clone(),
+        "mime": mime.clone(),
+        "data": B64.encode(&data),
+    });
+    let outbox_payload = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+        id: id.clone(),
+        peer: peer.clone(),
+        payload: outbox_payload,
+        topic: topic.clone(),
+        group_id: None,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        attempts: 0,
+    });
+    persist(&state);
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
@@ -1689,13 +1710,6 @@ async fn publish_attachment(
                     .into(),
             )
         })?;
-        let body = serde_json::json!({
-            "kind": "attachment",
-            "id": id,
-            "name": name,
-            "mime": mime,
-            "data": B64.encode(&data),
-        });
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
         dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
     };
@@ -1723,7 +1737,7 @@ async fn publish_attachment(
         );
     }
     persist(&state);
-    Ok(())
+    Ok(id)
 }
 
 #[tauri::command]

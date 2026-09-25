@@ -529,11 +529,11 @@ export default function App() {
             const name = file.name.slice(0, 255) || "attachment";
             const mime = file.type.slice(0, 127) || "application/octet-stream";
             try {
-                await publishAttachment(peer, name, mime, bytes);
+                const messageId = await publishAttachment(peer, name, mime, bytes);
                 setBlobs((old) => ({...old, [localHash]: bytes}));
                 const key = `dm:${peer}`;
                 const msg: UiMessage = {
-                    id: localHash,
+                    id: messageId,
                     author: me?.peerIdShort ?? "you",
                     authorColor: THEME.online,
                     time: new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}),
@@ -545,6 +545,7 @@ export default function App() {
                     attachmentMime: mime,
                     attachmentSize: bytes.length,
                     attachmentEncrypted: true,
+                    delivery: "sent",
                 };
                 setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
             } catch (error) {
