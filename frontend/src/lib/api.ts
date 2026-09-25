@@ -245,6 +245,39 @@ export interface NetStatus {
     outboxPending: number;
 }
 
+export interface DirectoryNode {
+    peerId: string;
+    multiaddrs: string[];
+    tier?: string;
+    region?: string | null;
+}
+
+export interface DirectoryResponse {
+    ok: boolean;
+    peersNodes?: string;
+    nodes?: DirectoryNode[];
+}
+
+const configuredDirectoryUrl = (import.meta.env.VITE_DIRECTORY_API_URL as string | undefined)?.trim();
+
+export async function fetchDirectoryNodes(): Promise<string[]> {
+    if (!configuredDirectoryUrl) {
+        throw new Error("Directory API is not configured (set VITE_DIRECTORY_API_URL)");
+    }
+    const response = await fetch(`${configuredDirectoryUrl.replace(/\/$/, "")}/v1/nodes?limit=200`);
+    if (!response.ok) throw new Error(`Directory API returned HTTP ${response.status}`);
+    const body = await response.json() as DirectoryResponse;
+    if (!body.ok) throw new Error("Directory API returned an unsuccessful response");
+    const addresses = [
+        ...(body.peersNodes ?? "").split(","),
+        ...(body.nodes ?? []).flatMap((node) => node.multiaddrs),
+    ].map((address) => address.trim()).filter(Boolean);
+    return [...new Set(addresses)].slice(0, 500);
+}
+
+export const bootstrapDirectoryNodes = (addrs: string[]) =>
+    invoke<number>("bootstrap_directory_nodes", {addrs});
+
 /** Our short 12-digit peer code: a lookup hint, never proof of identity. */
 export interface PeerCode {
     code: string;

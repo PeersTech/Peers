@@ -807,6 +807,34 @@ pub struct NetStatus {
 
 /// Current connectivity snapshot for the UI.
 #[tauri::command]
+async fn bootstrap_directory_nodes(
+    state: State<'_, AppState>,
+    addrs: Vec<String>,
+) -> Result<usize, String> {
+    if addrs.is_empty() || addrs.len() > 500 {
+        return Err("directory node list must contain between 1 and 500 multiaddrs".into());
+    }
+    let mut unique = HashSet::new();
+    let mut parsed = Vec::with_capacity(addrs.len());
+    for value in addrs {
+        let addr: Multiaddr = value.parse().map_err(|_| "directory returned an invalid multiaddr".to_string())?;
+        if !addr.iter().any(|protocol| matches!(protocol, Protocol::P2p(_))) {
+            return Err("directory multiaddr must include a peer id".into());
+        }
+        if unique.insert(addr.to_string()) {
+            parsed.push(addr);
+        }
+    }
+    if parsed.is_empty() {
+        return Err("directory returned no usable multiaddrs".into());
+    }
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    let count = parsed.len();
+    node.send(NodeCommand::Bootstrap(parsed)).await?;
+    Ok(count)
+}
+
+#[tauri::command]
 async fn retry_outbox_command(state: State<'_, AppState>) -> Result<(), String> {
     retry_outbox(&state).await;
     Ok(())
@@ -2830,6 +2858,7 @@ pub fn run() {
             send_friend_request,
             accept_friend,
             net_status,
+            bootstrap_directory_nodes,
             retry_outbox_command,
             unlock,
             lock,

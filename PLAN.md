@@ -145,6 +145,15 @@
 6. Capability-restricted plugin manifests and runtime
 7. Documentation and release verification (without Cargo commands)
 
+### Directory discovery integration — current slice
+
+- Fetch fresh relay candidates from an optionally configured Directory API
+- Validate and deduplicate returned multiaddrs in the backend
+- Bootstrap the running node without replacing `PEERS_NODES`
+- Keep discovery optional and fail silently when unconfigured
+
+**Status:** done — configured clients now discover and bootstrap relay candidates after unlock.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

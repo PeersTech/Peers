@@ -209,6 +209,10 @@ Clients still perform identity verification and messaging locally over libp2p.
 - Repository: <https://github.com/PeersTech/dir-api>
 - API docs: <https://github.com/PeersTech/docs/tree/main/content/docs/dir-api>
 
+Set `VITE_DIRECTORY_API_URL` in the frontend environment to enable automatic
+relay discovery after unlock. Without it, Peers uses `PEERS_NODES`,
+`nodes.json`, and the normal bootstrap/DHT path.
+
 ## Repository layout
 
 ```text

@@ -1,8 +1,8 @@
 import {useCallback, useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, acceptFriend, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
-    fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
+    addMember, acceptFriend, bootstrapDirectoryNodes, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
+    fetchBlob, fetchDirectoryNodes, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     markDmRead, markGroupRead, onDmAck, onDmRead, onGroupRead, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
@@ -197,6 +197,22 @@ export default function App() {
             .then(() => netStatus().then(setNet))
             .catch((e) => setError(String(e)));
     }, []);
+
+    useEffect(() => {
+        if (phase !== 'ready') return;
+        let cancelled = false;
+        void fetchDirectoryNodes()
+            .then((addrs) => bootstrapDirectoryNodes(addrs))
+            .then((count) => {
+                if (!cancelled && count > 0) setNotice(`Discovered ${count} relay multiaddrs`);
+            })
+            .catch(() => {
+                // Directory discovery is optional; PEERS_NODES remains the fallback.
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [phase]);
 
     // Our short peer code, for sharing.
     useEffect(() => {
