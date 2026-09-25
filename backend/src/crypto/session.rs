@@ -1,5 +1,7 @@
 use crate::error::{PeersError, Result};
 use hkdf::Hkdf;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
@@ -48,6 +50,12 @@ pub struct Session {
     opened: HashSet<u64>,
     max_opened: u64,
     local_is_low: bool,
+    /// Random per-process sending nonce. It is carried in the v2 envelope so
+    /// two devices restored from the same recovery phrase never derive the
+    /// same key/nonce pair for their first message.
+    outbound_nonce: [u8; 16],
+    /// Most recent sender nonce observed on the inbound direction.
+    inbound_nonce: Option<[u8; 16]>,
 }
 
 impl Session {
@@ -82,8 +90,16 @@ impl Session {
             },
             max_opened: if legacy { 0 } else { state.max_opened },
             local_is_low,
+            outbound_nonce: random_nonce(),
+            inbound_nonce: None,
         }
     }
+}
+
+fn random_nonce() -> [u8; 16] {
+    let mut nonce = [0u8; 16];
+    OsRng.fill_bytes(&mut nonce);
+    nonce
 }
 
 impl Session {
@@ -118,6 +134,8 @@ impl Session {
             opened: HashSet::new(),
             max_opened: 0,
             local_is_low,
+            outbound_nonce: random_nonce(),
+            inbound_nonce: None,
         })
     }
 
@@ -128,6 +146,35 @@ impl Session {
         Ok(key)
     }
 
+    pub(crate) fn outbound_nonce_for_envelope(&self) -> [u8; 16] {
+        self.outbound_nonce
+    }
+
+    pub(crate) fn next_key_with_nonce(&mut self) -> Result<([u8; 32], u64)> {
+        let seq = self.counter;
+        let key = self.outgoing_key_at_with_nonce(seq, self.outbound_nonce)?;
+        self.counter += 1;
+        Ok((key, seq))
+    }
+
+    pub(crate) fn incoming_key_at_with_nonce(
+        &mut self,
+        n: u64,
+        session_nonce: [u8; 16],
+    ) -> Result<[u8; 32]> {
+        if self.inbound_nonce != Some(session_nonce) {
+            self.inbound_nonce = Some(session_nonce);
+            self.opened.clear();
+            self.max_opened = 0;
+        }
+        let direction = if self.local_is_low {
+            b"high-to-low"
+        } else {
+            b"low-to-high"
+        };
+        self.key_at_with_direction_and_nonce(n, direction, session_nonce)
+    }
+
     /// Key for an outgoing message at `n`.
     pub fn outgoing_key_at(&self, n: u64) -> Result<[u8; 32]> {
         let direction = if self.local_is_low {
@@ -136,6 +183,19 @@ impl Session {
             b"high-to-low"
         };
         self.key_at_with_direction(n, direction)
+    }
+
+    pub(crate) fn outgoing_key_at_with_nonce(
+        &self,
+        n: u64,
+        session_nonce: [u8; 16],
+    ) -> Result<[u8; 32]> {
+        let direction = if self.local_is_low {
+            b"low-to-high"
+        } else {
+            b"high-to-low"
+        };
+        self.key_at_with_direction_and_nonce(n, direction, session_nonce)
     }
 
     /// Key for an incoming message at `n`. Direction separation prevents
@@ -159,11 +219,23 @@ impl Session {
     /// Key for message `n`. Pure with respect to `n` — does not mutate
     /// state, so failed opens and out-of-order deliveries are harmless.
     fn key_at_with_direction(&self, n: u64, direction: &[u8]) -> Result<[u8; 32]> {
+        self.key_at_with_direction_and_nonce(n, direction, [0u8; 16])
+    }
+
+    fn key_at_with_direction_and_nonce(
+        &self,
+        n: u64,
+        direction: &[u8],
+        session_nonce: [u8; 16],
+    ) -> Result<[u8; 32]> {
         if n > MAX_SESSION_GAP {
             return Err(PeersError::GapTooLarge);
         }
         let chain = self.chain_at(n);
-        let (_, hk) = Hkdf::<Sha256>::extract(Some(&n.to_be_bytes()), &chain);
+        let mut salt = [0u8; 24];
+        salt[..8].copy_from_slice(&n.to_be_bytes());
+        salt[8..].copy_from_slice(&session_nonce);
+        let (_, hk) = Hkdf::<Sha256>::extract(Some(&salt), &chain);
         let mut info = Vec::with_capacity(b"peers/v1/msg/".len() + direction.len());
         info.extend_from_slice(b"peers/v1/msg/");
         info.extend_from_slice(direction);
@@ -314,6 +386,8 @@ mod tests {
             opened: HashSet::new(),
             max_opened: 0,
             local_is_low: true,
+            outbound_nonce: [0u8; 16],
+            inbound_nonce: None,
         };
         assert!(matches!(
             s.key_at(MAX_SESSION_GAP + 5),
