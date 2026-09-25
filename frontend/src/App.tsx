@@ -15,6 +15,7 @@ import {ServerRail} from './components/ServerRail';
 import {ChannelList} from './components/ChannelList';
 import {MessagePane} from './components/MessagePane';
 import {DialogHost} from './components/DialogHost';
+import {Modal} from './components/Modal';
 import {qrDataUrl} from './lib/qr';
 import {useDialog} from './hooks/useDialog';
 import {
@@ -79,6 +80,7 @@ export default function App() {
     const [profileAbout, setProfileAbout] = useState('');
     const [avatarBytes, setAvatarBytes] = useState<number[] | null>(null);
     const [pendingHash, setPendingHash] = useState<string | null>(null);
+    const [avatarUploading, setAvatarUploading] = useState(false);
     /** Incoming friend requests from peers who scanned our code. */
     const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
     const booted = useRef(false);
@@ -327,9 +329,10 @@ export default function App() {
             const buf = await downscaleAvatar(file);
             setAvatarBytes(buf);
             setPendingHash(null);
-            const hash = await parkBlob(buf);
-            setPendingHash(hash);
+            setAvatarUploading(true);
+            await parkBlob(buf);
         } catch (e) {
+            setAvatarUploading(false);
             setError(String(e));
         }
     };
@@ -559,7 +562,10 @@ export default function App() {
             }),
         );
         track(
-            onBlobParked((e) => setPendingHash((h) => h ?? e.hash)),
+            onBlobParked((e) => {
+                setPendingHash((h) => h ?? e.hash);
+                setAvatarUploading(false);
+            }),
         );
         track(
             onCodeResolved((e) => {
@@ -1644,7 +1650,11 @@ export default function App() {
                                 />
                             </label>
                             <span className="text-[10px] text-faint">
-                                {myProfile?.avatarHash ? 'Avatar shared across servers' : 'No avatar yet'}
+                                {avatarUploading
+                                    ? 'Publishing avatar…'
+                                    : myProfile?.avatarHash
+                                      ? 'Avatar shared across servers'
+                                      : 'No avatar yet'}
                             </span>
                         </div>
                         <label htmlFor="profile-name" className="mb-1 block text-xs text-muted">Display name</label>
@@ -1675,7 +1685,11 @@ export default function App() {
                             <button type="button" onClick={() => setSettingsOpen(false)} className="rounded-lg px-3 py-2 text-sm text-muted hover:bg-surface-3">
                                 Cancel
                             </button>
-                            <button type="submit" className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover">
+                            <button
+                                type="submit"
+                                disabled={avatarUploading}
+                                className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+                            >
                                 Save
                             </button>
                         </div>

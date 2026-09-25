@@ -62,6 +62,8 @@ pub const RELAY_CONTROL_TOPIC: &str = "peers/v1/relay";
 /// his own request topic at startup, receives the request, and can accept
 /// or decline. Accepting subscribes both sides to each other's DM topics.
 pub const FRIEND_REQUEST_TOPIC_PREFIX: &str = "peers/v1/fr/";
+const MAX_FRIEND_NAME_BYTES: usize = 64;
+const MAX_AVATAR_HASH_BYTES: usize = 128;
 
 /// A relay-control notice: `{ "op": "subscribe", "topic": "<name>" }`.
 #[derive(serde::Deserialize)]
@@ -960,7 +962,14 @@ impl Node {
                                 serde_json::from_slice::<FriendRequestEnvelope>(&message.data)
                             {
                                 let from_string = from.to_string();
-                                if req.card.verify_for_peer(&from_string).is_err() {
+                                if req.card.verify_for_peer(&from_string).is_err()
+                                    || !matches!(req.kind.as_str(), "request" | "accept")
+                                    || req.display_name.len() > MAX_FRIEND_NAME_BYTES
+                                    || req
+                                        .avatar_hash
+                                        .as_ref()
+                                        .is_some_and(|hash| hash.len() > MAX_AVATAR_HASH_BYTES)
+                                {
                                     return;
                                 }
                                 self.emit(NodeEvent::FriendRequest {

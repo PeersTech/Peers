@@ -2,9 +2,11 @@
 
 # Peers
 
-**A serverless, end-to-end encrypted Discord-style messenger.**
+**A serverless, peer-to-peer messenger with encrypted direct messages.**
 
-No accounts. No servers. No databases. Just you, your friends, and a peer-to-peer mesh network.
+No accounts. No central message database. Direct messages are sealed end-to-end;
+server channels, Plaza messages, and network control data are currently
+authenticated/broadcast protocol messages and may be visible to relay operators.
 
 </div>
 
@@ -12,10 +14,11 @@ No accounts. No servers. No databases. Just you, your friends, and a peer-to-pee
 
 ## What is Peers?
 
-Peers is a desktop messenger where **every byte is encrypted end-to-end** and **every
-message is delivered peer-to-peer** over a public libp2p network. There is no central
-service to trust, no company that can read your conversations, and no server that can
-be taken down or subpoenaed.
+Peers is a desktop messenger where **direct messages are encrypted end-to-end** and
+message traffic travels over a public libp2p network. There is no central message
+database, but relay operators and public network observers can still see routing
+metadata and the plaintext parts of server, Plaza, and control protocols. See the
+security model in the documentation for the exact boundaries.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -26,7 +29,7 @@ be taken down or subpoenaed.
 │  │  Vite + Tailwind 4        │  │  invoke() ── crypto ── p2p   │  │
 │  └───────────────────────────┘  └──────────────────────────────┘  │
 │            │                         │                            │
-│            │         E2E ciphertext  │ sealed envelopes + blobs   │
+│            │         Sealed DMs      │ signed/plaintext topics    │
 │            ▼                         ▼                            │
 │  ┌────────────────────────────────────────────────────────────────┐
 │  │  Public IPFS testnet: gossipsub topics + Kademlia DHT          │
@@ -44,13 +47,13 @@ backend**, and the frontend never sees a secret.
 
 | | |
 |---|---|
-| End-to-end encryption | ChaCha20-Poly1305, per-session HKDF hash-chain keys, forward secrecy |
+| End-to-end direct messages | ChaCha20-Poly1305, per-session HKDF hash-chain keys, forward secrecy |
 | Serverless | No backend, no accounts, no phone number, no database |
 | P2P messaging | gossipsub live topics on the public libp2p network |
-| Blob parking | Share large files torrent-style via the Kademlia DHT — the sender can go offline after uploading |
+| Blob parking | Share small blobs and media up to 64 KiB via the Kademlia DHT |
 | Multi-recipient envelopes | One sealed message addressed to any number of peers, each with their own key |
 | Local keystore | Argon2id + XChaCha20-Poly1305 sealed `identity.json`, permissions `0600` |
-| At-rest state | Sealed `state.json` — servers, keychains, DM sessions and full history survive restart |
+| At-rest state | Sealed `state.json` — servers, keychains, DM sessions and bounded message history survive restart |
 | Presence | Live online/offline dots per member across the mesh |
 | Signed snapshots | Owner-signed server history export/import (verify before merging) |
 | Deterministic dialing | Invites carry the owner's listen addresses; joiners dial them directly |

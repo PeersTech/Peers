@@ -1,5 +1,17 @@
 # Peers — Decentralized Node Network Plan
 
+## Critical hardening sprint — 2026-09-25
+
+**Goal:** Make the existing Peers core safer and more reliable before adding new product surface.
+
+**Approach:** Repair directional DM key derivation, fix the avatar hash race, add strict message/profile limits and deterministic message IDs where the current state model permits, and align the documented encryption model with the actual protocol.
+
+**Files touched:** `backend/src/crypto/session.rs`, `backend/src/crypto/session.rs` tests, `backend/src/lib.rs`, `backend/src/store.rs`, avatar/profile path, relevant documentation, and frontend integration tests.
+
+**Verification:** Rust unit tests, clippy, frontend typecheck/build/tests, and a review of every changed network-facing path.
+
+**Status:** done — DM direction, persistence, avatar upload, protocol validation, source binding, history bounds, and security documentation hardened.
+
 ## Goal
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of
@@ -10,8 +22,9 @@ phones on a charger).
 
 ## Why
 
-Peers is serverless P2P: every message is end-to-end encrypted and delivered
-over libp2p. That works on a LAN and for publicly reachable hosts, but two users
+Peers is serverless P2P: direct messages are end-to-end encrypted and delivered
+over libp2p. Server, Plaza, and control messages are currently authenticated
+broadcast protocol messages. This works on a LAN and for publicly reachable hosts, but two users
 behind closed NATs in different countries cannot initiate a direct connection.
 Any "friend lives in another country" scenario needs reachable intermediaries.
 

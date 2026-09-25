@@ -226,10 +226,18 @@ impl SessionDir {
 
     /// Restores state written by [`SessionDir::export`] into an empty dir.
     /// Existing contacts/sessions are kept; restored ones take precedence.
-    pub fn restore(&mut self, sessions: &ExportedSessions, contacts: &ExportedContacts) {
+    pub fn restore(
+        &mut self,
+        identity: &Identity,
+        sessions: &ExportedSessions,
+        contacts: &ExportedContacts,
+    ) {
+        let local_pub = identity.x25519_public();
         for (key, state) in sessions {
-            if let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) {
-                self.sessions.insert(key, Session::import(state));
+            if let Ok(remote_pub) = <[u8; 32]>::try_from(key.as_slice()) {
+                let local_is_low = local_pub < remote_pub;
+                self.sessions
+                    .insert(remote_pub, Session::import(state, local_is_low));
             }
         }
         for (peer, key) in contacts {

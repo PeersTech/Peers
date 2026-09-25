@@ -32,6 +32,12 @@ pub struct SessionState {
     pub counter: u64,
     pub opened: Vec<u64>,
     pub max_opened: u64,
+    /// Whether this endpoint has the lower of the two canonical X25519 keys.
+    /// Persisted so restored sessions keep sender/receiver direction stable.
+    /// `None` identifies a pre-directional state file; it is migrated to a
+    /// fresh session when the remote key is available.
+    #[serde(default)]
+    pub local_is_low: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -41,6 +47,7 @@ pub struct Session {
     pub counter: u64,
     opened: HashSet<u64>,
     max_opened: u64,
+    local_is_low: bool,
 }
 
 impl Session {
@@ -53,16 +60,28 @@ impl Session {
             counter: self.counter,
             opened,
             max_opened: self.max_opened,
+            local_is_low: Some(self.local_is_low),
         }
     }
 
     /// Restores a session from a snapshot (see [`Session::export`]).
-    pub fn import(state: &SessionState) -> Self {
+    ///
+    /// `local_is_low` is supplied by the owner because a legacy state file
+    /// does not contain enough information to recover the endpoint role.
+    /// Legacy sessions are reset rather than interpreted with the old,
+    /// peer-relative direction labels.
+    pub fn import(state: &SessionState, local_is_low: bool) -> Self {
+        let legacy = state.local_is_low.is_none();
         Self {
             root: state.root,
-            counter: state.counter,
-            opened: state.opened.iter().copied().collect(),
-            max_opened: state.max_opened,
+            counter: if legacy { 0 } else { state.counter },
+            opened: if legacy {
+                HashSet::new()
+            } else {
+                state.opened.iter().copied().collect()
+            },
+            max_opened: if legacy { 0 } else { state.max_opened },
+            local_is_low,
         }
     }
 }
@@ -76,10 +95,11 @@ impl Session {
         let shared = our_secret.diffie_hellman(&their_pk);
 
         let our_pub = XPublic::from(our_secret).to_bytes();
-        let (canon_a, canon_b) = if their_pub < our_pub {
-            (their_pub, our_pub)
-        } else {
+        let local_is_low = our_pub < their_pub;
+        let (canon_a, canon_b) = if local_is_low {
             (our_pub, their_pub)
+        } else {
+            (their_pub, our_pub)
         };
         let mut salt_hasher = Sha256::new();
         salt_hasher.update(canon_a);
@@ -97,6 +117,7 @@ impl Session {
             counter: 0,
             opened: HashSet::new(),
             max_opened: 0,
+            local_is_low,
         })
     }
 
@@ -109,14 +130,24 @@ impl Session {
 
     /// Key for an outgoing message at `n`.
     pub fn outgoing_key_at(&self, n: u64) -> Result<[u8; 32]> {
-        self.key_at_with_direction(n, b"out")
+        let direction = if self.local_is_low {
+            b"low-to-high"
+        } else {
+            b"high-to-low"
+        };
+        self.key_at_with_direction(n, direction)
     }
 
     /// Key for an incoming message at `n`. Direction separation prevents
     /// both peers from reusing the same key and nonce when their counters
     /// happen to be equal.
     pub fn incoming_key_at(&self, n: u64) -> Result<[u8; 32]> {
-        self.key_at_with_direction(n, b"in")
+        let direction = if self.local_is_low {
+            b"high-to-low"
+        } else {
+            b"low-to-high"
+        };
+        self.key_at_with_direction(n, direction)
     }
 
     /// Backwards-compatible alias for the outgoing derivation used by older
@@ -282,6 +313,7 @@ mod tests {
             counter: 0,
             opened: HashSet::new(),
             max_opened: 0,
+            local_is_low: true,
         };
         assert!(matches!(
             s.key_at(MAX_SESSION_GAP + 5),

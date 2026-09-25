@@ -1,3 +1,4 @@
+mod atomic;
 mod crypto;
 mod error;
 mod node;
@@ -38,6 +39,28 @@ const PLAZA_HISTORY_LIMIT: usize = 200;
 
 /// How long a Plaza participant counts as "here" after their last message.
 const PLAZA_PRESENCE_WINDOW_SECS: u64 = 600;
+const MAX_TEXT_BYTES: usize = 16 * 1024;
+const MAX_DISPLAY_NAME_BYTES: usize = 64;
+const MAX_ABOUT_BYTES: usize = 512;
+const MAX_CHANNEL_NAME_BYTES: usize = 128;
+const MAX_PLAZA_FUTURE_SKEW_SECS: u64 = 300;
+const MAX_PLAZA_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
+    if value.len() > max {
+        return Err(format!("{label} is too long (max {max} bytes)"));
+    }
+    Ok(())
+}
+
+fn validate_profile_fields(profile: &SignedProfile) -> Result<(), String> {
+    validate_text(&profile.display_name, MAX_DISPLAY_NAME_BYTES, "display name")?;
+    validate_text(&profile.about, MAX_ABOUT_BYTES, "about")?;
+    if let Some(hash) = &profile.avatar_hash {
+        validate_text(hash, 128, "avatar hash")?;
+    }
+    Ok(())
+}
 
 /// Subscribes to a topic and asks any connected relay nodes to mesh it too,
 /// so our messages reach peers who only connect through them.
@@ -380,6 +403,7 @@ async fn finish_unlock(
         *dir = Some(SessionDir::new());
         state_apply(
             dir.as_mut().unwrap(),
+            &id,
             &mut servers,
             &mut history,
             &persisted,
@@ -986,6 +1010,8 @@ async fn publish_channel(
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
+    validate_text(&text, MAX_TEXT_BYTES, "message")?;
+    validate_text(&channel, MAX_CHANNEL_NAME_BYTES, "channel")?;
     let me = identity.peer_id.to_string();
     {
         let servers = state.servers.lock().unwrap();
@@ -1045,6 +1071,7 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
+    validate_text(&text, MAX_TEXT_BYTES, "message")?;
     // The DM topic for a peer is `peers/v1/ch/<their peer id>`; that full
     // topic string is also the AEAD binding the recipient uses to open the
     // envelope, so seal and publish must share it.
@@ -1147,13 +1174,13 @@ async fn import_snapshot(
         let mut imported = 0;
         for msg in messages {
             let key = format!("{server_id}/{}", msg.channel);
-            let list = history.server.entry(key).or_default();
-            if list.iter().any(|m| m.sig == msg.sig) {
-                continue;
+            let before = history.server_messages(&key).len();
+            history.push_server(&key, msg);
+            if history.server_messages(&key).len() > before {
+                imported += 1;
             }
-            list.push(msg);
+            let list = history.server.entry(key).or_default();
             list.sort_by_key(|m| m.ts);
-            imported += 1;
         }
         imported
     };
@@ -1178,6 +1205,11 @@ async fn set_profile(
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
+    validate_text(&display_name, MAX_DISPLAY_NAME_BYTES, "display name")?;
+    validate_text(&about, MAX_ABOUT_BYTES, "about")?;
+    if let Some(hash) = &avatar_hash {
+        validate_text(hash, 128, "avatar hash")?;
+    }
     let me = identity.peer_id.to_string();
     let profile = SignedProfile::sign(&identity, &display_name, &about, avatar_hash)?;
     *state.profile.lock().unwrap() = Some(profile.clone());
@@ -1283,6 +1315,7 @@ async fn publish_plaza(state: State<'_, AppState>, text: String) -> Result<(), S
         .clone()
         .ok_or("not unlocked")?;
     let text = text.trim().to_string();
+    validate_text(&text, MAX_TEXT_BYTES, "Plaza message")?;
     if text.is_empty() {
         return Ok(());
     }
@@ -1315,7 +1348,7 @@ fn plaza_who(state: State<'_, AppState>) -> Result<Vec<PlazaPresence>, String> {
     let seen = state.plaza_seen.lock().unwrap();
     Ok(seen
         .iter()
-        .filter(|(_, ts)| now.saturating_sub(**ts) < PLAZA_PRESENCE_WINDOW_SECS)
+        .filter(|(_, ts)| **ts <= now && now.saturating_sub(**ts) < PLAZA_PRESENCE_WINDOW_SECS)
         .map(|(peer_id, last_ts)| PlazaPresence {
             peer_id: peer_id.clone(),
             last_ts: *last_ts,
@@ -1330,7 +1363,7 @@ fn plaza_who(state: State<'_, AppState>) -> Result<Vec<PlazaPresence>, String> {
 /// after downscaling; larger attachments will need chunking (not yet
 /// implemented).
 #[tauri::command]
-async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, String> {
+async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<(), String> {
     const MAX_BLOB: usize = 64 * 1024;
     if data.len() > MAX_BLOB {
         return Err(format!(
@@ -1341,7 +1374,7 @@ async fn park_blob(state: State<'_, AppState>, data: Vec<u8>) -> Result<String, 
     }
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::ParkBlob(data)).await?;
-    Ok("queued".into())
+    Ok(())
 }
 
 #[tauri::command]
@@ -1493,7 +1526,10 @@ pub fn run() {
                                             // ...and every verified profile too.
                                             for m in &list.payload.members {
                                                 if let Some(p) = &m.profile {
-                                                    if p.verify().is_ok() && p.peer_id == m.peer_id {
+                                                    if p.verify().is_ok()
+                                                        && p.peer_id == m.peer_id
+                                                        && validate_profile_fields(p).is_ok()
+                                                    {
                                                         profiles.push((m.peer_id.clone(), p.clone()));
                                                     }
                                                 }
@@ -1538,8 +1574,12 @@ pub fn run() {
                                 let _ = app_handle.emit("server://list", v);
                             }
                         } else if let Ok(notice) = serde_json::from_slice::<JoinNotice>(&data) {
-                            if notice.peer_id != from
+                            if notice.kind != JoinNotice::KIND
+                                || notice.server_id != server_id
+                                || notice.peer_id != from
                                 || notice.card.verify_for_peer(&from).is_err()
+                                || validate_text(&notice.name, MAX_DISPLAY_NAME_BYTES, "member name")
+                                    .is_err()
                             {
                                 return;
                             }
@@ -1550,7 +1590,10 @@ pub fn run() {
                                 dir.remember_contact(&notice.peer_id, &notice.card);
                             }
                             if let Some(profile) = &notice.profile {
-                                if profile.verify().is_ok() && profile.peer_id == notice.peer_id {
+                                if profile.verify().is_ok()
+                                    && profile.peer_id == notice.peer_id
+                                    && validate_profile_fields(profile).is_ok()
+                                {
                                     state
                                         .profiles
                                         .lock()
@@ -1574,7 +1617,20 @@ pub fn run() {
                             }
                         } else if let Ok(pn) = serde_json::from_slice::<ProfileNotice>(&data) {
                             let state = app_handle.state::<AppState>();
-                            if pn.profile.verify().is_ok() && pn.profile.peer_id == pn.peer_id {
+                            let valid_member = {
+                                let servers = state.servers.lock().unwrap();
+                                servers
+                                    .get(&pn.server_id)
+                                    .is_some_and(|rec| rec.role_of(&pn.peer_id).is_some())
+                            };
+                            if pn.kind == ProfileNotice::KIND
+                                && pn.server_id == server_id
+                                && pn.peer_id == from
+                                && valid_member
+                                && pn.profile.verify().is_ok()
+                                && pn.profile.peer_id == pn.peer_id
+                                && validate_profile_fields(&pn.profile).is_ok()
+                            {
                                 state
                                     .profiles
                                     .lock()
@@ -1626,6 +1682,12 @@ pub fn run() {
                         .and_then(|rest| rest.split_once('/'))
                     {
                         if let Ok(msg) = serde_json::from_slice::<SignedMessage>(&data) {
+                            if validate_text(&msg.text, MAX_TEXT_BYTES, "message").is_err()
+                                || validate_text(&msg.channel, MAX_CHANNEL_NAME_BYTES, "channel")
+                                    .is_err()
+                            {
+                                return;
+                            }
                             if msg.server_id != server_id || msg.channel != channel {
                                 return;
                             }
@@ -1671,7 +1733,31 @@ pub fn run() {
                     // Global Plaza: self-signed chat + profile announcements.
                     if topic == PLAZA_TOPIC {
                         if let Ok(msg) = serde_json::from_slice::<PlazaMessage>(&data) {
-                            if msg.verify().is_ok() {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let valid = msg.verify().is_ok()
+                                && msg.ts <= now.saturating_add(MAX_PLAZA_FUTURE_SKEW_SECS)
+                                && msg.ts >= now.saturating_sub(MAX_PLAZA_AGE_SECS)
+                                && validate_text(&msg.text, MAX_TEXT_BYTES, "Plaza message")
+                                    .is_ok()
+                                && msg.card.as_ref().is_some_and(|card| {
+                                    card.verify_for_peer(&msg.from).is_ok()
+                                })
+                                && match msg.kind.as_str() {
+                                    PlazaMessage::KIND_CHAT => {
+                                        !msg.text.trim().is_empty() && msg.profile.is_none()
+                                    }
+                                    PlazaMessage::KIND_PROFILE => {
+                                        msg.text.is_empty()
+                                            && msg.profile.as_ref().is_some_and(|p| {
+                                                validate_profile_fields(p).is_ok()
+                                            })
+                                    }
+                                    _ => false,
+                                };
+                            if valid {
                                 let state = app_handle.state::<AppState>();
                                 push_plaza(&state, msg.clone());
                                 // Any verified plaza post carries the sender's
@@ -1732,6 +1818,16 @@ pub fn run() {
                     }
                     let identity = state.identity.lock().unwrap().clone();
                     let Some(identity) = identity else { return };
+                    // Bind the envelope's self-authenticating card to the
+                    // authenticated gossipsub source. Otherwise a valid
+                    // envelope could be replayed by another peer as if it
+                    // came from that card's owner.
+                    match crate::crypto::card::card_from_envelope(&data)
+                        .and_then(|card| card.verify_for_peer(&from).map(|_| card))
+                    {
+                        Ok(_) => {}
+                        Err(_) => return,
+                    }
                     // Open against the live dir so contact caching and session
                     // replay-tracking mutations are not lost.
                     let opened = {
@@ -1743,6 +1839,9 @@ pub fn run() {
                     let Some(result) = opened else { return };
                     match result {
                         Ok(plaintext) => {
+                            if plaintext.len() > MAX_TEXT_BYTES {
+                                return;
+                            }
                             let text = String::from_utf8_lossy(&plaintext).to_string();
                             // Cache the sender's identity card under their real
                             // peer id (open() internalizes it under a pseudo

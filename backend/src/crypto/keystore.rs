@@ -1,3 +1,4 @@
+use crate::atomic;
 use crate::crypto::identity::Identity;
 use crate::error::{PeersError, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -114,12 +115,7 @@ impl Keystore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.path, data)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
-        }
+        atomic::write_private(&self.path, &data)?;
         Ok(())
     }
 

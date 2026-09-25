@@ -7,6 +7,7 @@
 //! plaintext. The salt lives in the state file itself; a fresh salt is
 //! minted on first unlock.
 
+use crate::atomic;
 use crate::crypto::card::{SessionDir, SignedProfile};
 use crate::crypto::server::{PersistedServer, SignedMessage};
 use crate::error::{PeersError, Result};
@@ -25,6 +26,8 @@ const KDF_MEMORY: u32 = 64 * 1024; // 64 MiB
 const KDF_THREADS: u32 = 4;
 const KDF_KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
+const MAX_HISTORY_PER_CONVERSATION: usize = 2_000;
+const MAX_HISTORY_CONVERSATIONS: usize = 512;
 
 /// One message stored in a direct-message conversation. `peer` is the
 /// remote peer id; `mine` marks the side that sent it.
@@ -49,11 +52,44 @@ pub struct History {
 
 impl History {
     pub fn push_server(&mut self, key: &str, msg: SignedMessage) {
-        self.server.entry(key.to_string()).or_default().push(msg);
+        if !self.server.contains_key(key) && self.server.len() >= MAX_HISTORY_CONVERSATIONS {
+            let oldest = self
+                .server
+                .iter()
+                .min_by_key(|(_, messages)| messages.last().map(|message| message.ts).unwrap_or(0))
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.server.remove(&oldest);
+            }
+        }
+        let messages = self.server.entry(key.to_string()).or_default();
+        if messages.iter().any(|existing| existing.sig == msg.sig) {
+            return;
+        }
+        messages.push(msg);
+        if messages.len() > MAX_HISTORY_PER_CONVERSATION {
+            let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
+            messages.drain(0..overflow);
+        }
     }
 
     pub fn push_dm(&mut self, peer: &str, msg: DmMessage) {
-        self.dm.entry(peer.to_string()).or_default().push(msg);
+        if !self.dm.contains_key(peer) && self.dm.len() >= MAX_HISTORY_CONVERSATIONS {
+            let oldest = self
+                .dm
+                .iter()
+                .min_by_key(|(_, messages)| messages.last().map(|message| message.ts).unwrap_or(0))
+                .map(|(peer, _)| peer.clone());
+            if let Some(oldest) = oldest {
+                self.dm.remove(&oldest);
+            }
+        }
+        let messages = self.dm.entry(peer.to_string()).or_default();
+        messages.push(msg);
+        if messages.len() > MAX_HISTORY_PER_CONVERSATION {
+            let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
+            messages.drain(0..overflow);
+        }
     }
 
     pub fn server_messages(&self, key: &str) -> &[SignedMessage] {
@@ -195,12 +231,7 @@ impl StoreHandle {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.path, data)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
-        }
+        atomic::write_private(&self.path, &data)?;
         Ok(())
     }
 
@@ -264,11 +295,12 @@ pub fn state_from(
 
 pub fn state_apply(
     state: &mut SessionDir,
+    identity: &crate::crypto::Identity,
     dir_servers: &mut crate::crypto::server::ServerDir,
     history: &mut History,
     persisted: &PersistedState,
 ) -> Result<()> {
-    state.restore(&persisted.sessions, &persisted.contacts);
+    state.restore(identity, &persisted.sessions, &persisted.contacts);
     for p in &persisted.servers {
         dir_servers.restore(crate::crypto::server::ServerRecord::from_persisted(p)?);
     }

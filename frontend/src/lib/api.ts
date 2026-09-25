@@ -237,7 +237,7 @@ export const getProfile = () => invoke<SignedProfile | null>("get_profile");
 export const contactProfiles = () =>
     invoke<Record<string, SignedProfile>>("contact_profiles");
 
-export const parkBlob = (data: number[]) => invoke<string>("park_blob", {data});
+export const parkBlob = (data: number[]) => invoke<void>("park_blob", {data});
 export const fetchBlob = (hash: string) => invoke<void>("fetch_blob", {hash});
 
 export const publishPlaza = (text: string) => invoke<void>("publish_plaza", {text});
