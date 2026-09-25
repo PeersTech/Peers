@@ -80,6 +80,7 @@ secrets, and message decryption stay in Rust.
 - Ed25519 identities and X25519 key agreement
 - BIP39 12/24-word recovery phrases
 - Sealed local keystore and application state
+- Encrypted state-package export/import for moving an install to another device
 - Friend codes and DHT peer rendezvous
 - TCP, QUIC, Noise, relay transport, DCUtR, AutoNAT, and gossipsub
 - Headless `--node` mode for always-on relay/routing machines
