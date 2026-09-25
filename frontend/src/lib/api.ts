@@ -287,6 +287,10 @@ export const verifyGroupInvite = (inviteJson: string) =>
 export const listGroups = () => invoke<GroupDescriptor[]>("list_groups");
 export const sendGroupInvite = (groupId: string, peerId: string) =>
     invoke<void>("send_group_invite", {groupId, peerId});
+export const updateGroupMembers = (groupId: string, peerIds: string[]) =>
+    invoke<GroupDescriptor>("update_group_members", {groupId, peerIds});
+export const leaveGroup = (groupId: string) =>
+    invoke<void>("leave_group", {groupId});
 export const acceptGroup = (inviteJson: string) =>
     invoke<GroupDescriptor>("accept_group", {inviteJson});
 export const sendGroup = (groupId: string, text: string) =>

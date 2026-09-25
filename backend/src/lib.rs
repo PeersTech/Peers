@@ -57,6 +57,14 @@ fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
 }
 
 #[derive(serde::Deserialize)]
+#[derive(serde::Deserialize)]
+struct GroupMessagePayload {
+    group_id: String,
+    revision: u64,
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
 struct DmAttachmentPayload {
     kind: String,
     name: String,
@@ -778,11 +786,10 @@ fn list_groups(state: State<'_, AppState>) -> Result<Vec<GroupDescriptor>, Strin
         .collect())
 }
 
-#[tauri::command]
-async fn send_group_invite(
-    state: State<'_, AppState>,
-    group_id: String,
-    peer_id: String,
+async fn deliver_group_invite(
+    state: &AppState,
+    group_id: &str,
+    peer_id: &str,
 ) -> Result<(), String> {
     let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
     let descriptor = state
@@ -803,10 +810,19 @@ async fn send_group_invite(
         let invite = serde_json::to_vec(&GroupInvite::new(descriptor)).map_err(|e| e.to_string())?;
         dir.seal(&identity, &[recipient], topic.as_bytes(), &invite)?
     };
-    subscribe_with_relay(&state, topic.clone()).await?;
+    subscribe_with_relay(state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Publish { topic, data: payload }).await?;
     Ok(())
+}
+
+#[tauri::command]
+async fn send_group_invite(
+    state: State<'_, AppState>,
+    group_id: String,
+    peer_id: String,
+) -> Result<(), String> {
+    deliver_group_invite(&state, &group_id, &peer_id).await
 }
 
 #[tauri::command]
@@ -859,7 +875,13 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         if recipients.is_empty() {
             return Err("no group members have validated encryption keys".into());
         }
-        dir.seal(&identity, &recipients, topic.as_bytes(), text.as_bytes())?
+        let body = serde_json::to_vec(&serde_json::json!({
+            "groupId": group_id,
+            "revision": descriptor.revision,
+            "text": text.clone(),
+        }))
+        .map_err(|e| e.to_string())?;
+        dir.seal(&identity, &recipients, topic.as_bytes(), &body)?
     };
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
@@ -880,6 +902,73 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
             attachment_data: None,
         },
     );
+    persist(&state);
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_group_members(
+    state: State<'_, AppState>,
+    group_id: String,
+    peer_ids: Vec<String>,
+) -> Result<GroupDescriptor, String> {
+    if peer_ids.len() > 64 {
+        return Err("group members cannot exceed 64".into());
+    }
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let descriptor = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or("group not found")?;
+    if descriptor.owner_peer != identity.peer_id.to_string() {
+        return Err("only the group owner can update membership".into());
+    }
+    let members = {
+        let dir = state.dir.lock().unwrap();
+        let dir = dir.as_ref().ok_or("not unlocked")?;
+        peer_ids
+            .iter()
+            .map(|peer_id| {
+                dir.recipient_key(peer_id)
+                    .map(|x25519_pub| crate::crypto::group::GroupMember {
+                        peer_id: peer_id.clone(),
+                        x25519_pub,
+                    })
+                    .ok_or_else(|| format!("no validated encryption key for {peer_id}"))
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?
+    };
+    let next = descriptor.revise(&identity, members).map_err(|e| e.to_string())?;
+    state.groups.lock().unwrap().insert(group_id.clone(), next.clone());
+    subscribe_with_relay(&state, group_topic(&group_id)).await?;
+    for member in &next.members {
+        if member.peer_id != identity.peer_id.to_string() {
+            let _ = deliver_group_invite(&state, &group_id, &member.peer_id).await;
+        }
+    }
+    persist(&state);
+    Ok(next)
+}
+
+#[tauri::command]
+async fn leave_group(state: State<'_, AppState>, group_id: String) -> Result<(), String> {
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let descriptor = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or("group not found")?;
+    if descriptor.owner_peer == identity.peer_id.to_string() {
+        return Err("the group owner must transfer ownership before leaving".into());
+    }
+    state.groups.lock().unwrap().remove(&group_id);
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Unsubscribe(group_topic(&group_id))).await?;
     persist(&state);
     Ok(())
 }
@@ -1798,6 +1887,8 @@ pub fn run() {
             verify_group_invite,
             list_groups,
             send_group_invite,
+            update_group_members,
+            leave_group,
             accept_group,
             send_group,
             create_server,
@@ -2252,6 +2343,28 @@ pub fn run() {
                             if plaintext.len() > MAX_DM_ATTACHMENT_BYTES * 2 + 4096 {
                                 return;
                             }
+                            let group_text = if let Some(group_id) = &group_id {
+                                let payload: GroupMessagePayload = match serde_json::from_slice(&plaintext) {
+                                    Ok(payload) => payload,
+                                    Err(_) => return,
+                                };
+                                if payload.group_id != *group_id || payload.text.len() > MAX_TEXT_BYTES {
+                                    return;
+                                }
+                                let current_revision = state
+                                    .groups
+                                    .lock()
+                                    .unwrap()
+                                    .get(group_id)
+                                    .map(|group| group.revision)
+                                    .unwrap_or(0);
+                                if payload.revision < current_revision {
+                                    return;
+                                }
+                                Some(payload.text)
+                            } else {
+                                None
+                            };
                             if let Ok(invite) = serde_json::from_slice::<GroupInvite>(&plaintext) {
                                 if invite.verify().is_err() {
                                     return;
@@ -2283,7 +2396,9 @@ pub fn run() {
                                 }
                                 _ => None,
                             };
-                            let text = if attachment.is_some() {
+                            let text = if let Some(text) = group_text {
+                                text
+                            } else if attachment.is_some() {
                                 String::new()
                             } else {
                                 if plaintext.len() > MAX_TEXT_BYTES {

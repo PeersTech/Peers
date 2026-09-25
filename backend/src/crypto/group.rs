@@ -76,6 +76,33 @@ impl GroupDescriptor {
         Ok(descriptor)
     }
 
+    pub fn revise(&self, identity: &Identity, mut members: Vec<GroupMember>) -> Result<Self> {
+        if identity.peer_id.to_string() != self.owner_peer {
+            return Err(PeersError::Forbidden.into());
+        }
+        let owner_peer = self.owner_peer.clone();
+        if !members.iter().any(|member| member.peer_id == owner_peer) {
+            members.push(GroupMember {
+                peer_id: owner_peer,
+                x25519_pub: identity.x25519_public(),
+            });
+        }
+        members.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        members.dedup_by(|a, b| a.peer_id == b.peer_id);
+        let mut next = self.clone();
+        next.members = members;
+        next.revision = self.revision.saturating_add(1);
+        next.sig.clear();
+        next.validate_shape()?;
+        let bytes = serde_json::to_vec(&next).map_err(PeersError::Serde)?;
+        let sig = identity
+            .keypair
+            .sign(&signed_bytes(&bytes))
+            .map_err(|e| PeersError::Crypto(format!("group revision sign: {e}")))?;
+        next.sig = B64.encode(sig);
+        Ok(next)
+    }
+
     pub fn verify(&self) -> Result<()> {
         self.validate_shape()?;
         let owner = ed25519::PublicKey::try_from_bytes(&self.owner_pub)

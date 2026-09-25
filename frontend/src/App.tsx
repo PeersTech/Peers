@@ -6,7 +6,7 @@ import {
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    acceptGroup, createGroupDescriptor, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupInvite, serverHistory, setChannel, setProfile,
+    acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type GroupDescriptor, type GroupInvite, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type ServerMessageKind, type SignedMessageDto, type SignedProfile, type UiMessage,
@@ -939,6 +939,42 @@ export default function App() {
         void selectServer(id);
     };
 
+    const manageGroupMembers = async () => {
+        if (!activeGroup) return;
+        const group = groups.find((item) => item.groupId === activeGroup);
+        if (!group) return;
+        const input = await promptDialog({
+            title: `Manage ${group.name}`,
+            body: "Enter the complete member peer ID list. The owner must remain a member.",
+            label: "Member peer IDs",
+            placeholder: group.members.map((member) => member.peerId).join("\n"),
+            multiline: true,
+            validate: validateRequired("Member peer IDs", 1),
+        });
+        if (!input) return;
+        const peerIds = input.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+        try {
+            const next = await updateGroupMembers(activeGroup, peerIds);
+            setGroups((old) => old.map((item) => item.groupId === next.groupId ? next : item));
+            setNotice(`Updated ${next.name}`);
+        } catch (error) {
+            setError(String(error));
+        }
+    };
+
+    const leaveCurrentGroup = async () => {
+        if (!activeGroup) return;
+        try {
+            await leaveGroup(activeGroup);
+            setGroups((old) => old.filter((group) => group.groupId !== activeGroup));
+            setActiveGroup(null);
+            setDmOpen(false);
+            setActiveDm(null);
+        } catch (error) {
+            setError(String(error));
+        }
+    };
+
     const selectGroup = (groupId: string) => {
         setPlazaOpen(false);
         setDmOpen(true);
@@ -1819,6 +1855,12 @@ export default function App() {
                                     </button>
                                 ))}
                             </>
+                        )}
+                        {activeGroup && groups.find((group) => group.groupId === activeGroup)?.ownerPeer === me?.peerId && (
+                            <button onClick={() => void manageGroupMembers()} className="mx-2 mb-1 w-[calc(100%-1rem)] rounded bg-surface-3 px-2 py-1 text-left text-[10px] text-accent hover:bg-surface-4">Manage members</button>
+                        )}
+                        {activeGroup && groups.find((group) => group.groupId === activeGroup)?.ownerPeer !== me?.peerId && (
+                            <button onClick={() => void leaveCurrentGroup()} className="mx-2 mb-1 w-[calc(100%-1rem)] rounded bg-surface-3 px-2 py-1 text-left text-[10px] text-danger hover:bg-surface-4">Leave group</button>
                         )}
                         {dms.length === 0 && friendRequests.length === 0 && groups.length === 0 && (
                             <div className="px-2 py-4 text-xs text-muted">
