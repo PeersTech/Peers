@@ -393,8 +393,12 @@ export const onDmAck = (cb: (id: string) => void) =>
     listen<{id: string}>("node://ack", (e) => cb(e.payload.id));
 export const markDmRead = (peer: string, ids: string[]) =>
     invoke<void>("mark_dm_read", {peer, ids});
+export const markGroupRead = (groupId: string, ids: string[]) =>
+    invoke<void>("mark_group_read", {groupId, ids});
 export const onDmRead = (cb: (payload: {from: string; ids: string[]}) => void) =>
     listen<{from: string; ids: string[]}>("node://read", (e) => cb(e.payload));
+export const onGroupRead = (cb: (payload: {groupId: string; from: string; ids: string[]}) => void) =>
+    listen<{groupId: string; from: string; ids: string[]}>("node://group-read", (e) => cb(e.payload));
 export const onNodeMessage = (cb: (m: NodeMessage) => void) =>
     listen<NodeMessage>("node://message", (e) => cb(e.payload));
 export const onJoinRequest = (cb: (n: JoinNotice) => void) =>

@@ -60,6 +60,15 @@
 
 **Status:** done — large DM attachments now use encrypted, persisted, retryable chunks.
 
+### Group read receipts — current slice
+
+- Send encrypted read receipts to the current group membership
+- Keep group delivery acknowledgements separate from read state
+- Restore group read state from persisted history
+- Show read indicators in group conversations
+
+**Status:** done — group delivery acknowledgements and read receipts remain separate.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

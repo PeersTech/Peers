@@ -82,6 +82,14 @@ struct GroupAckPayload {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupReadPayload {
+    kind: String,
+    group_id: String,
+    ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct DmTextPayload {
     kind: String,
     id: String,
@@ -1885,6 +1893,58 @@ async fn publish_attachment(
 }
 
 #[tauri::command]
+async fn mark_group_read(
+    state: State<'_, AppState>,
+    group_id: String,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    if ids.is_empty() || ids.len() > 100 {
+        return Err("group read receipts must contain between 1 and 100 message ids".into());
+    }
+    if ids.iter().any(|id| id.is_empty() || id.len() > 64) {
+        return Err("invalid group read receipt message id".into());
+    }
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let me = identity.peer_id.to_string();
+    let descriptor = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or("group not found")?;
+    let topic = group_topic(&group_id);
+    let recipients: Vec<[u8; 32]> = {
+        let dir = state.dir.lock().unwrap();
+        let Some(dir) = dir.as_ref() else { return Err("not unlocked".into()) };
+        descriptor
+            .members
+            .iter()
+            .filter(|member| member.peer_id != me)
+            .filter_map(|member| dir.recipient_key(&member.peer_id))
+            .collect()
+    };
+    if recipients.is_empty() {
+        return Err("no group members have validated encryption keys".into());
+    }
+    let body = serde_json::to_vec(&serde_json::json!({
+        "kind": "read",
+        "groupId": group_id,
+        "ids": ids,
+    }))
+    .map_err(|e| e.to_string())?;
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        dir.seal(&identity, &recipients, topic.as_bytes(), &body)?
+    };
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn mark_dm_read(
     state: State<'_, AppState>,
     peer: String,
@@ -2372,6 +2432,7 @@ pub fn run() {
             unsubscribe,
             publish,
             publish_attachment,
+            mark_group_read,
             mark_dm_read,
             park_blob,
             fetch_blob,
@@ -2893,6 +2954,28 @@ pub fn run() {
                                         drop(outbox);
                                         persist(&app_handle.state::<AppState>());
                                         let _ = app_handle.emit("node://ack", serde_json::json!({"id": ack.id}));
+                                        return;
+                                    }
+                                }
+                            }
+                            if let Some(group_id) = &group_id {
+                                if let Ok(read) = serde_json::from_slice::<GroupReadPayload>(&plaintext) {
+                                    if read.kind == "read" && read.group_id == *group_id && read.ids.len() <= 100 {
+                                        {
+                                            let mut history = state.history.lock().unwrap();
+                                            let key = format!("group:{}", group_id);
+                                            if let Some(messages) = history.dm.get_mut(&key) {
+                                                for message in messages.iter_mut().filter(|message| read.ids.iter().any(|id| id == &message.id)) {
+                                                    message.read = true;
+                                                }
+                                            }
+                                        }
+                                        persist(&app_handle.state::<AppState>());
+                                        let _ = app_handle.emit("node://group-read", serde_json::json!({
+                                            "groupId": group_id,
+                                            "from": from,
+                                            "ids": read.ids,
+                                        }));
                                         return;
                                     }
                                 }

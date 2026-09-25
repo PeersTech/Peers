@@ -4,7 +4,7 @@ import {
     addMember, acceptFriend, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
     fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
-    markDmRead, onDmAck, onDmRead, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
+    markDmRead, markGroupRead, onDmAck, onDmRead, onGroupRead, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
     acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
@@ -125,6 +125,19 @@ export default function App() {
             ids.forEach((id) => readReceiptsSent.current.delete(id));
         });
     }, [phase, activeDm, history]);
+
+    useEffect(() => {
+        if (phase !== 'ready' || !activeGroup) return;
+        const key = `group:${activeGroup}`;
+        const ids = (history[key] ?? [])
+            .filter((message) => !message.mine && !message.read && !readReceiptsSent.current.has(message.id))
+            .map((message) => message.id);
+        if (ids.length === 0) return;
+        ids.forEach((id) => readReceiptsSent.current.add(id));
+        void markGroupRead(activeGroup, ids).catch(() => {
+            ids.forEach((id) => readReceiptsSent.current.delete(id));
+        });
+    }, [phase, activeGroup, history]);
 
     useEffect(() => {
         if (!notice) return;
@@ -767,6 +780,16 @@ export default function App() {
         track(
             onDmRead(({from, ids}) => {
                 const key = `dm:${from}`;
+                const readIds = new Set(ids);
+                setHistory((current) => ({
+                    ...current,
+                    [key]: (current[key] ?? []).map((message) => readIds.has(message.id) ? {...message, read: true} : message),
+                }));
+            }),
+        );
+        track(
+            onGroupRead(({groupId, ids}) => {
+                const key = `group:${groupId}`;
                 const readIds = new Set(ids);
                 setHistory((current) => ({
                     ...current,
