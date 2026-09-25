@@ -98,6 +98,7 @@ export interface ServerMessage {
     targetSig: string;
     reaction: string;
     attachmentHash: string;
+    attachmentChunkHashes?: string[];
     attachmentName: string;
     attachmentMime: string;
     attachmentSize: number;
@@ -134,6 +135,7 @@ export interface SignedMessageDto {
     targetSig: string;
     reaction: string;
     attachmentHash: string;
+    attachmentChunkHashes?: string[];
     attachmentName: string;
     attachmentMime: string;
     attachmentSize: number;
@@ -175,6 +177,7 @@ export interface UiMessage {
     reactions?: Record<string, number>;
     myReaction?: string;
     attachmentHash?: string;
+    attachmentChunkHashes?: string[];
     attachmentName?: string;
     attachmentMime?: string;
     attachmentSize?: number;
@@ -364,6 +367,15 @@ export const publishChannelAttachment = (
     mime: string,
     size: number,
 ) => invoke<SignedMessageDto>("publish_channel_attachment", {serverId, channel, text, hash, name, mime, size});
+export const publishChannelAttachmentChunked = (
+    serverId: string,
+    channel: string,
+    text: string,
+    hashes: string[],
+    name: string,
+    mime: string,
+    size: number,
+) => invoke<SignedMessageDto>("publish_channel_attachment_chunked", {serverId, channel, text, hashes, name, mime, size});
 
 export const publishChannelAction = (
     serverId: string,

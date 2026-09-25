@@ -154,6 +154,15 @@
 
 **Status:** done — configured clients now discover and bootstrap relay candidates after unlock.
 
+### Chunked server-channel attachments — current slice
+
+- Sign ordered DHT chunk manifests in channel messages
+- Park 24 KiB chunks without changing the existing blob limit
+- Reassemble verified chunks in the client
+- Preserve the raw DHT/non-E2E channel privacy boundary
+
+**Status:** done — channel attachments now support up to 8 MiB through signed DHT chunk manifests.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

@@ -6,7 +6,7 @@ import {
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     markDmRead, markGroupRead, onDmAck, onDmRead, onGroupRead, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupAttachment, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
+    acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishChannelAttachmentChunked, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupAttachment, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type GroupDescriptor, type GroupInvite, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type ServerMessageKind, type SignedMessageDto, type SignedProfile, type UiMessage,
@@ -92,6 +92,20 @@ export default function App() {
     const blobQueued = useRef(new Set<string>());
     const seenServerActions = useRef(new Set<string>());
     const pendingAttachment = useRef<{serverId: string; channel: string; name: string; mime: string; size: number} | null>(null);
+    const pendingChannelChunks = useRef<{
+        serverId: string;
+        channel: string;
+        name: string;
+        mime: string;
+        size: number;
+        chunks: number[][];
+        hashes: string[];
+    } | null>(null);
+    const channelChunkAssemblies = useRef<Record<string, {
+        key: string;
+        hashes: string[];
+        chunks: Record<string, number[]>;
+    }>>({});
     const pendingDownload = useRef<{hash: string; name: string} | null>(null);
     const readReceiptsSent = useRef(new Set<string>());
     const blobsRef = useRef<Record<string, number[]>>({});
@@ -252,6 +266,7 @@ export default function App() {
                 return;
             }
             const members = live.current.servers[serverId]?.members ?? [];
+            for (const message of msgs) queueServerAttachment(message);
             const list = reduceServerHistory(msgs, members, live.current.me?.peerId ?? '');
             setHistory((h) => ({...h, [key]: reduceServerHistory(
                 msgs,
@@ -276,7 +291,8 @@ export default function App() {
         signature: message.sig,
         kind: messageKind(message),
         targetSignature: message.targetSig || undefined,
-        attachmentHash: message.attachmentHash || undefined,
+        attachmentHash: message.attachmentHash || (message.attachmentChunkHashes?.length ? `channel:${message.sig}` : undefined),
+        attachmentChunkHashes: message.attachmentChunkHashes,
         attachmentName: message.attachmentName || undefined,
         attachmentMime: message.attachmentMime || undefined,
         attachmentSize: message.attachmentSize || undefined,
@@ -351,6 +367,40 @@ export default function App() {
         if (!hash || blobsRef.current[hash] || blobQueued.current.has(hash)) return;
         blobQueued.current.add(hash);
         void fetchBlob(hash).catch(() => {});
+    };
+
+    const collectChannelAttachment = (assembly: {
+        key: string;
+        hashes: string[];
+        chunks: Record<string, number[]>;
+    }) => {
+        if (!assembly.hashes.every((hash) => assembly.chunks[hash])) return;
+        const data = assembly.hashes.flatMap((hash) => assembly.chunks[hash]);
+        setBlobs((old) => ({...old, [assembly.key]: data}));
+        delete channelChunkAssemblies.current[assembly.key];
+    };
+
+    const collectChannelChunk = (hash: string, data: number[]) => {
+        for (const assembly of Object.values(channelChunkAssemblies.current)) {
+            if (!assembly.hashes.includes(hash)) continue;
+            assembly.chunks[hash] = data;
+            collectChannelAttachment(assembly);
+        }
+    };
+
+    const queueServerAttachment = (message: SignedMessageDto) => {
+        const hashes = message.attachmentChunkHashes ?? [];
+        if (hashes.length === 0 || !message.sig) return;
+        const key = `channel:${message.sig}`;
+        if (channelChunkAssemblies.current[key]) return;
+        const assembly = {key, hashes: [...hashes], chunks: {} as Record<string, number[]>};
+        channelChunkAssemblies.current[key] = assembly;
+        for (const hash of hashes) {
+            const existing = blobsRef.current[hash];
+            if (existing) assembly.chunks[hash] = existing;
+            else ensureBlob(hash);
+        }
+        collectChannelAttachment(assembly);
     };
 
     const blobUrl = (hash: string | null | undefined): string | null => {
@@ -538,6 +588,37 @@ export default function App() {
         void channelAction("reply", target, text).catch((error) => setError(String(error)));
     };
 
+    const finishChunkedAttachmentUpload = async (hashes: string[]) => {
+        setUploadingAttachment(null);
+        const pending = pendingChannelChunks.current;
+        pendingChannelChunks.current = null;
+        if (!pending) return;
+        try {
+            const action = await publishChannelAttachmentChunked(
+                pending.serverId,
+                pending.channel,
+                "",
+                hashes,
+                pending.name,
+                pending.mime,
+                pending.size,
+            );
+            setBlobs((old) => ({...old, [`channel:${action.sig}`]: pending.chunks.flat()}));
+            const members = live.current.servers[pending.serverId]?.members ?? [];
+            setHistory((h) => ({
+                ...h,
+                [`${pending.serverId}/${pending.channel}`]: applyServerMessage(
+                    h[`${pending.serverId}/${pending.channel}`] ?? [],
+                    action,
+                    members,
+                    live.current.me?.peerId ?? "",
+                ),
+            }));
+        } catch (error) {
+            setError(String(error));
+        }
+    };
+
     const finishAttachmentUpload = async (hash: string) => {
         setUploadingAttachment(null);
         const pending = pendingAttachment.current;
@@ -656,19 +737,43 @@ export default function App() {
             setError("Open a conversation before attaching a file");
             return;
         }
-        if (bytes.length === 0 || bytes.length > 64 * 1024) {
+        if (bytes.length === 0 || bytes.length > 8 * 1024 * 1024) {
             setUploadingAttachment(null);
-            setError("Server attachments must be between 1 byte and 64 KiB");
+            setError("Server attachments must be between 1 byte and 8 MiB");
             return;
         }
         const serverId = activeServer;
         const channel = activeChannel;
+        const mime = file.type.slice(0, 127) || "application/octet-stream";
+        if (bytes.length > 64 * 1024) {
+            const chunks: number[][] = [];
+            for (let offset = 0; offset < bytes.length; offset += 24 * 1024) {
+                chunks.push(bytes.slice(offset, offset + 24 * 1024));
+            }
+            pendingChannelChunks.current = {
+                serverId,
+                channel,
+                name,
+                mime,
+                size: bytes.length,
+                chunks,
+                hashes: [],
+            };
+            try {
+                await parkBlob(chunks[0]);
+            } catch (error) {
+                pendingChannelChunks.current = null;
+                setUploadingAttachment(null);
+                setError(String(error));
+            }
+            return;
+        }
         pendingAttachment.current = {
             serverId,
             channel,
-            name: file.name.slice(0, 255) || "attachment",
-            mime: file.type.slice(0, 127) || "application/octet-stream",
-            size: file.size,
+            name,
+            mime,
+            size: bytes.length,
         };
         try {
             await parkBlob(bytes);
@@ -817,12 +922,14 @@ export default function App() {
                     targetSig: m.targetSig,
                     reaction: m.reaction,
                     attachmentHash: m.attachmentHash,
+                    attachmentChunkHashes: m.attachmentChunkHashes,
                     attachmentName: m.attachmentName,
                     attachmentMime: m.attachmentMime,
                     attachmentSize: m.attachmentSize,
                     ts: m.ts,
                     sig: m.sig,
                 };
+                queueServerAttachment(message);
                 setHistory((h) => ({
                     ...h,
                     [key]: applyServerMessage(h[key] ?? [], message, members, live.current.me?.peerId ?? ''),
@@ -982,6 +1089,7 @@ export default function App() {
             onBlobFetched((e) => {
                 blobQueued.current.delete(e.hash);
                 setBlobs((old) => ({...old, [e.hash]: e.data}));
+                 collectChannelChunk(e.hash, e.data);
                 if (pendingDownload.current?.hash === e.hash) {
                     const pending = pendingDownload.current;
                     pendingDownload.current = null;
@@ -997,7 +1105,21 @@ export default function App() {
         );
         track(
             onBlobParked((e) => {
-                if (pendingAttachment.current) {
+                if (pendingChannelChunks.current) {
+                     const pending = pendingChannelChunks.current;
+                     pending.hashes.push(e.hash);
+                     if (pending.hashes.length < pending.chunks.length) {
+                         void parkBlob(pending.chunks[pending.hashes.length]).catch((error) => {
+                             pendingChannelChunks.current = null;
+                             setUploadingAttachment(null);
+                             setError(String(error));
+                         });
+                     } else {
+                         void finishChunkedAttachmentUpload(pending.hashes);
+                     }
+                     return;
+                 }
+                 if (pendingAttachment.current) {
                     void finishAttachmentUpload(e.hash);
                     return;
                 }
@@ -1608,6 +1730,8 @@ export default function App() {
         historyLoaded.current.clear();
         readReceiptsSent.current.clear();
         blobQueued.current.clear();
+         pendingChannelChunks.current = null;
+         channelChunkAssemblies.current = {};
         setPlazaOpen(false);
         setPlazaPosts([]);
         setPlazaRoster([]);

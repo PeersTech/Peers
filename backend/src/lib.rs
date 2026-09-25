@@ -1855,6 +1855,59 @@ async fn publish_channel_attachment(
 }
 
 #[tauri::command]
+async fn publish_channel_attachment_chunked(
+    state: State<'_, AppState>,
+    server_id: String,
+    channel: String,
+    text: String,
+    hashes: Vec<String>,
+    name: String,
+    mime: String,
+    size: u64,
+) -> Result<SignedMessage, String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    validate_text(&channel, MAX_CHANNEL_NAME_BYTES, "channel")?;
+    validate_text(&text, MAX_TEXT_BYTES, "attachment caption")?;
+    validate_text(&name, 255, "attachment name")?;
+    validate_text(&mime, 127, "attachment type")?;
+    if hashes.is_empty() || hashes.len() > 512 {
+        return Err("channel attachment must contain between 1 and 512 chunks".into());
+    }
+    if size == 0 || size > 8 * 1024 * 1024 {
+        return Err("channel attachment must be between 1 and 8 MiB".into());
+    }
+    for hash in &hashes {
+        if p2p::parse_hex_hash(hash).is_none() {
+            return Err("invalid channel attachment chunk hash".into());
+        }
+    }
+    let me = identity.peer_id.to_string();
+    {
+        let servers = state.servers.lock().unwrap();
+        let rec = servers.get(&server_id).ok_or(PeersError::ServerNotFound)?;
+        if !rec.can_write(&me, &channel) {
+            return Err(PeersError::Forbidden.into());
+        }
+    }
+    let msg = SignedMessage::sign_attachment_chunked(
+        &identity.keypair,
+        &server_id,
+        &channel,
+        &text,
+        &hashes,
+        &name,
+        &mime,
+        size,
+    )?;
+    publish_server_message(&state, msg).await
+}
+
+#[tauri::command]
 fn server_history(
     state: State<'_, AppState>,
     server_id: String,
@@ -2895,6 +2948,7 @@ pub fn run() {
             publish_channel,
             publish_channel_action,
             publish_channel_attachment,
+            publish_channel_attachment_chunked,
             server_history,
             dm_history,
             online_peers,
@@ -3194,6 +3248,7 @@ pub fn run() {
                                         "targetSig": msg.target_sig,
                                         "reaction": msg.reaction,
                                         "attachmentHash": msg.attachment_hash,
+                                         "attachmentChunkHashes": msg.attachment_chunk_hashes,
                                         "attachmentName": msg.attachment_name,
                                         "attachmentMime": msg.attachment_mime,
                                         "attachmentSize": msg.attachment_size,

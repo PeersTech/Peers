@@ -830,6 +830,10 @@ pub struct SignedMessage {
     /// Content-addressed attachment metadata for `attachment` messages.
     #[serde(default)]
     pub attachment_hash: String,
+    /// Ordered DHT hashes for a large channel attachment. Empty for legacy
+    /// single-blob attachments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_chunk_hashes: Vec<String>,
     #[serde(default)]
     pub attachment_name: String,
     #[serde(default)]
@@ -873,6 +877,7 @@ impl SignedMessage {
             target_sig: target_sig.to_string(),
             reaction: reaction.to_string(),
             attachment_hash: String::new(),
+            attachment_chunk_hashes: Vec::new(),
             attachment_name: String::new(),
             attachment_mime: String::new(),
             attachment_size: 0,
@@ -916,6 +921,30 @@ impl SignedMessage {
         Ok(msg)
     }
 
+    pub fn sign_attachment_chunked(
+        keypair: &Keypair,
+        server_id: &str,
+        channel: &str,
+        text: &str,
+        hashes: &[String],
+        name: &str,
+        mime: &str,
+        size: u64,
+    ) -> Result<Self> {
+        let mut msg = Self::sign_action(keypair, server_id, channel, "attachment", "", text, "")?;
+        msg.attachment_chunk_hashes = hashes.to_vec();
+        msg.attachment_name = name.to_string();
+        msg.attachment_mime = mime.to_string();
+        msg.attachment_size = size;
+        let bytes = serde_json::to_vec(&msg).map_err(PeersError::Serde)?;
+        msg.sig.clear();
+        let sig = keypair
+            .sign(&bytes)
+            .map_err(|e| PeersError::Crypto(format!("chunked attachment sign: {e}")))?;
+        msg.sig = B64.encode(sig);
+        Ok(msg)
+    }
+
     /// Verifies the signature, action shape, server/channel binding, and ACL.
     pub fn verify(&self, rec: &ServerRecord) -> Result<()> {
         if self.target_sig.len() > 256
@@ -924,12 +953,18 @@ impl SignedMessage {
             || self.attachment_hash.len() > 64
             || self.attachment_name.len() > 255
             || self.attachment_mime.len() > 127
-            || self.attachment_size > 64 * 1024
+            || self.attachment_size > 8 * 1024 * 1024
+            || self.attachment_chunk_hashes.len() > 512
+            || self
+                .attachment_chunk_hashes
+                .iter()
+                .any(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
             return Err(PeersError::SnapshotCorrupt);
         }
         let kind = if self.kind.is_empty() { "chat" } else { self.kind.as_str() };
         let has_attachment_metadata = !self.attachment_hash.is_empty()
+            || !self.attachment_chunk_hashes.is_empty()
             || !self.attachment_name.is_empty()
             || !self.attachment_mime.is_empty()
             || self.attachment_size > 0;
@@ -944,9 +979,11 @@ impl SignedMessage {
                 !self.target_sig.is_empty() && !self.reaction.is_empty() && self.text.is_empty() && !has_attachment_metadata
             }
             "attachment" => {
+                let legacy = self.attachment_hash.len() == 64 && self.attachment_chunk_hashes.is_empty();
+                let chunked = self.attachment_hash.is_empty() && !self.attachment_chunk_hashes.is_empty();
                 self.target_sig.is_empty()
                     && self.reaction.is_empty()
-                    && self.attachment_hash.len() == 64
+                    && (legacy || chunked)
                     && !self.attachment_name.is_empty()
                     && !self.attachment_mime.is_empty()
                     && self.attachment_size > 0
