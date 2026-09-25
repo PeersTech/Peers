@@ -441,6 +441,16 @@ export const onServerError = (cb: (e: {serverId: string; error: string}) => void
     listen<{serverId: string; error: string}>("server://error", (e) => cb(e.payload));
 export const onDmAck = (cb: (id: string) => void) =>
     listen<{id: string}>("node://ack", (e) => cb(e.payload.id));
+export const sendCallSignal = (
+    peer: string,
+    callId: string,
+    action: "offer" | "answer" | "ice" | "hangup",
+    sdp?: string,
+    candidate?: string,
+) => invoke<void>("send_call_signal", {peer, callId, action, sdp, candidate});
+export const onCallSignal = (cb: (payload: {peerId: string; callId: string; action: string; sdp?: string | null; candidate?: string | null}) => void) =>
+    listen<{peerId: string; callId: string; action: string; sdp?: string | null; candidate?: string | null}>("node://call-signal", (e) => cb(e.payload));
+
 export const markDmRead = (peer: string, ids: string[]) =>
     invoke<void>("mark_dm_read", {peer, ids});
 export const markGroupRead = (groupId: string, ids: string[]) =>

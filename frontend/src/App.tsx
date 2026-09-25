@@ -14,6 +14,8 @@ import {
 import {ServerRail} from './components/ServerRail';
 import {ChannelList} from './components/ChannelList';
 import {MessagePane} from './components/MessagePane';
+import {CallOverlay} from './components/CallOverlay';
+import {useCall} from './lib/calls';
 import {DialogHost} from './components/DialogHost';
 import {Modal} from './components/Modal';
 import {qrDataUrl} from './lib/qr';
@@ -87,6 +89,7 @@ export default function App() {
     const [uploadingAttachment, setUploadingAttachment] = useState<string | null>(null);
     /** Incoming friend requests from peers who scanned our code. */
     const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
+    const call = useCall();
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
@@ -2274,6 +2277,7 @@ export default function App() {
                 attachmentsEnabled={Boolean((server && activeChannel) || activeDm)}
                 onAttach={(file) => void uploadAttachment(file)}
                 onDownloadAttachment={downloadAttachment}
+                onStartCall={activeDm ? () => void call.startCall(activeDm).catch((error) => setError(String(error))) : undefined}
                 getAttachmentData={(hash) => blobs[hash]}
                 uploadingAttachment={uploadingAttachment}
                 outboxPending={net?.outboxPending ?? 0}
@@ -2484,6 +2488,17 @@ export default function App() {
                 </Modal>
             )}
             <DialogHost controller={dialogController}/>
+            <CallOverlay
+                incoming={call.incoming}
+                active={call.active}
+                muted={call.muted}
+                cameraOff={call.cameraOff}
+                onAccept={() => void call.acceptCall()}
+                onReject={call.rejectCall}
+                onEnd={call.endCall}
+                onToggleMute={call.toggleMute}
+                onToggleCamera={call.toggleCamera}
+            />
             {notice && (
                 <div
                     role="status"

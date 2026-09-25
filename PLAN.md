@@ -124,14 +124,30 @@
 
 **Status:** done — README now reflects the current protocol, setup, security boundaries, and roadmap.
 
+### WebRTC calls — current slice
+
+- Add encrypted call signaling over the existing DM session
+- Add offer/answer/ICE events and call state to the backend
+- Add local media capture and remote stream UI
+- Keep media peer-to-peer; signaling never carries plaintext to relays
+
+**Status:** done — WebRTC signaling is E2E sealed and the call UI supports media, mute, camera, and hangup.
+
+### Plugin runtime — current slice
+
+- Define a small signed manifest format
+- Load only explicitly enabled local plugins
+- Expose a constrained capability API instead of unrestricted host access
+- Reject plugins requesting filesystem, shell, or credential capabilities
+
+**Status:** pending
+
 ### Remaining roadmap
 
 - Rust compile, test, clippy, and multi-network verification — deferred by user instruction
-- Multi-device state synchronization
-- Directory client discovery integration
-- Larger server-channel attachments with an explicit privacy model
-- Actual WebRTC voice/video calls with libp2p signaling
-- Constrained plugin manifest/runtime with explicit capabilities
+- Automatic background state synchronization
+- TURN deployment and production call testing
+- Plugin signing/revocation workflow
 
 **Status:** in progress
 

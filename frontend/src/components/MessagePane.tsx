@@ -24,6 +24,7 @@ interface Props {
     attachmentsEnabled?: boolean;
     onAttach: (file: File) => void;
     onDownloadAttachment: (hash: string, name: string) => void;
+    onStartCall?: () => void;
     getAttachmentData?: (hash: string) => number[] | undefined;
     uploadingAttachment?: string | null;
     outboxPending?: number;
@@ -299,7 +300,7 @@ function MentionComposer({
 }
 
 export function MessagePane({
-    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, getAttachmentData, uploadingAttachment, outboxPending = 0, onRetryOutbox, avatarFor,
+    channelName, subtitle, subtitleTitle, messages, members, myPeerId, onSend, onReply, onAction, actionsEnabled, attachmentsEnabled, onAttach, onDownloadAttachment, onStartCall, getAttachmentData, uploadingAttachment, outboxPending = 0, onRetryOutbox, avatarFor,
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const canAct = actionsEnabled ?? false;
@@ -412,6 +413,19 @@ export function MessagePane({
                             ×
                         </button>
                     </div>
+                )}
+                {onStartCall && (
+                    <button
+                        type="button"
+                        onClick={onStartCall}
+                        title="Start a video call"
+                        className="rounded p-1 text-muted hover:bg-surface-3 hover:text-ink"
+                    >
+                        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M15 10l4.6-2.3A1 1 0 0 1 21 8.5v7a1 1 0 0 1-1.4.9L15 14" strokeLinecap="round" strokeLinejoin="round"/>
+                            <rect x="3" y="6" width="12" height="12" rx="2"/>
+                        </svg>
+                    </button>
                 )}
                 {!searchOpen && (
                     <button

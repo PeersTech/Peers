@@ -116,6 +116,16 @@ struct DmReadPayload {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DmCallSignalPayload {
+    kind: String,
+    call_id: String,
+    action: String,
+    sdp: Option<String>,
+    candidate: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct DmAttachmentPayload {
     kind: String,
     id: String,
@@ -2265,6 +2275,45 @@ async fn publish_attachment(
 }
 
 #[tauri::command]
+async fn send_call_signal(
+    state: State<'_, AppState>,
+    peer: String,
+    call_id: String,
+    action: String,
+    sdp: Option<String>,
+    candidate: Option<String>,
+) -> Result<(), String> {
+    if call_id.is_empty() || call_id.len() > 64 || !matches!(action.as_str(), "offer" | "answer" | "ice" | "hangup") {
+        return Err("invalid call signal".into());
+    }
+    if sdp.as_ref().is_some_and(|value| value.len() > 64 * 1024)
+        || candidate.as_ref().is_some_and(|value| value.len() > 1024)
+    {
+        return Err("call signal payload is too large".into());
+    }
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let topic = format!("peers/v1/ch/{peer}");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "kind": "call-signal",
+        "callId": call_id,
+        "action": action,
+        "sdp": sdp,
+        "candidate": candidate,
+    }))
+    .map_err(|e| e.to_string())?;
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipient = dir.recipient_key(&peer).ok_or("no encryption key for this peer")?;
+        dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
+    };
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn mark_group_read(
     state: State<'_, AppState>,
     group_id: String,
@@ -2989,6 +3038,7 @@ pub fn run() {
             unsubscribe,
             publish,
             publish_attachment,
+            send_call_signal,
             mark_group_read,
             mark_dm_read,
             park_blob,
@@ -3465,6 +3515,23 @@ pub fn run() {
                                             chunk,
                                         )
                                         .await;
+                                        return;
+                                    }
+                                }
+                            }
+                            if group_id.is_none() {
+                                if let Ok(signal) = serde_json::from_slice::<DmCallSignalPayload>(&plaintext) {
+                                    if signal.kind == "call-signal" {
+                                        let _ = app_handle.emit(
+                                            "node://call-signal",
+                                            serde_json::json!({
+                                                "peerId": from,
+                                                "callId": signal.call_id,
+                                                "action": signal.action,
+                                                "sdp": signal.sdp,
+                                                "candidate": signal.candidate,
+                                            }),
+                                        );
                                         return;
                                     }
                                 }
