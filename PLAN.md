@@ -135,12 +135,12 @@
 
 ### Plugin runtime — current slice
 
-- Define a small signed manifest format
-- Load only explicitly enabled local plugins
-- Expose a constrained capability API instead of unrestricted host access
-- Reject plugins requesting filesystem, shell, or credential capabilities
+- Define a small manifest format
+- Run explicitly enabled message-transform plugins in a Worker
+- Reject filesystem, shell, credential, network, and DOM capabilities
+- Keep signing/revocation as a separate release-hardening step
 
-**Status:** pending
+**Status:** done — the constrained message-transform runtime is implemented; signing/revocation remains pending.
 
 ### Remaining roadmap
 

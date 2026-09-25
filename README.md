@@ -87,6 +87,19 @@ secrets, and message decryption stay in Rust.
 - Tiered relay capacity and bandwidth controls
 - Signed profiles, avatars, and cross-machine recovery identity
 
+### Extensibility
+
+- Worker-sandboxed message-transform plugins
+- Manifest capability allowlist with no filesystem, shell, credential, network, or DOM access
+- Plugin source and manifest validation before loading
+
+### Calls
+
+- WebRTC voice and video calls
+- E2E-sealed call signaling over the existing DM protocol
+- Mute, camera toggle, accept, decline, and hangup controls
+- Peer-to-peer media; TURN is still required for the hardest NATs
+
 ### Servers and communities
 
 - Server creation, invitations, roles, and channel ACLs

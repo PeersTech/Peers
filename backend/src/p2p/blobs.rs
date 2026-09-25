@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const BLOB_PROTOCOL: StreamProtocol = StreamProtocol::new("/peers/blob/1.0.0");
@@ -53,7 +53,8 @@ impl BlobStore {
         self.inner.lock().unwrap().insert(hash, data.to_vec());
         if let Some(root) = &self.root {
             let path = root.join(hex_name(&hash));
-            let _ = fs::write(path, data);
+            write_private(&path, data);
+            self.enforce_disk_budget(root);
         }
         hash
     }
@@ -84,6 +85,58 @@ impl BlobStore {
                 parse_hex_name(&name)
             })
             .collect()
+    }
+}
+
+/// Blobs are user content and may contain private media, so they are created
+/// owner-only instead of relying on the ambient umask.
+fn write_private(path: &Path, data: &[u8]) {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
+        // Fully qualified: `futures::io::AsyncWriteExt` is also in scope.
+        let _ = std::io::Write::write_all(&mut file, data);
+        let _ = file.sync_all();
+    }
+}
+
+impl BlobStore {
+    /// Keeps the local seed cache bounded so a peer cannot fill the disk just
+    /// by asking us to keep blobs. Oldest access time is evicted first.
+    fn enforce_disk_budget(&self, root: &Path) {
+        const MAX_DISK_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let metadata = entry.metadata().ok()?;
+                if !metadata.is_file() {
+                    return None;
+                }
+                let accessed = metadata.accessed().or_else(|_| metadata.modified()).ok()?;
+                Some((accessed, metadata.len(), entry.path()))
+            })
+            .collect();
+        let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
+        if total <= MAX_DISK_BLOB_BYTES {
+            return;
+        }
+        files.sort_by_key(|(accessed, _, _)| *accessed);
+        for (_, size, path) in files {
+            if total <= MAX_DISK_BLOB_BYTES {
+                break;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
     }
 }
 

@@ -16,6 +16,7 @@ import {ChannelList} from './components/ChannelList';
 import {MessagePane} from './components/MessagePane';
 import {CallOverlay} from './components/CallOverlay';
 import {useCall} from './lib/calls';
+import {PluginHost, type PluginManifest} from './lib/plugins';
 import {DialogHost} from './components/DialogHost';
 import {Modal} from './components/Modal';
 import {qrDataUrl} from './lib/qr';
@@ -90,6 +91,8 @@ export default function App() {
     /** Incoming friend requests from peers who scanned our code. */
     const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
     const call = useCall();
+    const pluginHost = useRef<PluginHost | null>(null);
+    const [plugin, setPlugin] = useState<PluginManifest | null>(null);
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
@@ -581,6 +584,26 @@ export default function App() {
         } catch (err) {
             setError(String(err));
         }
+    };
+
+    const loadPlugin = async (manifestFile: File, sourceFile: File) => {
+        try {
+            const host = new PluginHost();
+            const manifest = host.load(JSON.parse(await manifestFile.text()), await sourceFile.text());
+            pluginHost.current?.dispose();
+            pluginHost.current = host;
+            setPlugin(manifest);
+            setNotice(`Plugin ${manifest.name} enabled (${manifest.capabilities.join(', ')})`);
+        } catch (err) {
+            setError(String(err));
+        }
+    };
+
+    const disablePlugin = () => {
+        pluginHost.current?.dispose();
+        pluginHost.current = null;
+        setPlugin(null);
+        setNotice("Plugin disabled");
     };
 
     const channelAction = async (
@@ -1351,9 +1374,17 @@ export default function App() {
         return () => window.removeEventListener('keydown', onKey);
     }, [dialogController, promptDialog]);
 
-    const send = (text: string) => {
-        const t = text.trim();
+    const send = async (text: string) => {
+        let t = text.trim();
         if (!t) return;
+        if (pluginHost.current) {
+            // A broken or hostile plugin must never block the user from sending.
+            try {
+                t = (await pluginHost.current.transform(t)).trim() || t;
+            } catch (err) {
+                setError(`Plugin transform failed, sending original: ${String(err)}`);
+            }
+        }
         const id = crypto.randomUUID();
         const msg: UiMessage = {
             id,
@@ -2465,6 +2496,45 @@ export default function App() {
                             className="mb-4 w-full resize-none rounded-lg bg-surface-1 px-3 py-2 text-sm text-ink outline-none focus:ring-1 focus:ring-accent/50"
                             placeholder="A short bio…"
                         />
+                        <div className="mb-4 rounded-lg bg-surface-1 p-3">
+                            <div className="mb-1 text-xs text-muted">Plugins</div>
+                            {plugin ? (
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="min-w-0 text-xs text-ink">
+                                        <span className="font-semibold">{plugin.name}</span>
+                                        <span className="text-faint"> v{plugin.version} · {plugin.capabilities.join(', ')}</span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={disablePlugin}
+                                        className="shrink-0 rounded px-2 py-1 text-xs text-muted hover:bg-surface-3 hover:text-ink"
+                                    >
+                                        Disable
+                                    </button>
+                                </div>
+                            ) : (
+                                <label className="block cursor-pointer rounded-md bg-surface-3 px-3 py-1.5 text-center text-xs text-ink hover:bg-surface-4">
+                                    Load manifest + script
+                                    <input
+                                        type="file"
+                                        accept=".json,.js,application/json,text/javascript"
+                                        multiple
+                                        className="hidden"
+                                        onChange={(e) => {
+                                            const files = Array.from(e.target.files ?? []);
+                                            const manifest = files.find((f) => f.name.endsWith('.json'));
+                                            const source = files.find((f) => f.name.endsWith('.js'));
+                                            if (manifest && source) void loadPlugin(manifest, source);
+                                            else setError("Select both a .json manifest and a .js script");
+                                            e.target.value = "";
+                                        }}
+                                    />
+                                </label>
+                            )}
+                            <div className="mt-1 text-[10px] text-faint">
+                                Only message transforms are permitted. No network, disk, shell, or key access.
+                            </div>
+                        </div>
                         <div className="mb-4 rounded-lg bg-surface-1 p-3">
                             <div className="mb-1 text-xs text-muted">Your peer code</div>
                             <div className="selectable font-mono text-base tracking-wide text-accent">{code || '…'}</div>
