@@ -1070,6 +1070,7 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
             sender: Some(me.clone()),
             id: id.clone(),
             read: false,
+            delivered: false,
             attachment_name: None,
             attachment_mime: None,
             attachment_data: None,
@@ -1708,6 +1709,7 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
                 sender: Some(me.clone()),
                 id: id.clone(),
                 read: false,
+            delivered: false,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -1795,6 +1797,7 @@ async fn publish_attachment_chunked(
             sender: Some(me),
             id: message_id.clone(),
             read: false,
+            delivered: false,
             attachment_name: Some(name),
             attachment_mime: Some(mime),
             attachment_data: Some(data),
@@ -1882,6 +1885,7 @@ async fn publish_attachment(
                 sender: Some(me.clone()),
                 id: id.clone(),
                 read: false,
+            delivered: false,
                 attachment_name: Some(name),
                 attachment_mime: Some(mime),
                 attachment_data: Some(data),
@@ -2354,6 +2358,7 @@ async fn receive_attachment_chunk(
                     sender: Some(transfer.peer),
                     id: transfer.message_id,
                     read: false,
+            delivered: false,
                     attachment_name: Some(transfer.name),
                     attachment_mime: Some(transfer.mime),
                     attachment_data: Some(data),
@@ -2935,9 +2940,29 @@ pub fn run() {
                                     if control.kind == "ack" {
                                         let mut outbox = state.outbox.lock().unwrap();
                                         outbox.retain(|entry| entry.id != control.id);
+                                        let delivery_id = control
+                                            .id
+                                            .split_once(':')
+                                            .map(|(id, _)| id.to_string())
+                                            .unwrap_or_else(|| control.id.clone());
+                                        let transfer_complete = if control.id.contains(':') {
+                                            let prefix = format!("{delivery_id}:");
+                                            !outbox.iter().any(|entry| entry.id.starts_with(&prefix))
+                                        } else {
+                                            true
+                                        };
                                         drop(outbox);
+                                        if transfer_complete {
+                                            let mut history = state.history.lock().unwrap();
+                                            if let Some(messages) = history.dm.get_mut(&from) {
+                                                if let Some(message) = messages.iter_mut().find(|message| message.id == delivery_id) {
+                                                    message.delivered = true;
+                                                }
+                                            }
+                                        }
                                         persist(&app_handle.state::<AppState>());
-                                        let _ = app_handle.emit("node://ack", serde_json::json!({"id": control.id}));
+                                        let event_id = if transfer_complete { delivery_id } else { control.id.clone() };
+                                        let _ = app_handle.emit("node://ack", serde_json::json!({"id": event_id}));
                                         return;
                                     }
                                     if control.kind == "text" && control.text.len() <= MAX_TEXT_BYTES {
@@ -2952,6 +2977,15 @@ pub fn run() {
                                         let mut outbox = state.outbox.lock().unwrap();
                                         outbox.retain(|entry| entry.id != ack.id);
                                         drop(outbox);
+                                        {
+                                            let mut history = state.history.lock().unwrap();
+                                            let key = format!("group:{}", group_id);
+                                            if let Some(messages) = history.dm.get_mut(&key) {
+                                                if let Some(message) = messages.iter_mut().find(|message| message.id == ack.id) {
+                                                    message.delivered = true;
+                                                }
+                                            }
+                                        }
                                         persist(&app_handle.state::<AppState>());
                                         let _ = app_handle.emit("node://ack", serde_json::json!({"id": ack.id}));
                                         return;
@@ -3079,6 +3113,7 @@ pub fn run() {
                                         sender: Some(from.clone()),
                                          id: incoming_id.unwrap_or_default(),
                                          read: false,
+            delivered: false,
                                         attachment_name: attachment.as_ref().map(|(payload, _)| payload.name.clone()),
                                         attachment_mime: attachment.as_ref().map(|(payload, _)| payload.mime.clone()),
                                         attachment_data: attachment.as_ref().map(|(_, bytes)| bytes.clone()),

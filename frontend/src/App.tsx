@@ -679,6 +679,7 @@ export default function App() {
                     attachmentSize: d.attachmentData?.length,
                     attachmentEncrypted: Boolean(localAttachment),
                     read: d.read,
+                    delivery: d.mine ? (d.delivered ? "delivered" : "sent") : undefined,
                 };
             });
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));

@@ -62,6 +62,8 @@ pub struct DmMessage {
     #[serde(default)]
     pub read: bool,
     #[serde(default)]
+    pub delivered: bool,
+    #[serde(default)]
     pub attachment_name: Option<String>,
     #[serde(default)]
     pub attachment_mime: Option<String>,
@@ -389,6 +391,7 @@ mod tests {
                 sender: None,
                 id: String::new(),
                 read: true,
+                delivered: false,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -440,6 +443,7 @@ mod tests {
                 sender: None,
                 id: String::new(),
                 read: false,
+                delivered: false,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,

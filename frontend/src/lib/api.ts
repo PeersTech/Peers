@@ -148,6 +148,7 @@ export interface DmMessageDto {
     mine: boolean;
     id?: string | null;
     read?: boolean;
+    delivered?: boolean;
     sender?: string | null;
     attachmentName?: string | null;
     attachmentMime?: string | null;

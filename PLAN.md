@@ -78,6 +78,15 @@
 
 **Status:** done — active attachment work is visible and duplicate selection is blocked.
 
+### Persisted delivery state — current slice
+
+- Persist delivered state separately from read state
+- Restore delivery labels after conversation reloads
+- Mark chunked attachments delivered only after every chunk is acknowledged
+- Keep delivery acknowledgements separate from read receipts
+
+**Status:** done — delivery labels now survive reloads and chunked transfers complete only after final acknowledgement.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of
