@@ -64,6 +64,10 @@ impl BlobStore {
         }
         let root = self.root.as_ref()?;
         let data = fs::read(root.join(hex_name(hash))).ok()?;
+        let actual: BlobHash = Sha256::digest(&data).into();
+        if actual != *hash {
+            return None;
+        }
         self.inner.lock().unwrap().insert(*hash, data.clone());
         Some(data)
     }

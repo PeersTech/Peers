@@ -194,11 +194,14 @@ forms the backbone.
 - [x] **M8 — Friend codes.** Share/copy a peer-ID code; add friend by code →
       DHT provider lookup → dial. Requests and acceptances carry verified
       identity cards, so direct DMs have the required X25519 key.
-- [ ] **M9 — Circuit Relay v2.** Enable relay client transport; NAT'd peers
+- [x] **M9 — Circuit Relay v2.** Enable relay client transport; NAT'd peers
       connect through always-on nodes. Needed for international NAT traversal.
-- [ ] **M10 — DCUtR hole punching.** After relay rendezvous, upgrade to a direct
+      **Done:** the swarm has relay client/server behaviours, reservation events,
+      relay-target backoff, and topic meshing through headless nodes.
+- [x] **M10 — DCUtR hole punching.** After relay rendezvous, upgrade to a direct
       connection where NATs allow — the backbone stays a light switchboard.
-- [ ] **M11 — Headless node mode (`--node`).** ~~Run the Rust backend alone as a
+      **Done:** DCUtR events are surfaced to the UI as direct/reachable results.
+- [x] **M11 — Headless node mode (`--node`).** ~~Run the Rust backend alone as a
       routing/relay node with no GUI: tiny footprint, 24/7 on a Pi/VPS/old phone.~~
       **Done:** `peers --node` starts the backend with no webview — it listens, dials
       known nodes, bootstraps the DHT, and relays gossip for any topic clients ask
