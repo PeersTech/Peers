@@ -115,6 +115,15 @@
 
 **Status:** done — group attachments now support encrypted 8 MiB chunked transfers.
 
+### README refresh — current slice
+
+- Replace stale attachment and roadmap claims
+- Make the security boundaries explicit
+- Document development, node, and deployment entry points
+- Link the separate Directory API, Pterodactyl egg, and documentation repositories
+
+**Status:** done — README now reflects the current protocol, setup, security boundaries, and roadmap.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

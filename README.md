@@ -2,11 +2,12 @@
 
 # Peers
 
-**A serverless, peer-to-peer messenger with encrypted direct messages.**
+**A serverless, peer-to-peer messenger with sealed direct messages.**
 
-No accounts. No central message database. Direct messages are sealed end-to-end;
-server channels, Plaza messages, and network control data are currently
-authenticated/broadcast protocol messages and may be visible to relay operators.
+No accounts. No central message database. Direct messages and group messages travel
+through libp2p without a project-operated message service.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
 
@@ -14,11 +15,24 @@ authenticated/broadcast protocol messages and may be visible to relay operators.
 
 ## What is Peers?
 
-Peers is a desktop messenger where **direct messages are encrypted end-to-end** and
-message traffic travels over a public libp2p network. There is no central message
-database, but relay operators and public network observers can still see routing
-metadata and the plaintext parts of server, Plaza, and control protocols. See the
-security model in the documentation for the exact boundaries.
+Peers is a desktop messenger and libp2p node. It is designed around explicit
+security boundaries rather than pretending that every transport topic is
+private:
+
+- **Direct messages and group messages are sealed end-to-end** between the
+  intended peers.
+- **DM and group attachments are encrypted** inside the message protocol. Files
+  up to 8 MiB use independently sealed, retryable chunks.
+- **Server channels, the Plaza, and relay-control messages** are authenticated
+  broadcast/signed protocols. Relays and subscribed peers can observe their
+  contents and routing metadata.
+- **Channel attachments** are small raw DHT blobs, capped at 64 KiB, and are not
+  E2E encrypted.
+- Optional relay nodes help peers behind NAT connect; they are not a universal
+  privacy boundary.
+
+The GUI is only a shell around the local backend. Private keys, session
+secrets, and message decryption stay in Rust.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -29,146 +43,213 @@ security model in the documentation for the exact boundaries.
 │  │  Vite + Tailwind 4        │  │  invoke() ── crypto ── p2p   │  │
 │  └───────────────────────────┘  └──────────────────────────────┘  │
 │            │                         │                            │
-│            │         Sealed DMs      │ signed/plaintext topics    │
+│            │       sealed DMs        │ signed/plaintext topics    │
 │            ▼                         ▼                            │
 │  ┌────────────────────────────────────────────────────────────────┐
 │  │  Public IPFS testnet: gossipsub topics + Kademlia DHT          │
-│  │  (live chat)                 (torrent-style blob parking)      │
+│  │  (live messaging)              (content-addressed blobs)      │
 │  └────────────────────────────────────────────────────────────────┘
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-The GUI is a shell only — **private keys and decryption never leave the Rust
-backend**, and the frontend never sees a secret.
-
----
-
 ## Features
 
-| | |
-|---|---|
-| End-to-end direct messages | ChaCha20-Poly1305, per-session HKDF hash-chain keys, forward secrecy |
-| Serverless | No backend, no accounts, no phone number, no database |
-| P2P messaging | gossipsub live topics on the public libp2p network |
-| Encrypted DM attachments | Send small files up to 40 KiB inside the existing sealed direct-message envelope |
-| Blob parking | Share small blobs and media up to 64 KiB via the Kademlia DHT; channel attachment bytes are not E2E encrypted yet |
-| Multi-recipient envelopes | One sealed message addressed to any number of peers, each with their own key |
-| Local keystore | Argon2id + XChaCha20-Poly1305 sealed `identity.json`, permissions `0600` |
-| At-rest state | Sealed `state.json` — servers, keychains, DM sessions and bounded message history survive restart |
-| Presence | Live online/offline dots per member across the mesh |
-| Signed message actions | Replies, reactions, edits, deletes, and pin/unpin are signed and replayable through the channel history |
-| Signed snapshots | Owner-signed server history export/import (verify before merging) |
-| Deterministic dialing | Invites carry the owner's listen addresses; joiners dial them directly |
-| NAT-friendly | TCP + QUIC transports, noise encryption, public bootstrap nodes |
-| Cross-platform | Windows, macOS and Linux installers built by GitHub Actions |
+### Messaging
 
-> Planning **international, cross-NAT chat** via a decentralized network of
-> always-on Peers nodes (friend codes, Circuit Relay v2, hole punching, headless
-> node mode) — see [`PLAN.md`](PLAN.md).
+- End-to-end encrypted direct messages
+- Signed group descriptors, private invitations, and membership revisions
+- Group delivery acknowledgements and encrypted read receipts
+- Persistent offline outbox with retry and explicit retry controls
+- Stable message IDs, delivery state, read state, and bounded local history
+- Conversation search across message text and attachment names
+- Persistent drafts, replies, reactions, edits, deletes, pins, and unpins
+- Global Plaza with signed profiles and presence
 
-### Cryptography
+### Files and media
+
+- Encrypted DM attachments up to 8 MiB
+- Encrypted group attachments up to 8 MiB
+- 24 KiB transfer chunks with independent acknowledgements and deduplication
+- Incomplete transfers resume from sealed local state
+- Small server-channel attachments through the Kademlia DHT, up to 64 KiB
+- Content-addressed blob parking for avatars and channel attachments
+
+### Identity and network
+
+- Ed25519 identities and X25519 key agreement
+- BIP39 12/24-word recovery phrases
+- Sealed local keystore and application state
+- Friend codes and DHT peer rendezvous
+- TCP, QUIC, Noise, relay transport, DCUtR, AutoNAT, and gossipsub
+- Headless `--node` mode for always-on relay/routing machines
+- Tiered relay capacity and bandwidth controls
+- Signed profiles, avatars, and cross-machine recovery identity
+
+### Servers and communities
+
+- Server creation, invitations, roles, and channel ACLs
+- Owner-signed member lists and rotating server keys
+- Signed server history snapshots
+- Group membership updates, invitations, leave flow, and private group topics
+
+## Security model
+
+| Data | Protection | Important boundary |
+|---|---|---|
+| Direct messages | ChaCha20-Poly1305 sealed envelopes | Relays can see routing metadata, not plaintext |
+| Group messages | Multi-recipient sealed envelopes | Current group membership is the recipient set |
+| DM/group attachments | Sealed message payloads and encrypted chunks | Relay nodes cannot decrypt attachment bytes |
+| Server channels | Signed broadcast messages | Channel members/relays can observe protocol content |
+| Plaza and relay control | Signed or plaintext broadcast/control | Not an E2E private channel |
+| Channel attachments | Raw DHT blobs | DHT metadata and bytes are not E2E protected |
+| Local state | Argon2id + XChaCha20-Poly1305 sealed store | Protect the OS account and recovery phrase |
+
+The transport handshake protects the connection. It does not turn a signed or
+plaintext application topic into an end-to-end encrypted channel. See the
+[architecture and security documentation](https://github.com/PeersTech/docs/blob/main/content/docs/peers/architecture.mdx)
+for the complete model.
+
+## Cryptography
 
 | Component | Choice |
 |---|---|
-| Identity | Ed25519 (peer IDs) + X25519 (ECDH) |
-| Key agreement | X25519 ECDH + HKDF → session root key |
-| Session keys | `keyₙ = HKDF(SHA256ⁿ(root))` — a fresh key per message, with replay protection and out-of-order delivery within a 100k-message window |
-| Message encryption | ChaCha20-Poly1305 AEAD with authenticated channel context |
-| Keystore | Argon2id (KDF) → XChaCha20-Poly1305 (at-rest encryption) |
-| Transport security | libp2p noise handshake (IK) + TLS-grade forward secrecy |
+| Identity | Ed25519 peer IDs + X25519 ECDH |
+| Key agreement | X25519 ECDH + HKDF session root |
+| Session keys | Directional HKDF hash-chain keys with replay protection |
+| Message encryption | ChaCha20-Poly1305 AEAD with authenticated topic context |
+| Keystore | Argon2id KDF + XChaCha20-Poly1305 at rest |
+| Transport | libp2p Noise, TCP, QUIC, relay, and DCUtR |
+| Blob addressing | SHA-256 content hashes via the Kademlia DHT |
 
-Every design decision is pinned by unit tests — tamper, replay, out-of-order,
-wrong-AAD and third-party-open attacks are all covered.
-
----
-
-## Repository layout
-
-```
-Peers/
-├── frontend/            React UI (Vite + TypeScript + Tailwind)
-│   ├── src/             components, screens, Tauri bindings
-│   └── package.json     npm scripts incl. tauri:dev / tauri:build
-├── backend/             Rust app (Tauri 2 + libp2p)
-│   ├── src/
-│   │   ├── crypto/      identity, keystore, sessions, cipher, peer cards
-│   │   ├── p2p/         libp2p behaviour, blob store, DNS bootstrap
-│   │   └── lib.rs       Tauri commands + event relay
-│   ├── tauri.conf.json  app/bundle config
-│   └── Cargo.toml
-├── scripts/             icon generator
-└── .github/workflows/   CI, 3-OS builds, releases
-```
-
----
+Local crypto tests cover tamper detection, replay protection, out-of-order
+delivery, wrong associated data, and third-party-open cases. Full Rust and
+multi-network verification remains a release task; the frontend checks are
+listed below.
 
 ## Getting started
 
 ### Prerequisites
 
-- [Node.js 20+](https://nodejs.org) with npm
-- A Rust toolchain — see [Tauri prerequisites](https://tauri.app/start/prerequisites/)
-  (Linux: webkit2gtk 4.1, libgtk-3, librsvg, patchelf)
+- Node.js 20+
+- npm
+- A Rust toolchain
+- Tauri 2 prerequisites: <https://tauri.app/start/prerequisites/>
+  - Linux packages include WebKitGTK 4.1, GTK 3, librsvg, and patchelf
+  - macOS and Windows require the normal Tauri native prerequisites
 
-### Run in development
+### Development
 
 ```sh
-# 1. install frontend deps (includes the Tauri CLI)
-cd frontend && npm install
-
-# 2. start the app with hot reload (vite + cargo watch)
+cd frontend
+npm install
 npm run tauri:dev
 ```
 
-### Production build
+The frontend development server runs separately from the Tauri/Rust process;
+`tauri:dev` starts both with hot reload.
+
+### Production bundle
 
 ```sh
-npm run tauri:build        # bundles installers into backend/target/release/bundle
+cd frontend
+npm run tauri:build
 ```
 
-### Regenerate app icons
+Installers are written under `backend/target/release/bundle/`.
+
+### Frontend checks
 
 ```sh
-node scripts/gen-icons.mjs # draws the Peers logo (pure Node, zero deps)
+cd frontend
+npm run typecheck
+npm test
 ```
 
----
+### Backend checks
 
-## Continuous integration
+Run these from `backend/` before publishing a release:
 
-| Workflow | When | What it does |
-|---|---|---|
-| `ci.yml` | every push/PR | `cargo fmt --check`, clippy `-D warnings`, full test suite, frontend build, Windows/macOS `cargo check` |
-| `build.yml` | main + PRs | builds **Windows, Linux and macOS installers** and uploads them as artifacts |
-| `release.yml` | tag `v*` | cross-platform release draft with installers, signed to a GitHub Release |
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+```
 
-Trigger a manual build or release anytime from the **Actions** tab.
+## Node mode
 
----
+A headless node runs without the desktop webview:
+
+```sh
+peers --node
+```
+
+Useful configuration:
+
+| Variable | Purpose |
+|---|---|
+| `PEERS_NODES` | Comma-separated bootstrap/relay multiaddrs |
+| `PEERS_NO_RELAY` | Set to `1` to disable relaying in a client |
+| `PEERS_PORT` | Listen port for the node |
+| `PEERS_ANNOUNCE` | Public address announced for NAT traversal |
+
+There is no canonical public node list. Operators distribute their own
+bootstrap and relay addresses; making one project-operated list mandatory would
+reintroduce a central dependency.
+
+For always-on deployments, see the separate
+[Pterodactyl egg repository](https://github.com/PeersTech/ptero-egg) and the
+[node deployment guide](https://github.com/PeersTech/docs/blob/main/content/docs/peers/running-a-node.mdx).
+
+## Directory API
+
+The Directory API is a signed node registry for discovering relay candidates.
+It does not store, proxy, validate, or deliver messages, groups, or attachments.
+Clients still perform identity verification and messaging locally over libp2p.
+
+- Repository: <https://github.com/PeersTech/dir-api>
+- API docs: <https://github.com/PeersTech/docs/tree/main/content/docs/dir-api>
+
+## Repository layout
+
+```text
+Peers/
+├── frontend/                  React UI (Vite + TypeScript + Tailwind)
+│   ├── src/components/        Conversation and settings UI
+│   ├── src/lib/               Tauri bindings and protocol types
+│   └── package.json           Frontend and Tauri scripts
+├── backend/                   Rust app (Tauri 2 + libp2p)
+│   ├── src/crypto/            Identity, sessions, groups, cards, keystore
+│   ├── src/p2p/               Swarm behaviour, blobs, relay, bootstrap
+│   ├── src/store.rs           Sealed persistence and message history
+│   └── src/lib.rs             Tauri commands and event relay
+├── docs/                      Local architecture notes and plans
+├── scripts/                   Icon generation
+└── .github/workflows/         CI and cross-platform builds
+```
 
 ## Roadmap
 
-- [x] **M1** — Scaffold: React UI shell + 3-pane layout
-- [x] **M2** — Crypto core: identity, keystore, sessions, AEAD, fingerprints (tested)
-- [x] **M3** — Swarm: libp2p node, DHT blob parking, gossipsub chat, tray + background seeding
-- [x] **M4** — Servers: create/invite/join, owner-signed member lists, rotating server keys
-- [x] **M5** — Channels + roles: ACLs, live bindings, UI wiring
-- [x] **M6** — Snapshots: owner-signed history export/import
-- [x] **M6.5** — Persistence, presence, deterministic invite dialing
-- [~] **M7** — Packaging + open-source release (MIT and release workflow ready; no release tag published yet)
+### Shipped
 
-### Node network (international chat — see [`PLAN.md`](PLAN.md))
+- [x] Desktop client, local identity, and sealed state
+- [x] Direct messages, servers, channels, roles, and signed snapshots
+- [x] Presence, profiles, Plaza, friend codes, and DHT blob parking
+- [x] Group DMs, private invitations, membership revisions, and leave/update flows
+- [x] Offline delivery, delivery acknowledgements, and read receipts
+- [x] Encrypted resumable DM and group attachment chunks
+- [x] Relay v2, DCUtR, headless nodes, bootstrap, and capacity caps
+- [x] Seed-phrase recovery and deterministic identity
 
-- [x] **M8** — Friend codes: share/scan peer-ID code, DHT lookup, direct dial, signed mutual key exchange
-- [ ] **M9** — Circuit Relay v2: NAT'd peers connect through always-on nodes
-- [ ] **M10** — DCUtR hole punching: upgrade relayed connections to direct P2P
-- [x] **M11** — Headless node mode (`--node`): run the backend as an always-on routing/relay node (Pi/VPS)
-- [x] **M12** — Node bootstrap + capacity caps: `PEERS_NODES`/`nodes.json`, tiered relay budgets (`PEERS_NO_RELAY=1` opts out)
-- [x] **M13** — Deployment guide: [`docs/running-a-node.md`](docs/running-a-node.md)
-- [x] **M14** — Custom profiles: signed display name, profile picture (DHT avatar), about me
-- [x] **M16** — Seed-phrase login: BIP39 12/24-word phrase *is* the private key (HKDF → Ed25519 + X25519)
+### Next
 
----
+- [ ] Full Rust compile, test, clippy, and multi-network verification pass
+- [ ] Multi-device state synchronization
+- [ ] Directory client discovery integration
+- [ ] Larger channel attachments with an explicit privacy model
+- [ ] Calls and plugin interfaces
+
+See [`PLAN.md`](PLAN.md) for implementation status and [`AGENTS.md`](AGENTS.md)
+for repository conventions.
 
 ## License
 
