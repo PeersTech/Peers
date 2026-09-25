@@ -26,8 +26,8 @@ private:
 - **Server channels, the Plaza, and relay-control messages** are authenticated
   broadcast/signed protocols. Relays and subscribed peers can observe their
   contents and routing metadata.
-- **Channel attachments** are small raw DHT blobs, capped at 64 KiB, and are not
-  E2E encrypted.
+- **Channel attachments** are raw DHT blobs and are not E2E encrypted. Files up
+  to 8 MiB use signed 24 KiB DHT chunk manifests.
 - Optional relay nodes help peers behind NAT connect; they are not a universal
   privacy boundary.
 
@@ -71,7 +71,8 @@ secrets, and message decryption stay in Rust.
 - Encrypted group attachments up to 8 MiB
 - 24 KiB transfer chunks with independent acknowledgements and deduplication
 - Incomplete transfers resume from sealed local state
-- Small server-channel attachments through the Kademlia DHT, up to 64 KiB
+- Server-channel attachments through the Kademlia DHT, up to 8 MiB via signed
+  chunk manifests
 - Content-addressed blob parking for avatars and channel attachments
 
 ### Identity and network
@@ -249,7 +250,6 @@ Peers/
 - [ ] Full Rust compile, test, clippy, and multi-network verification pass
 - [ ] Multi-device state synchronization
 - [ ] Directory client discovery integration
-- [ ] Larger channel attachments with an explicit privacy model
 - [ ] Calls and plugin interfaces
 
 See [`PLAN.md`](PLAN.md) for implementation status and [`AGENTS.md`](AGENTS.md)
