@@ -38,6 +38,12 @@ pub struct DmMessage {
     pub text: String,
     pub ts: u64,
     pub mine: bool,
+    #[serde(default)]
+    pub attachment_name: Option<String>,
+    #[serde(default)]
+    pub attachment_mime: Option<String>,
+    #[serde(default)]
+    pub attachment_data: Option<Vec<u8>>,
 }
 
 /// Keyed message history. Server channels are keyed `"{serverId}/{channel}"`
@@ -331,6 +337,9 @@ mod tests {
                 text: "hello".into(),
                 ts: 1,
                 mine: true,
+                attachment_name: None,
+                attachment_mime: None,
+                attachment_data: None,
             },
         );
         handle.save(&state).unwrap();
@@ -364,6 +373,9 @@ mod tests {
                 text: "super secret contents".into(),
                 ts: 1,
                 mine: true,
+                attachment_name: None,
+                attachment_mime: None,
+                attachment_data: None,
             },
         );
         handle.save(&state).unwrap();

@@ -499,12 +499,12 @@ export function MessagePane({
                                             {m.attachmentHash && (
                                                 <button
                                                     onClick={() => onDownloadAttachment(m.attachmentHash as string, m.attachmentName || "attachment")}
-                                                    title={`${m.attachmentName || "attachment"} · DHT attachment; not E2E encrypted`}
+                                                    title={`${m.attachmentName || "attachment"} · ${m.attachmentEncrypted ? "E2E encrypted attachment" : "DHT attachment; not E2E encrypted"}`}
                                                     className="mt-2 flex w-full items-center gap-2 rounded border border-white/20 bg-black/10 px-2 py-1 text-left text-xs hover:bg-black/20"
                                                 >
                                                     <span>▧</span>
                                                     <span className="min-w-0 flex-1 truncate">{m.attachmentName || "attachment"}</span>
-                                                    <span className="opacity-70">DHT · not E2E</span>
+                                                    <span className="opacity-70">{m.attachmentEncrypted ? "E2E encrypted" : "DHT · not E2E"}</span>
                                                     <span className="opacity-70">{m.attachmentSize ? `${Math.ceil((m.attachmentSize || 0) / 1024)} KiB` : ""}</span>
                                                 </button>
                                             )}

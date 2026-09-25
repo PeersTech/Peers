@@ -6,7 +6,7 @@ import {
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
-    publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
+    publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, serverHistory, setChannel, setProfile,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
     type Contact, type IdentityInfo, type JoinNotice, type NetStatus, type PlazaPost, type PlazaPresence,
     type ServerView, type ServerMessageKind, type SignedMessageDto, type SignedProfile, type UiMessage,
@@ -501,12 +501,46 @@ export default function App() {
     };
 
     const uploadAttachment = async (file: File) => {
-        if (!activeServer || !activeChannel) {
-            setError("Open a server channel before attaching a file");
+        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        if (activeDm) {
+            if (bytes.length === 0 || bytes.length > 40 * 1024) {
+                setError("DM attachments must be between 1 byte and 40 KiB");
+                return;
+            }
+            const peer = activeDm;
+            const localHash = `dm:${peer}:${crypto.randomUUID()}`;
+            const name = file.name.slice(0, 255) || "attachment";
+            const mime = file.type.slice(0, 127) || "application/octet-stream";
+            try {
+                await publishAttachment(peer, name, mime, bytes);
+                setBlobs((old) => ({...old, [localHash]: bytes}));
+                const key = `dm:${peer}`;
+                const msg: UiMessage = {
+                    id: localHash,
+                    author: me?.peerIdShort ?? "you",
+                    authorColor: THEME.online,
+                    time: new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}),
+                    text: "",
+                    mine: true,
+                    authorPeer: me?.peerId,
+                    attachmentHash: localHash,
+                    attachmentName: name,
+                    attachmentMime: mime,
+                    attachmentSize: bytes.length,
+                    attachmentEncrypted: true,
+                };
+                setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
+            } catch (error) {
+                setError(String(error));
+            }
             return;
         }
-        if (file.size === 0 || file.size > 64 * 1024) {
-            setError("Attachments must be between 1 byte and 64 KiB in this version");
+        if (!activeServer || !activeChannel) {
+            setError("Open a conversation before attaching a file");
+            return;
+        }
+        if (bytes.length === 0 || bytes.length > 64 * 1024) {
+            setError("Server attachments must be between 1 byte and 64 KiB");
             return;
         }
         const serverId = activeServer;
@@ -519,7 +553,7 @@ export default function App() {
             size: file.size,
         };
         try {
-            await parkBlob(Array.from(new Uint8Array(await file.arrayBuffer())));
+            await parkBlob(bytes);
         } catch (error) {
             pendingAttachment.current = null;
             setError(String(error));
@@ -555,16 +589,29 @@ export default function App() {
                 historyLoaded.current.delete(key);
                 return;
             }
-            const list: UiMessage[] = msgs.map((d, i) => ({
-                id: `${d.peer}:${d.ts}:${i}`,
-                author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(peer),
-                authorColor: d.mine ? THEME.online : colorFor(peer),
-                time: timeFor(d.ts),
-                text: d.text,
-                mine: d.mine,
-                authorPeer: d.mine ? (me?.peerId ?? '') : peer,
-                mentionsMe: mentionsMe(d.text, me?.peerId ?? ''),
-            }));
+            const list: UiMessage[] = msgs.map((d, i) => {
+                const localAttachment = d.attachmentData?.length
+                    ? `dm:${peer}:${d.ts}:${i}`
+                    : undefined;
+                if (localAttachment && d.attachmentData) {
+                    setBlobs((old) => ({...old, [localAttachment]: d.attachmentData as number[]}));
+                }
+                return {
+                    id: `${d.peer}:${d.ts}:${i}`,
+                    author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(peer),
+                    authorColor: d.mine ? THEME.online : colorFor(peer),
+                    time: timeFor(d.ts),
+                    text: d.text,
+                    mine: d.mine,
+                    authorPeer: d.mine ? (me?.peerId ?? '') : peer,
+                    mentionsMe: mentionsMe(d.text, me?.peerId ?? ''),
+                    attachmentHash: localAttachment,
+                    attachmentName: d.attachmentName ?? undefined,
+                    attachmentMime: d.attachmentMime ?? undefined,
+                    attachmentSize: d.attachmentData?.length,
+                    attachmentEncrypted: Boolean(localAttachment),
+                };
+            });
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));
         } catch (e) {
             historyLoaded.current.delete(key);
@@ -673,17 +720,26 @@ export default function App() {
                 setDms((old) =>
                     old.some((d) => d.id === chan) ? old : [...old, {id: chan, name: shortId(chan), unread: 0}],
                 );
-                if (m.text !== undefined) {
+                if (m.text !== undefined || m.attachmentData?.length) {
                     const key = `dm:${chan}`;
+                    const localHash = m.attachmentData?.length ? `dm:${chan}:${crypto.randomUUID()}` : undefined;
+                    if (localHash && m.attachmentData) {
+                        setBlobs((old) => ({...old, [localHash]: m.attachmentData as number[]}));
+                    }
                     const msg: UiMessage = {
-                        id: crypto.randomUUID(),
+                        id: localHash ?? crypto.randomUUID(),
                         author: live.current.profiles[chan]?.displayName || shortId(chan),
                         authorColor: colorFor(m.from),
                         time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
-                        text: m.text,
+                        text: m.text ?? "",
                         mine: false,
                         authorPeer: m.from,
-                        mentionsMe: mentionsMe(m.text, live.current.me?.peerId ?? ''),
+                        mentionsMe: mentionsMe(m.text ?? "", live.current.me?.peerId ?? ''),
+                        attachmentHash: localHash,
+                        attachmentName: m.attachmentName ?? undefined,
+                        attachmentMime: m.attachmentMime ?? undefined,
+                        attachmentSize: m.attachmentData?.length,
+                        attachmentEncrypted: Boolean(localHash),
                     };
                     setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
                     if (activeRef.current.dm !== chan) {
@@ -1722,7 +1778,7 @@ export default function App() {
                     void channelAction(kind, target, text, reaction).catch((error) => setError(String(error)))
                 }
                 actionsEnabled={Boolean(server && activeChannel)}
-                attachmentsEnabled={Boolean(server && activeChannel)}
+                attachmentsEnabled={Boolean((server && activeChannel) || activeDm)}
                 onAttach={(file) => void uploadAttachment(file)}
                 onDownloadAttachment={downloadAttachment}
                 avatarFor={avatarFor}

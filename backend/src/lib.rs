@@ -8,6 +8,7 @@ mod store;
 pub use node::run_headless;
 
 use crate::crypto::card::{PeerCard, SignedProfile};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::crypto::server::{
     channel_topic, new_server_id, server_topic, ChannelConfig, Invite, JoinNotice, Member,
     PLAZA_TOPIC, PlazaMessage, ProfileNotice, Role, ServerDir, ServerRecord, ServerView,
@@ -46,12 +47,21 @@ const MAX_CHANNEL_NAME_BYTES: usize = 128;
 const MAX_PLAZA_FUTURE_SKEW_SECS: u64 = 300;
 const MAX_PLAZA_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_BLOB_BYTES: usize = 64 * 1024;
+const MAX_DM_ATTACHMENT_BYTES: usize = 40 * 1024;
 
 fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
     if value.len() > max {
         return Err(format!("{label} is too long (max {max} bytes)"));
     }
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct DmAttachmentPayload {
+    kind: String,
+    name: String,
+    mime: String,
+    data: String,
 }
 
 fn validate_profile_fields(profile: &SignedProfile) -> Result<(), String> {
@@ -1235,6 +1245,74 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
                 mine: true,
+                attachment_name: None,
+                attachment_mime: None,
+                attachment_data: None,
+            },
+        );
+    }
+    persist(&state);
+    Ok(())
+}
+
+#[tauri::command]
+async fn publish_attachment(
+    state: State<'_, AppState>,
+    peer: String,
+    name: String,
+    mime: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    if data.is_empty() || data.len() > MAX_DM_ATTACHMENT_BYTES {
+        return Err(format!(
+            "DM attachments must be between 1 and {MAX_DM_ATTACHMENT_BYTES} bytes"
+        ));
+    }
+    validate_text(&name, 255, "attachment name")?;
+    validate_text(&mime, 127, "attachment type")?;
+    let topic = format!("peers/v1/ch/{peer}");
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipient = dir.recipient_key(&peer).ok_or_else(|| {
+            PeersError::Crypto(
+                "no encryption key for this peer yet — meet them on a server or the Plaza first"
+                    .into(),
+            )
+        })?;
+        let body = serde_json::json!({
+            "kind": "attachment",
+            "name": name,
+            "mime": mime,
+            "data": B64.encode(&data),
+        });
+        let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+        dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
+    };
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    {
+        let mut history = state.history.lock().unwrap();
+        history.push_dm(
+            &peer,
+            DmMessage {
+                peer: peer.clone(),
+                text: String::new(),
+                ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                mine: true,
+                attachment_name: Some(name),
+                attachment_mime: Some(mime),
+                attachment_data: Some(data),
             },
         );
     }
@@ -1537,6 +1615,7 @@ pub fn run() {
             subscribe,
             unsubscribe,
             publish,
+            publish_attachment,
             park_blob,
             fetch_blob,
             create_server,
@@ -1972,10 +2051,34 @@ pub fn run() {
                     let Some(result) = opened else { return };
                     match result {
                         Ok(plaintext) => {
-                            if plaintext.len() > MAX_TEXT_BYTES {
+                            if plaintext.len() > MAX_DM_ATTACHMENT_BYTES * 2 + 4096 {
                                 return;
                             }
-                            let text = String::from_utf8_lossy(&plaintext).to_string();
+                            let attachment = match serde_json::from_slice::<DmAttachmentPayload>(&plaintext) {
+                                Ok(payload) if payload.kind == "attachment" => {
+                                    if payload.name.is_empty()
+                                        || payload.name.len() > 255
+                                        || payload.mime.is_empty()
+                                        || payload.mime.len() > 127
+                                    {
+                                        return;
+                                    }
+                                    let bytes = match B64.decode(&payload.data) {
+                                        Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_DM_ATTACHMENT_BYTES => bytes,
+                                        _ => return,
+                                    };
+                                    Some((payload, bytes))
+                                }
+                                _ => None,
+                            };
+                            let text = if attachment.is_some() {
+                                String::new()
+                            } else {
+                                if plaintext.len() > MAX_TEXT_BYTES {
+                                    return;
+                                }
+                                String::from_utf8_lossy(&plaintext).to_string()
+                            };
                             // Cache the sender's identity card under their real
                             // peer id (open() internalizes it under a pseudo
                             // key) so a reply can be encrypted to them.
@@ -1997,6 +2100,9 @@ pub fn run() {
                                             .map(|d| d.as_secs())
                                             .unwrap_or(0),
                                         mine: false,
+                                        attachment_name: attachment.as_ref().map(|(payload, _)| payload.name.clone()),
+                                        attachment_mime: attachment.as_ref().map(|(payload, _)| payload.mime.clone()),
+                                        attachment_data: attachment.as_ref().map(|(_, bytes)| bytes.clone()),
                                     },
                                 );
                             }
@@ -2007,6 +2113,9 @@ pub fn run() {
                                     "from": from,
                                     "channel": topic,
                                     "text": text,
+                                    "attachmentName": attachment.as_ref().map(|(payload, _)| payload.name.clone()),
+                                    "attachmentMime": attachment.as_ref().map(|(payload, _)| payload.mime.clone()),
+                                    "attachmentData": attachment.as_ref().map(|(_, bytes)| bytes.clone()),
                                 }),
                             );
                         }

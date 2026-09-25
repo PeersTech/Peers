@@ -85,6 +85,9 @@ export interface NodeMessage {
     from: string;
     channel: string;
     text?: string;
+    attachmentName?: string | null;
+    attachmentMime?: string | null;
+    attachmentData?: number[] | null;
     error?: string;
 }
 
@@ -120,6 +123,9 @@ export interface DmMessageDto {
     text: string;
     ts: number;
     mine: boolean;
+    attachmentName?: string | null;
+    attachmentMime?: string | null;
+    attachmentData?: number[] | null;
 }
 
 export interface UiMessage {
@@ -145,6 +151,7 @@ export interface UiMessage {
     attachmentName?: string;
     attachmentMime?: string;
     attachmentSize?: number;
+    attachmentEncrypted?: boolean;
 }
 
 /** A verified Plaza message as stored/returned by the backend. */
@@ -285,6 +292,8 @@ export const publishChannelAction = (
 
 export const subscribe = (channel: string) => invoke<void>("subscribe", {channel});
 export const publish = (channel: string, text: string) => invoke<void>("publish", {channel, text});
+export const publishAttachment = (peer: string, name: string, mime: string, data: number[]) =>
+    invoke<void>("publish_attachment", {peer, name, mime, data});
 
 export const setProfile = (displayName: string, about: string, avatarHash: string | null) =>
     invoke<SignedProfile>("set_profile", {displayName, about, avatarHash});
