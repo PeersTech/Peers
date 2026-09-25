@@ -28,7 +28,7 @@
 - Accept/decline/leave flows in the UI
 - Reject removed members from newly issued group messages
 
-**Status:** in progress
+**Status:** done — group protocol, membership revisions, and invitation flows are implemented.
 
 ### Delivery follow-up — current slice
 
@@ -123,6 +123,16 @@
 - Link the separate Directory API, Pterodactyl egg, and documentation repositories
 
 **Status:** done — README now reflects the current protocol, setup, security boundaries, and roadmap.
+
+### Remaining roadmap
+
+- Rust compile, test, clippy, and multi-network verification
+- Multi-device state synchronization
+- Directory client discovery integration
+- Larger channel attachments with an explicit privacy model
+- Calls and plugin interfaces
+
+**Status:** pending
 
 
 
