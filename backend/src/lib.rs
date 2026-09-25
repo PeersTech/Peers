@@ -1013,6 +1013,7 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
             mine: true,
             sender: Some(me.clone()),
             id: id.clone(),
+            read: false,
             attachment_name: None,
             attachment_mime: None,
             attachment_data: None,
@@ -1653,6 +1654,7 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
                 mine: true,
                 sender: Some(me.clone()),
                 id: id.clone(),
+                read: false,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -1736,6 +1738,7 @@ async fn publish_attachment(
                 mine: true,
                 sender: Some(me.clone()),
                 id: id.clone(),
+                read: false,
                 attachment_name: Some(name),
                 attachment_mime: Some(mime),
                 attachment_data: Some(data),
@@ -2539,6 +2542,15 @@ pub fn run() {
                             if group_id.is_none() {
                                 if let Ok(read) = serde_json::from_slice::<DmReadPayload>(&plaintext) {
                                     if read.kind == "read" && read.ids.len() <= 100 {
+                                        {
+                                            let mut history = state.history.lock().unwrap();
+                                            if let Some(messages) = history.dm.get_mut(&from) {
+                                                for message in messages.iter_mut().filter(|message| read.ids.iter().any(|id| id == &message.id)) {
+                                                    message.read = true;
+                                                }
+                                            }
+                                        }
+                                        persist(&app_handle.state::<AppState>());
                                         let _ = app_handle.emit("node://read", serde_json::json!({"from": from, "ids": read.ids}));
                                         return;
                                     }
@@ -2668,6 +2680,7 @@ pub fn run() {
                                         mine: false,
                                         sender: Some(from.clone()),
                                          id: incoming_id.unwrap_or_default(),
+                                         read: false,
                                         attachment_name: attachment.as_ref().map(|(payload, _)| payload.name.clone()),
                                         attachment_mime: attachment.as_ref().map(|(payload, _)| payload.mime.clone()),
                                         attachment_data: attachment.as_ref().map(|(_, bytes)| bytes.clone()),

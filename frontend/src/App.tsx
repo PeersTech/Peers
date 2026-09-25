@@ -643,6 +643,7 @@ export default function App() {
                     attachmentMime: d.attachmentMime ?? undefined,
                     attachmentSize: d.attachmentData?.length,
                     attachmentEncrypted: Boolean(localAttachment),
+                    read: d.read,
                 };
             });
             setHistory((h) => ({...h, [key]: [...list, ...(h[key] ?? [])]}));

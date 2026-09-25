@@ -60,6 +60,8 @@ pub struct DmMessage {
     #[serde(default)]
     pub sender: Option<String>,
     #[serde(default)]
+    pub read: bool,
+    #[serde(default)]
     pub attachment_name: Option<String>,
     #[serde(default)]
     pub attachment_mime: Option<String>,
@@ -369,6 +371,7 @@ mod tests {
                 mine: true,
                 sender: None,
                 id: String::new(),
+                read: true,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -379,6 +382,7 @@ mod tests {
         let handle2 = store.open("hunter2hunter").unwrap();
         let state2 = handle2.load().unwrap();
         assert_eq!(state2.history.dm_messages("peer1").len(), 1);
+        assert!(state2.history.dm_messages("peer1")[0].read);
     }
 
     #[test]
@@ -407,6 +411,7 @@ mod tests {
                 mine: true,
                 sender: None,
                 id: String::new(),
+                read: false,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,

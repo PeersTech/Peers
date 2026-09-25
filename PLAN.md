@@ -30,6 +30,15 @@
 
 **Status:** in progress
 
+### Delivery follow-up — current slice
+
+- Persist read state on outgoing DM messages
+- Apply delivered acknowledgements to stored DM/group history
+- Keep frontend read indicators stable across history reloads
+- Verify with frontend typecheck/tests; heavy Rust verification remains deferred
+
+**Status:** done — read state now survives reloads and only explicit read receipts set it.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of
