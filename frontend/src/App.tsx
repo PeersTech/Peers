@@ -564,9 +564,9 @@ export default function App() {
             return;
         }
         if (activeGroup) {
-            if (bytes.length === 0 || bytes.length > 40 * 1024) {
+            if (bytes.length === 0 || bytes.length > 8 * 1024 * 1024) {
                 setUploadingAttachment(null);
-                setError("Group attachments must be between 1 byte and 40 KiB");
+                setError("Group attachments must be between 1 byte and 8 MiB");
                 return;
             }
             const groupId = activeGroup;

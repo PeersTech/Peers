@@ -137,6 +137,22 @@ struct DmAttachmentChunkPayload {
     data: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupAttachmentChunkPayload {
+    kind: String,
+    id: String,
+    group_id: String,
+    revision: u64,
+    transfer_id: String,
+    name: String,
+    mime: String,
+    total_size: usize,
+    chunk_index: usize,
+    chunk_count: usize,
+    data: String,
+}
+
 fn validate_profile_fields(profile: &SignedProfile) -> Result<(), String> {
     validate_text(&profile.display_name, MAX_DISPLAY_NAME_BYTES, "display name")?;
     validate_text(&profile.about, MAX_ABOUT_BYTES, "about")?;
@@ -1092,6 +1108,103 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
     Ok(id)
 }
 
+async fn send_group_attachment_chunked(
+    state: &AppState,
+    group_id: String,
+    name: String,
+    mime: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() || data.len() > MAX_DM_ATTACHMENT_TOTAL_BYTES {
+        return Err(format!(
+            "Group attachments must be between 1 and {MAX_DM_ATTACHMENT_TOTAL_BYTES} bytes"
+        ));
+    }
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let me = identity.peer_id.to_string();
+    let descriptor = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or("group not found")?;
+    if !descriptor.members.iter().any(|member| member.peer_id == me) {
+        return Err("you are not a member of this group".into());
+    }
+    {
+        let dir = state.dir.lock().unwrap();
+        let Some(dir) = dir.as_ref() else { return Err("not unlocked".into()) };
+        if !descriptor
+            .members
+            .iter()
+            .filter(|member| member.peer_id != me)
+            .any(|member| dir.recipient_key(&member.peer_id).is_some())
+        {
+            return Err("no group members have validated encryption keys".into());
+        }
+    }
+    let message_id = new_message_id();
+    let topic = group_topic(&group_id);
+    let chunk_count = data.len().div_ceil(MAX_DM_ATTACHMENT_CHUNK_BYTES);
+    if chunk_count > MAX_DM_ATTACHMENT_CHUNKS {
+        return Err("attachment has too many chunks".into());
+    }
+    for (chunk_index, chunk) in data.chunks(MAX_DM_ATTACHMENT_CHUNK_BYTES).enumerate() {
+        let chunk_id = format!("{message_id}:{chunk_index}");
+        let payload = serde_json::to_string(&serde_json::json!({
+            "kind": "group-attachment-chunk",
+            "id": chunk_id.clone(),
+            "groupId": group_id.clone(),
+            "revision": descriptor.revision,
+            "transferId": message_id.clone(),
+            "name": name.clone(),
+            "mime": mime.clone(),
+            "totalSize": data.len(),
+            "chunkIndex": chunk_index,
+            "chunkCount": chunk_count,
+            "data": B64.encode(chunk),
+        }))
+        .map_err(|e| e.to_string())?;
+        state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+            id: chunk_id,
+            peer: format!("group:{group_id}"),
+            payload,
+            topic: topic.clone(),
+            group_id: Some(group_id.clone()),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            attempts: 0,
+        });
+    }
+    persist(state);
+    let _ = subscribe_with_relay(state, topic).await;
+    retry_outbox(state).await;
+    state.history.lock().unwrap().push_dm(
+        &format!("group:{group_id}"),
+        DmMessage {
+            peer: format!("group:{group_id}"),
+            text: String::new(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            mine: true,
+            sender: Some(me),
+            id: message_id.clone(),
+            read: false,
+            delivered: false,
+            attachment_name: Some(name),
+            attachment_mime: Some(mime),
+            attachment_data: Some(data),
+        },
+    );
+    persist(state);
+    Ok(message_id)
+}
+
 #[tauri::command]
 async fn send_group_attachment(
     state: State<'_, AppState>,
@@ -1100,13 +1213,14 @@ async fn send_group_attachment(
     mime: String,
     data: Vec<u8>,
 ) -> Result<String, String> {
-    if data.is_empty() || data.len() > MAX_DM_ATTACHMENT_BYTES {
-        return Err(format!(
-            "Group attachments must be between 1 and {MAX_DM_ATTACHMENT_BYTES} bytes"
-        ));
-    }
     validate_text(&name, 255, "attachment name")?;
     validate_text(&mime, 127, "attachment type")?;
+    if data.len() > MAX_DM_ATTACHMENT_BYTES {
+        return send_group_attachment_chunked(&state, group_id, name, mime, data).await;
+    }
+    if data.is_empty() {
+        return Err("Group attachments must be at least 1 byte".into());
+    }
     let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
     let me = identity.peer_id.to_string();
     let descriptor = state
@@ -2427,6 +2541,8 @@ async fn receive_attachment_chunk(
                 chunk.transfer_id.clone(),
                 IncomingTransfer {
                     peer: from.to_string(),
+                    group_id: None,
+                    revision: 0,
                     message_id: chunk.transfer_id.clone(),
                     name: chunk.name.clone(),
                     mime: chunk.mime.clone(),
@@ -2489,6 +2605,185 @@ async fn receive_attachment_chunk(
 
     let ack_body = serde_json::to_vec(&serde_json::json!({
         "kind": "ack",
+        "id": chunk.id,
+    }))
+    .map_err(|e| e.to_string())?;
+    let ack_payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let Some(dir) = dir.as_mut() else { return Ok(()) };
+        let Some(recipient) = dir.recipient_key(from) else { return Ok(()) };
+        dir.seal(identity, &[recipient], topic.as_bytes(), &ack_body).ok()
+    };
+    if let Some(ack_payload) = ack_payload {
+        if let Some(node) = state.node.lock().unwrap().clone() {
+            let _ = node
+                .send(NodeCommand::Publish {
+                    topic: topic.to_string(),
+                    data: ack_payload,
+                })
+                .await;
+        }
+    }
+    Ok(())
+}
+
+async fn receive_group_attachment_chunk(
+    state: &AppState,
+    app: &AppHandle,
+    identity: &Identity,
+    topic: &str,
+    group_id: &str,
+    from: &str,
+    envelope: &[u8],
+    chunk: GroupAttachmentChunkPayload,
+) -> Result<(), String> {
+    if chunk.kind != "group-attachment-chunk"
+        || chunk.id.is_empty()
+        || chunk.id.len() > 64
+        || chunk.group_id != group_id
+        || chunk.transfer_id.is_empty()
+        || chunk.transfer_id.len() > 64
+        || chunk.name.is_empty()
+        || chunk.name.len() > 255
+        || chunk.mime.is_empty()
+        || chunk.mime.len() > 127
+        || chunk.total_size == 0
+        || chunk.total_size > MAX_DM_ATTACHMENT_TOTAL_BYTES
+        || chunk.chunk_count == 0
+        || chunk.chunk_count > MAX_DM_ATTACHMENT_CHUNKS
+        || chunk.chunk_index >= chunk.chunk_count
+    {
+        return Err("invalid group attachment chunk metadata".into());
+    }
+    let current_revision = state
+        .groups
+        .lock()
+        .unwrap()
+        .get(group_id)
+        .map(|group| group.revision)
+        .unwrap_or(0);
+    if chunk.revision < current_revision {
+        return Err("group attachment revision is stale".into());
+    }
+    if chunk.total_size.div_ceil(MAX_DM_ATTACHMENT_CHUNK_BYTES) != chunk.chunk_count {
+        return Err("group attachment chunk count does not match size".into());
+    }
+    let bytes = B64
+        .decode(&chunk.data)
+        .map_err(|_| "invalid group attachment chunk encoding".to_string())?;
+    let expected_size = if chunk.chunk_index + 1 == chunk.chunk_count {
+        chunk
+            .total_size
+            .checked_sub(chunk.chunk_index * MAX_DM_ATTACHMENT_CHUNK_BYTES)
+            .ok_or("group attachment chunk offset overflow")?
+    } else {
+        MAX_DM_ATTACHMENT_CHUNK_BYTES
+    };
+    if bytes.len() != expected_size || bytes.is_empty() {
+        return Err("group attachment chunk has the wrong size".into());
+    }
+    if let Ok(card) = crate::crypto::card::card_from_envelope(envelope) {
+        let mut dir = state.dir.lock().unwrap();
+        if let Some(dir) = dir.as_mut() {
+            dir.remember_contact(from, &card);
+        }
+    }
+
+    let history_key = format!("group:{group_id}");
+    let already_stored = state
+        .history
+        .lock()
+        .unwrap()
+        .dm_messages(&history_key)
+        .iter()
+        .any(|message| message.id == chunk.transfer_id);
+    let mut completed: Option<DmMessage> = None;
+    {
+        let mut transfers = state.incoming_transfers.lock().unwrap();
+        if let Some(existing) = transfers.get(&chunk.transfer_id) {
+            if existing.peer != from
+                || existing.group_id.as_deref() != Some(group_id)
+                || existing.revision != chunk.revision
+                || existing.message_id != chunk.transfer_id
+                || existing.name != chunk.name
+                || existing.mime != chunk.mime
+                || existing.total_size != chunk.total_size
+                || existing.chunk_count != chunk.chunk_count
+            {
+                return Err("group attachment transfer metadata changed".into());
+            }
+        } else {
+            if transfers.len() >= MAX_INCOMING_TRANSFERS {
+                return Err("too many incomplete attachment transfers".into());
+            }
+            transfers.insert(
+                chunk.transfer_id.clone(),
+                IncomingTransfer {
+                    peer: from.to_string(),
+                    group_id: Some(group_id.to_string()),
+                    revision: chunk.revision,
+                    message_id: chunk.transfer_id.clone(),
+                    name: chunk.name.clone(),
+                    mime: chunk.mime.clone(),
+                    total_size: chunk.total_size,
+                    chunk_count: chunk.chunk_count,
+                    chunks: vec![None; chunk.chunk_count],
+                },
+            );
+        }
+        let transfer = transfers
+            .get_mut(&chunk.transfer_id)
+            .ok_or("group attachment transfer disappeared")?;
+        transfer.chunks[chunk.chunk_index] = Some(bytes);
+        if transfer.chunks.iter().all(|chunk| chunk.is_some()) {
+            let transfer = transfers
+                .remove(&chunk.transfer_id)
+                .ok_or("group attachment transfer disappeared")?;
+            let mut data = Vec::with_capacity(transfer.total_size);
+            for part in transfer.chunks.into_iter().flatten() {
+                data.extend_from_slice(&part);
+            }
+            if data.len() != transfer.total_size {
+                return Err("assembled group attachment has the wrong size".into());
+            }
+            if !already_stored {
+                completed = Some(DmMessage {
+                    peer: history_key.clone(),
+                    text: String::new(),
+                    ts: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    mine: false,
+                    sender: Some(from.to_string()),
+                    id: transfer.message_id,
+                    read: false,
+                    delivered: false,
+                    attachment_name: Some(transfer.name),
+                    attachment_mime: Some(transfer.mime),
+                    attachment_data: Some(data),
+                });
+            }
+        }
+    }
+    persist(state);
+    if let Some(message) = completed {
+        let event = serde_json::json!({
+            "from": from,
+            "channel": topic,
+            "text": "",
+            "attachmentName": message.attachment_name.clone(),
+            "attachmentMime": message.attachment_mime.clone(),
+            "attachmentData": message.attachment_data.clone(),
+        });
+        state.history.lock().unwrap().push_dm(&history_key, message);
+        persist(state);
+        let _ = app.emit("node://message", event);
+    }
+
+    let ack_body = serde_json::to_vec(&serde_json::json!({
+        "kind": "ack",
+        "groupId": group_id,
         "id": chunk.id,
     }))
     .map_err(|e| e.to_string())?;
@@ -3082,18 +3377,30 @@ pub fn run() {
                                     if ack.kind == "ack" && ack.group_id == *group_id {
                                         let mut outbox = state.outbox.lock().unwrap();
                                         outbox.retain(|entry| entry.id != ack.id);
+                                        let delivery_id = ack
+                                            .id
+                                            .split_once(':')
+                                            .map(|(id, _)| id.to_string())
+                                            .unwrap_or_else(|| ack.id.clone());
+                                        let transfer_complete = if ack.id.contains(':') {
+                                            let prefix = format!("{delivery_id}:");
+                                            !outbox.iter().any(|entry| entry.id.starts_with(&prefix))
+                                        } else {
+                                            true
+                                        };
                                         drop(outbox);
-                                        {
+                                        if transfer_complete {
                                             let mut history = state.history.lock().unwrap();
                                             let key = format!("group:{}", group_id);
                                             if let Some(messages) = history.dm.get_mut(&key) {
-                                                if let Some(message) = messages.iter_mut().find(|message| message.id == ack.id) {
+                                                if let Some(message) = messages.iter_mut().find(|message| message.id == delivery_id) {
                                                     message.delivered = true;
                                                 }
                                             }
                                         }
                                         persist(&app_handle.state::<AppState>());
-                                        let _ = app_handle.emit("node://ack", serde_json::json!({"id": ack.id}));
+                                        let event_id = if transfer_complete { delivery_id } else { ack.id.clone() };
+                                        let _ = app_handle.emit("node://ack", serde_json::json!({"id": event_id}));
                                         return;
                                     }
                                 }
@@ -3116,6 +3423,24 @@ pub fn run() {
                                             "from": from,
                                             "ids": read.ids,
                                         }));
+                                        return;
+                                    }
+                                }
+                            }
+                            if let Some(group_id) = &group_id {
+                                if let Ok(chunk) = serde_json::from_slice::<GroupAttachmentChunkPayload>(&plaintext) {
+                                    if chunk.kind == "group-attachment-chunk" {
+                                        let _ = receive_group_attachment_chunk(
+                                            &state,
+                                            &app_handle,
+                                            &identity,
+                                            &topic,
+                                            group_id,
+                                            &from,
+                                            &data,
+                                            chunk,
+                                        )
+                                        .await;
                                         return;
                                     }
                                 }

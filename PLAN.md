@@ -105,6 +105,16 @@
 
 **Status:** done — small group attachments are encrypted, revision-bound, retryable, and acknowledged.
 
+### Chunked group attachments — current slice
+
+- Extend the existing transfer state to identify group transfers
+- Split large group attachments into independently sealed recipient envelopes
+- Acknowledge each group chunk and mark the transfer delivered at completion
+- Resume incomplete group transfers after restart
+- Raise the frontend group attachment limit to 8 MiB
+
+**Status:** done — group attachments now support encrypted 8 MiB chunked transfers.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

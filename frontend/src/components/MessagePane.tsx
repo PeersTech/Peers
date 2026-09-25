@@ -252,7 +252,7 @@ function MentionComposer({
                         </span>
                     )}
                     {canAttach && !uploadingAttachment && (
-                        <label className="cursor-pointer rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-4 hover:text-ink" title="Attach a file (max 64 KiB)">
+                        <label className="cursor-pointer rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-4 hover:text-ink" title="Attach a file (up to 8 MiB in DMs and groups; 64 KiB in channels)">
                             Attach
                             <input
                                 type="file"

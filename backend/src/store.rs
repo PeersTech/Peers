@@ -155,6 +155,10 @@ impl History {
 #[serde(rename_all = "camelCase")]
 pub struct IncomingTransfer {
     pub peer: String,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub revision: u64,
     pub message_id: String,
     pub name: String,
     pub mime: String,
@@ -399,6 +403,8 @@ mod tests {
         );
         state.incoming_transfers.push(IncomingTransfer {
             peer: "peer1".into(),
+            group_id: None,
+            revision: 0,
             message_id: "transfer1".into(),
             name: "resume.bin".into(),
             mime: "application/octet-stream".into(),
