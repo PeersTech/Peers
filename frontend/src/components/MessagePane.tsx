@@ -462,6 +462,7 @@ export function MessagePane({
                                         <span className="text-[10px] text-faint">{m.time}</span>
                                         {pinged && <span className="text-[10px] font-bold text-warn">@ you</span>}
                                         {m.edited && <span className="text-[10px] text-faint">edited</span>}
+                                        {mine && m.delivery && <span className="text-[10px] text-faint">{m.delivery}</span>}
                                     </div>
                                 )}
                                 {m.pinned && <div className="mb-1 text-[10px] font-bold text-accent">Pinned</div>}

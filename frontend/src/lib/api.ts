@@ -106,6 +106,7 @@ export interface ServerMessage {
 export interface NodeMessage {
     from: string;
     channel: string;
+    id?: string;
     text?: string;
     attachmentName?: string | null;
     attachmentMime?: string | null;
@@ -145,6 +146,7 @@ export interface DmMessageDto {
     text: string;
     ts: number;
     mine: boolean;
+    id?: string | null;
     sender?: string | null;
     attachmentName?: string | null;
     attachmentMime?: string | null;
@@ -175,6 +177,7 @@ export interface UiMessage {
     attachmentMime?: string;
     attachmentSize?: number;
     attachmentEncrypted?: boolean;
+    delivery?: "sending" | "sent" | "delivered";
 }
 
 /** A verified Plaza message as stored/returned by the backend. */
@@ -264,6 +267,7 @@ export const sendFriendRequest = (peerId: string) =>
 export const acceptFriend = (peerId: string) =>
     invoke<void>("accept_friend", {peerId});
 export const netStatus = () => invoke<NetStatus>("net_status");
+export const retryOutbox = () => invoke<void>("retry_outbox_command");
 
 /** A friend code resolved (or failed to) via the DHT. `peerId` is null when
  *  nobody is providing that code. A match is a *location*, not an identity —
@@ -331,7 +335,7 @@ export const publishChannelAction = (
 ) => invoke<SignedMessageDto>("publish_channel_action", {serverId, channel, kind, targetSig, text, reaction});
 
 export const subscribe = (channel: string) => invoke<void>("subscribe", {channel});
-export const publish = (channel: string, text: string) => invoke<void>("publish", {channel, text});
+export const publish = (channel: string, text: string) => invoke<string>("publish", {channel, text});
 export const publishAttachment = (peer: string, name: string, mime: string, data: number[]) =>
     invoke<void>("publish_attachment", {peer, name, mime, data});
 
@@ -381,6 +385,8 @@ export const onServerMessage = (cb: (m: ServerMessage) => void) =>
     listen<ServerMessage>("server://message", (e) => cb(e.payload));
 export const onServerError = (cb: (e: {serverId: string; error: string}) => void) =>
     listen<{serverId: string; error: string}>("server://error", (e) => cb(e.payload));
+export const onDmAck = (cb: (id: string) => void) =>
+    listen<{id: string}>("node://ack", (e) => cb(e.payload.id));
 export const onNodeMessage = (cb: (m: NodeMessage) => void) =>
     listen<NodeMessage>("node://message", (e) => cb(e.payload));
 export const onJoinRequest = (cb: (n: JoinNotice) => void) =>

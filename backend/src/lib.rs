@@ -20,6 +20,8 @@ use crate::p2p::{NodeCommand, NodeEvent, NodeHandle};
 use crate::store::{
     state_apply, state_from, DmMessage, History, PersistedState, Store, StoreHandle,
 };
+use rand::rngs::OsRng;
+use rand::RngCore;
 use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -57,16 +59,24 @@ fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
 }
 
 #[derive(serde::Deserialize)]
-#[derive(serde::Deserialize)]
 struct GroupMessagePayload {
     group_id: String,
     revision: u64,
+    id: String,
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DmTextPayload {
+    kind: String,
+    id: String,
     text: String,
 }
 
 #[derive(serde::Deserialize)]
 struct DmAttachmentPayload {
     kind: String,
+    id: String,
     name: String,
     mime: String,
     data: String,
@@ -79,6 +89,12 @@ fn validate_profile_fields(profile: &SignedProfile) -> Result<(), String> {
         validate_text(hash, 128, "avatar hash")?;
     }
     Ok(())
+}
+
+fn new_message_id() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Subscribes to a topic and asks any connected relay nodes to mesh it too,
@@ -109,6 +125,7 @@ pub struct AppState {
     store: Store,
     storage: Mutex<Option<StoreHandle>>,
     history: Mutex<History>,
+    outbox: Mutex<Vec<crate::store::OutboxEntry>>,
     /// Peer ids with an open connection right now (presence).
     presence: Mutex<HashSet<String>>,
     /// Our own listen multiaddrs, learned from node `Listening` events.
@@ -146,6 +163,7 @@ impl Default for AppState {
             store: Store::new(Store::default_path()),
             storage: Mutex::new(None),
             history: Mutex::new(History::default()),
+            outbox: Mutex::new(Vec::new()),
             presence: Mutex::new(HashSet::new()),
             addrs: Mutex::new(Vec::new()),
             profile: Mutex::new(None),
@@ -433,6 +451,7 @@ async fn finish_unlock(
         )?;
     }
 
+    *state.outbox.lock().unwrap() = persisted.outbox.clone();
     *state.groups.lock().unwrap() = persisted
         .groups
         .iter()
@@ -446,6 +465,7 @@ async fn finish_unlock(
         let _ = subscribe_with_relay(&state, group_topic(&group.group_id)).await;
     }
     *state.storage.lock().unwrap() = Some(store_handle);
+    retry_outbox(&state).await;
     *state.history.lock().unwrap() = history;
     *state.profile.lock().unwrap() = persisted.profile.clone();
 
@@ -597,12 +617,18 @@ fn persist(state: &AppState) {
         let history = state.history.lock().unwrap();
         let profile = state.profile.lock().unwrap();
         let groups: Vec<_> = state.groups.lock().unwrap().values().cloned().collect();
+        let outbox = state.outbox.lock().unwrap().clone();
         let servers: Vec<_> = servers.records().iter().map(|r| r.to_persisted()).collect();
         match dir.as_ref() {
-            Some(dir) => state_from(dir, &servers, &history, &profile, &groups),
+            Some(dir) => {
+                let mut persisted = state_from(dir, &servers, &history, &profile, &groups);
+                persisted.outbox = outbox;
+                persisted
+            }
             None => PersistedState {
                 servers,
                 history: history.clone(),
+                outbox,
                 profile: profile.clone(),
                 ..PersistedState::default()
             },
@@ -611,7 +637,40 @@ fn persist(state: &AppState) {
     let _ = handle.save(&persisted);
 }
 
-/// A snapshot of what the node knows about its own connectivity.
+async fn retry_outbox(state: &AppState) {
+    let entries = state.outbox.lock().unwrap().clone();
+    if entries.is_empty() {
+        return;
+    }
+    for entry in entries {
+        let topic = format!("peers/v1/ch/{}", entry.peer);
+        let payload = {
+            let mut dir = state.dir.lock().unwrap();
+            let Some(dir) = dir.as_mut() else { continue };
+            let Some(recipient) = dir.recipient_key(&entry.peer) else { continue };
+            let identity = state.identity.lock().unwrap().clone();
+            let Some(identity) = identity else { continue };
+            match dir.seal(&identity, &[recipient], topic.as_bytes(), entry.payload.as_bytes()) {
+                Ok(payload) => payload,
+                Err(_) => continue,
+            }
+        };
+        if subscribe_with_relay(state, topic.clone()).await.is_err() {
+            continue;
+        }
+        let node = state.node.lock().unwrap().clone();
+        let Some(node) = node else { continue };
+        if node.send(NodeCommand::Publish { topic, data: payload }).await.is_ok() {
+            let mut outbox = state.outbox.lock().unwrap();
+            if let Some(item) = outbox.iter_mut().find(|item| item.id == entry.id) {
+                item.attempts = item.attempts.saturating_add(1);
+            }
+        }
+    }
+    persist(state);
+}
+
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetStatus {
@@ -633,6 +692,12 @@ pub struct NetStatus {
 }
 
 /// Current connectivity snapshot for the UI.
+#[tauri::command]
+async fn retry_outbox_command(state: State<'_, AppState>) -> Result<(), String> {
+    retry_outbox(&state).await;
+    Ok(())
+}
+
 #[tauri::command]
 fn net_status(state: State<AppState>) -> Result<NetStatus, String> {
     let listen_addrs = state.addrs.lock().unwrap().clone();
@@ -662,6 +727,7 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.storage.lock().unwrap() = None;
     *state.identity.lock().unwrap() = None;
     *state.history.lock().unwrap() = History::default();
+    *state.outbox.lock().unwrap() = Vec::new();
     *state.presence.lock().unwrap() = HashSet::new();
     *state.addrs.lock().unwrap() = Vec::new();
     *state.profile.lock().unwrap() = None;
@@ -850,6 +916,7 @@ async fn accept_group(state: State<'_, AppState>, invite_json: String) -> Result
 #[tauri::command]
 async fn send_group(state: State<'_, AppState>, group_id: String, text: String) -> Result<(), String> {
     validate_text(&text, MAX_TEXT_BYTES, "group message")?;
+    let id = new_message_id();
     let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
     let me = identity.peer_id.to_string();
     let descriptor = state
@@ -878,6 +945,7 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         let body = serde_json::to_vec(&serde_json::json!({
             "groupId": group_id,
             "revision": descriptor.revision,
+            "id": id.clone(),
             "text": text.clone(),
         }))
         .map_err(|e| e.to_string())?;
@@ -897,6 +965,7 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
                 .unwrap_or(0),
             mine: true,
             sender: Some(me.clone()),
+            id: id.clone(),
             attachment_name: None,
             attachment_mime: None,
             attachment_data: None,
@@ -1461,14 +1530,33 @@ async fn unsubscribe(state: State<'_, AppState>, channel: String) -> Result<(), 
 /// card from the sender travels inside the envelope, so no out-of-band
 /// exchange is needed).
 #[tauri::command]
-async fn publish(state: State<'_, AppState>, channel: String, text: String) -> Result<(), String> {
+async fn publish(state: State<'_, AppState>, channel: String, text: String) -> Result<String, String> {
     let identity = state
         .identity
         .lock()
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
+    let me = identity.peer_id.to_string();
+    let id = new_message_id();
     validate_text(&text, MAX_TEXT_BYTES, "message")?;
+    let outbox_payload = serde_json::to_string(&serde_json::json!({
+        "kind": "text",
+        "id": id.clone(),
+        "text": text.clone(),
+    }))
+    .map_err(|e| e.to_string())?;
+    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+        id: id.clone(),
+        peer: channel.clone(),
+        payload: outbox_payload,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        attempts: 0,
+    });
+    persist(&state);
     // The DM topic for a peer is `peers/v1/ch/<their peer id>`; that full
     // topic string is also the AEAD binding the recipient uses to open the
     // envelope, so seal and publish must share it.
@@ -1482,9 +1570,15 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
                     .into(),
             )
         })?;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "kind": "text",
+            "id": id.clone(),
+            "text": text.clone(),
+        }))
+        .map_err(|e| e.to_string())?;
         // Encrypt only to the intended recipient (not every contact), so the
         // envelope cannot be opened by anyone else subscribed to this topic.
-        dir.seal(&identity, &[rcpt], topic.as_bytes(), text.as_bytes())?
+        dir.seal(&identity, &[rcpt], topic.as_bytes(), &body)?
     };
     // Subscribe (and ask relay nodes to mesh) first: a DM whose entry was
     // auto-created by an incoming message never had `subscribe()` called for
@@ -1509,6 +1603,7 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
                     .unwrap_or(0),
                 mine: true,
                 sender: Some(me.clone()),
+                id: id.clone(),
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -1516,7 +1611,7 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         );
     }
     persist(&state);
-    Ok(())
+    Ok(id)
 }
 
 #[tauri::command]
@@ -1540,6 +1635,7 @@ async fn publish_attachment(
     }
     validate_text(&name, 255, "attachment name")?;
     validate_text(&mime, 127, "attachment type")?;
+    let id = new_message_id();
     let topic = format!("peers/v1/ch/{peer}");
     let payload = {
         let mut dir = state.dir.lock().unwrap();
@@ -1552,6 +1648,7 @@ async fn publish_attachment(
         })?;
         let body = serde_json::json!({
             "kind": "attachment",
+            "id": id,
             "name": name,
             "mime": mime,
             "data": B64.encode(&data),
@@ -1575,6 +1672,7 @@ async fn publish_attachment(
                     .unwrap_or(0),
                 mine: true,
                 sender: Some(me.clone()),
+                id: id.clone(),
                 attachment_name: Some(name),
                 attachment_mime: Some(mime),
                 attachment_data: Some(data),
@@ -1875,6 +1973,7 @@ pub fn run() {
             send_friend_request,
             accept_friend,
             net_status,
+            retry_outbox_command,
             unlock,
             lock,
             subscribe,
@@ -2343,6 +2442,24 @@ pub fn run() {
                             if plaintext.len() > MAX_DM_ATTACHMENT_BYTES * 2 + 4096 {
                                 return;
                             }
+                            let mut incoming_text = None;
+                            let mut incoming_id = None;
+                            if group_id.is_none() {
+                                if let Ok(control) = serde_json::from_slice::<DmTextPayload>(&plaintext) {
+                                    if control.kind == "ack" {
+                                        let mut outbox = state.outbox.lock().unwrap();
+                                        outbox.retain(|entry| entry.id != control.id);
+                                        drop(outbox);
+                                        persist(&app_handle.state::<AppState>());
+                                        let _ = app_handle.emit("node://ack", serde_json::json!({"id": control.id}));
+                                        return;
+                                    }
+                                    if control.kind == "text" && control.text.len() <= MAX_TEXT_BYTES {
+                                        incoming_id = Some(control.id);
+                                        incoming_text = Some(control.text);
+                                    }
+                                }
+                            }
                             let group_text = if let Some(group_id) = &group_id {
                                 let payload: GroupMessagePayload = match serde_json::from_slice(&plaintext) {
                                     Ok(payload) => payload,
@@ -2361,6 +2478,7 @@ pub fn run() {
                                 if payload.revision < current_revision {
                                     return;
                                 }
+                                incoming_id = Some(payload.id);
                                 Some(payload.text)
                             } else {
                                 None
@@ -2392,11 +2510,14 @@ pub fn run() {
                                         Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_DM_ATTACHMENT_BYTES => bytes,
                                         _ => return,
                                     };
+                                    incoming_id = Some(payload.id.clone());
                                     Some((payload, bytes))
                                 }
                                 _ => None,
                             };
-                            let text = if let Some(text) = group_text {
+                            let text = if let Some(text) = incoming_text {
+                                text
+                            } else if let Some(text) = group_text {
                                 text
                             } else if attachment.is_some() {
                                 String::new()
@@ -2436,11 +2557,35 @@ pub fn run() {
                                             .unwrap_or(0),
                                         mine: false,
                                         sender: Some(from.clone()),
+                                         id: incoming_id.unwrap_or_default(),
                                         attachment_name: attachment.as_ref().map(|(payload, _)| payload.name.clone()),
                                         attachment_mime: attachment.as_ref().map(|(payload, _)| payload.mime.clone()),
                                         attachment_data: attachment.as_ref().map(|(_, bytes)| bytes.clone()),
                                     },
                                 );
+                            }
+                            if group_id.is_none() {
+                                if let Some(message_id) = incoming_id.clone() {
+                                    let ack_topic = format!("peers/v1/ch/{from}");
+                                    let ack_payload = {
+                                        let mut dir = state.dir.lock().unwrap();
+                                        let Some(dir) = dir.as_mut() else { return };
+                                        let Some(recipient) = dir.recipient_key(&from) else { return };
+                                        let body = serde_json::to_vec(&serde_json::json!({
+                                            "kind": "ack",
+                                            "id": message_id,
+                                        }))
+                                        .unwrap_or_default();
+                                        dir.seal(&identity, &[recipient], ack_topic.as_bytes(), &body).ok()
+                                    };
+                                    if let Some(ack_payload) = ack_payload {
+                                        let _ = subscribe_with_relay(&state, ack_topic.clone()).await;
+                                        let node = state.node.lock().unwrap().clone();
+                                        if let Some(node) = node {
+                                            let _ = node.send(NodeCommand::Publish { topic: ack_topic, data: ack_payload }).await;
+                                        }
+                                    }
+                                }
                             }
                             persist(&app_handle.state::<AppState>());
                             let _ = app_handle.emit(

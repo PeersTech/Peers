@@ -4,7 +4,7 @@ import {
     addMember, acceptFriend, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
     fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
-    onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile,
+    onDmAck, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
     acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
@@ -149,7 +149,11 @@ export default function App() {
         const tick = () => {
             if (document.hidden) return;
             void netStatus()
-                .then((s) => alive && setNet(s))
+                .then((s) => {
+                    if (!alive) return;
+                    setNet(s);
+                    if (s.reachability !== 'unreachable') void retryOutbox().catch(() => {});
+                })
                 .catch(() => {});
         };
         tick();
@@ -611,7 +615,7 @@ export default function App() {
                 }
                 const sender = d.sender ?? (d.mine ? me?.peerId ?? '' : peer);
                 return {
-                    id: `${d.peer}:${d.ts}:${i}`,
+                    id: d.id || `${d.peer}:${d.ts}:${i}`,
                     author: d.mine ? (me?.peerIdShort ?? 'you') : contactName(sender),
                     authorColor: d.mine ? THEME.online : colorFor(sender),
                     time: timeFor(d.ts),
@@ -728,6 +732,16 @@ export default function App() {
             }),
         );
         track(onServerError((e) => setError(`${e.serverId}: ${e.error}`)));
+        track(
+            onDmAck((id) => {
+                setHistory((current) => Object.fromEntries(
+                    Object.entries(current).map(([key, messages]) => [
+                        key,
+                        messages.map((message) => message.id === id ? {...message, delivery: "delivered"} : message),
+                    ]),
+                ));
+            }),
+        );
         track(
             onNodeMessage((m) => {
                 if (m.from === live.current.me?.peerId) return;
@@ -1075,6 +1089,7 @@ export default function App() {
             time: new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
             text: t,
             mine: true,
+            delivery: activeDm ? "sending" : undefined,
         };
         if (activeGroup) {
             const key = `group:${activeGroup}`;
@@ -1086,7 +1101,12 @@ export default function App() {
         } else if (activeDm) {
             const key = `dm:${activeDm}`;
             setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
-            void publish(activeDm, t).catch((e) => {
+            void publish(activeDm, t).then((messageId) => {
+                setHistory((h) => ({
+                    ...h,
+                    [key]: (h[key] ?? []).map((m) => m.id === id ? {...m, id: messageId, delivery: "sent"} : m),
+                }));
+            }).catch((e) => {
                 setHistory((h) => ({...h, [key]: (h[key] ?? []).filter((m) => m.id !== id)}));
                 setError(String(e));
             });

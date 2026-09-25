@@ -30,6 +30,18 @@ const SALT_LEN: usize = 16;
 const MAX_HISTORY_PER_CONVERSATION: usize = 2_000;
 const MAX_HISTORY_CONVERSATIONS: usize = 512;
 
+/// A pending direct message that can be re-encrypted and retried after a
+/// disconnect. The payload is plaintext only inside the sealed state store.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboxEntry {
+    pub id: String,
+    pub peer: String,
+    pub payload: String,
+    pub created_at: u64,
+    pub attempts: u32,
+}
+
 /// One message stored in a direct-message conversation. `peer` is the
 /// remote peer id; `mine` marks the side that sent it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,6 +51,8 @@ pub struct DmMessage {
     pub text: String,
     pub ts: u64,
     pub mine: bool,
+    #[serde(default)]
+    pub id: String,
     #[serde(default)]
     pub sender: Option<String>,
     #[serde(default)]
@@ -94,6 +108,9 @@ impl History {
             }
         }
         let messages = self.dm.entry(peer.to_string()).or_default();
+        if !msg.id.is_empty() && messages.iter().any(|existing| existing.id == msg.id) {
+            return;
+        }
         messages.push(msg);
         if messages.len() > MAX_HISTORY_PER_CONVERSATION {
             let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
@@ -132,6 +149,8 @@ pub struct PersistedState {
     pub contacts: Vec<(String, Vec<u8>)>,
     pub servers: Vec<PersistedServer>,
     pub history: History,
+    #[serde(default)]
+    pub outbox: Vec<OutboxEntry>,
     /// Our own signed display profile, so name/avatar/about survive a
     /// restart without re-signing.
     #[serde(default)]
@@ -345,6 +364,7 @@ mod tests {
                 ts: 1,
                 mine: true,
                 sender: None,
+                id: String::new(),
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -382,6 +402,7 @@ mod tests {
                 ts: 1,
                 mine: true,
                 sender: None,
+                id: String::new(),
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
