@@ -298,7 +298,7 @@ export const leaveGroup = (groupId: string) =>
 export const acceptGroup = (inviteJson: string) =>
     invoke<GroupDescriptor>("accept_group", {inviteJson});
 export const sendGroup = (groupId: string, text: string) =>
-    invoke<void>("send_group", {groupId, text});
+    invoke<string>("send_group", {groupId, text});
 export const onGroupInvite = (cb: (invite: GroupInvite) => void) =>
     listen<GroupInvite>("group://invite", (e) => cb(e.payload));
 export const listServers = () => invoke<ServerView[]>("list_servers");

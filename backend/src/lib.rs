@@ -67,6 +67,13 @@ struct GroupMessagePayload {
 }
 
 #[derive(serde::Deserialize)]
+struct GroupAckPayload {
+    kind: String,
+    group_id: String,
+    id: String,
+}
+
+#[derive(serde::Deserialize)]
 struct DmTextPayload {
     kind: String,
     id: String,
@@ -643,14 +650,35 @@ async fn retry_outbox(state: &AppState) {
         return;
     }
     for entry in entries {
-        let topic = format!("peers/v1/ch/{}", entry.peer);
+        let identity = state.identity.lock().unwrap().clone();
+        let Some(identity) = identity else { continue };
+        let (topic, recipients) = if let Some(group_id) = &entry.group_id {
+            let Some(descriptor) = state.groups.lock().unwrap().get(group_id).cloned() else { continue };
+            let me = identity.peer_id.to_string();
+            let topic = if entry.topic.is_empty() { group_topic(group_id) } else { entry.topic.clone() };
+            let recipients: Vec<[u8; 32]> = {
+                let dir = state.dir.lock().unwrap();
+                let Some(dir) = dir.as_ref() else { continue };
+                descriptor
+                    .members
+                    .iter()
+                    .filter(|member| member.peer_id != me)
+                    .filter_map(|member| dir.recipient_key(&member.peer_id))
+                    .collect()
+            };
+            if recipients.is_empty() { continue; }
+            (topic, recipients)
+        } else {
+            let Some(recipient) = state.dir.lock().unwrap().as_ref().and_then(|dir| dir.recipient_key(&entry.peer)) else { continue };
+            (
+                if entry.topic.is_empty() { format!("peers/v1/ch/{}", entry.peer) } else { entry.topic.clone() },
+                vec![recipient],
+            )
+        };
         let payload = {
             let mut dir = state.dir.lock().unwrap();
             let Some(dir) = dir.as_mut() else { continue };
-            let Some(recipient) = dir.recipient_key(&entry.peer) else { continue };
-            let identity = state.identity.lock().unwrap().clone();
-            let Some(identity) = identity else { continue };
-            match dir.seal(&identity, &[recipient], topic.as_bytes(), entry.payload.as_bytes()) {
+            match dir.seal(&identity, &recipients, topic.as_bytes(), entry.payload.as_bytes()) {
                 Ok(payload) => payload,
                 Err(_) => continue,
             }
@@ -914,7 +942,7 @@ async fn accept_group(state: State<'_, AppState>, invite_json: String) -> Result
 }
 
 #[tauri::command]
-async fn send_group(state: State<'_, AppState>, group_id: String, text: String) -> Result<(), String> {
+async fn send_group(state: State<'_, AppState>, group_id: String, text: String) -> Result<String, String> {
     validate_text(&text, MAX_TEXT_BYTES, "group message")?;
     let id = new_message_id();
     let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
@@ -930,6 +958,26 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         return Err("you are not a member of this group".into());
     }
     let topic = group_topic(&group_id);
+    let outbox_payload = serde_json::to_string(&serde_json::json!({
+        "groupId": group_id,
+        "revision": descriptor.revision,
+        "id": id.clone(),
+        "text": text.clone(),
+    }))
+    .map_err(|e| e.to_string())?;
+    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
+        id: id.clone(),
+        peer: format!("group:{group_id}"),
+        payload: outbox_payload.clone(),
+        topic: topic.clone(),
+        group_id: Some(group_id.clone()),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        attempts: 0,
+    });
+    persist(&state);
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
@@ -942,14 +990,7 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         if recipients.is_empty() {
             return Err("no group members have validated encryption keys".into());
         }
-        let body = serde_json::to_vec(&serde_json::json!({
-            "groupId": group_id,
-            "revision": descriptor.revision,
-            "id": id.clone(),
-            "text": text.clone(),
-        }))
-        .map_err(|e| e.to_string())?;
-        dir.seal(&identity, &recipients, topic.as_bytes(), &body)?
+        dir.seal(&identity, &recipients, topic.as_bytes(), outbox_payload.as_bytes())?
     };
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
@@ -972,7 +1013,7 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         },
     );
     persist(&state);
-    Ok(())
+    Ok(id)
 }
 
 #[tauri::command]
@@ -1550,6 +1591,8 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         id: id.clone(),
         peer: channel.clone(),
         payload: outbox_payload,
+        topic: format!("peers/v1/ch/{channel}"),
+        group_id: None,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -2460,6 +2503,18 @@ pub fn run() {
                                     }
                                 }
                             }
+                            if let Some(group_id) = &group_id {
+                                if let Ok(ack) = serde_json::from_slice::<GroupAckPayload>(&plaintext) {
+                                    if ack.kind == "ack" && ack.group_id == *group_id {
+                                        let mut outbox = state.outbox.lock().unwrap();
+                                        outbox.retain(|entry| entry.id != ack.id);
+                                        drop(outbox);
+                                        persist(&app_handle.state::<AppState>());
+                                        let _ = app_handle.emit("node://ack", serde_json::json!({"id": ack.id}));
+                                        return;
+                                    }
+                                }
+                            }
                             let group_text = if let Some(group_id) = &group_id {
                                 let payload: GroupMessagePayload = match serde_json::from_slice(&plaintext) {
                                     Ok(payload) => payload,
@@ -2584,6 +2639,26 @@ pub fn run() {
                                         if let Some(node) = node {
                                             let _ = node.send(NodeCommand::Publish { topic: ack_topic, data: ack_payload }).await;
                                         }
+                                    }
+                                }
+                            } else if let (Some(group_id), Some(message_id)) = (&group_id, incoming_id.clone()) {
+                                let ack_payload = {
+                                    let mut dir = state.dir.lock().unwrap();
+                                    let Some(dir) = dir.as_mut() else { return };
+                                    let Some(recipient) = dir.recipient_key(&from) else { return };
+                                    let body = serde_json::to_vec(&serde_json::json!({
+                                        "kind": "ack",
+                                        "groupId": group_id,
+                                        "id": message_id,
+                                    }))
+                                    .unwrap_or_default();
+                                    dir.seal(&identity, &[recipient], topic.as_bytes(), &body).ok()
+                                };
+                                if let Some(ack_payload) = ack_payload {
+                                    let _ = subscribe_with_relay(&state, topic.clone()).await;
+                                    let node = state.node.lock().unwrap().clone();
+                                    if let Some(node) = node {
+                                        let _ = node.send(NodeCommand::Publish { topic: topic.clone(), data: ack_payload }).await;
                                     }
                                 }
                             }

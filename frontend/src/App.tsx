@@ -1094,7 +1094,12 @@ export default function App() {
         if (activeGroup) {
             const key = `group:${activeGroup}`;
             setHistory((h) => ({...h, [key]: [...(h[key] ?? []), msg]}));
-            void sendGroup(activeGroup, t).catch((e) => {
+            void sendGroup(activeGroup, t).then((messageId) => {
+                setHistory((h) => ({
+                    ...h,
+                    [key]: (h[key] ?? []).map((m) => m.id === id ? {...m, id: messageId, delivery: "sent"} : m),
+                }));
+            }).catch((e) => {
                 setHistory((h) => ({...h, [key]: (h[key] ?? []).filter((m) => m.id !== id)}));
                 setError(String(e));
             });

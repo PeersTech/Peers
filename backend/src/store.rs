@@ -38,6 +38,10 @@ pub struct OutboxEntry {
     pub id: String,
     pub peer: String,
     pub payload: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub group_id: Option<String>,
     pub created_at: u64,
     pub attempts: u32,
 }
