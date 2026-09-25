@@ -10,7 +10,15 @@
 
 **Verification:** Rust unit tests, clippy, frontend typecheck/build/tests, and a review of every changed network-facing path.
 
-**Status:** done — DM direction, persistence, avatar upload, protocol validation, source binding, history bounds, and security documentation hardened.
+## Product expansion roadmap — 2026-09-25
+
+**Goal:** Add the full product surface in staged commits, starting with the Chat UX batch.
+
+**Sequence:** Chat UX (search, replies, reactions, edit/delete, pins) → media and file sharing → group DMs and community controls → directory client integration → multi-device → calls and plugins.
+
+**Testing policy:** Feature work lands before the full verification pass. Each stage still gets lightweight checks where they are cheap; heavy Rust/Docker/build verification is deferred to the dedicated test pass.
+
+**Status:** in progress
 
 ## Goal
 
