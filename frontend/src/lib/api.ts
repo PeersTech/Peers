@@ -178,6 +178,7 @@ export interface UiMessage {
     attachmentSize?: number;
     attachmentEncrypted?: boolean;
     delivery?: "sending" | "sent" | "delivered";
+    read?: boolean;
 }
 
 /** A verified Plaza message as stored/returned by the backend. */
@@ -387,6 +388,10 @@ export const onServerError = (cb: (e: {serverId: string; error: string}) => void
     listen<{serverId: string; error: string}>("server://error", (e) => cb(e.payload));
 export const onDmAck = (cb: (id: string) => void) =>
     listen<{id: string}>("node://ack", (e) => cb(e.payload.id));
+export const markDmRead = (peer: string, ids: string[]) =>
+    invoke<void>("mark_dm_read", {peer, ids});
+export const onDmRead = (cb: (payload: {from: string; ids: string[]}) => void) =>
+    listen<{from: string; ids: string[]}>("node://read", (e) => cb(e.payload));
 export const onNodeMessage = (cb: (m: NodeMessage) => void) =>
     listen<NodeMessage>("node://message", (e) => cb(e.payload));
 export const onJoinRequest = (cb: (n: JoinNotice) => void) =>

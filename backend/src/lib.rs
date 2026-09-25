@@ -81,6 +81,12 @@ struct DmTextPayload {
 }
 
 #[derive(serde::Deserialize)]
+struct DmReadPayload {
+    kind: String,
+    ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct DmAttachmentPayload {
     kind: String,
     id: String,
@@ -1741,6 +1747,34 @@ async fn publish_attachment(
 }
 
 #[tauri::command]
+async fn mark_dm_read(
+    state: State<'_, AppState>,
+    peer: String,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    if ids.is_empty() || ids.len() > 100 {
+        return Err("read receipts must contain between 1 and 100 message ids".into());
+    }
+    if ids.iter().any(|id| id.is_empty() || id.len() > 64) {
+        return Err("invalid read receipt message id".into());
+    }
+    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let topic = format!("peers/v1/ch/{peer}");
+    let body = serde_json::to_vec(&serde_json::json!({"kind": "read", "ids": ids}))
+        .map_err(|e| e.to_string())?;
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipient = dir.recipient_key(&peer).ok_or("no encryption key for this peer")?;
+        dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
+    };
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    Ok(())
+}
+
+#[tauri::command]
 fn dm_history(state: State<'_, AppState>, peer: String) -> Result<Vec<DmMessage>, String> {
     Ok(state.history.lock().unwrap().dm_messages(&peer).to_vec())
 }
@@ -2037,6 +2071,7 @@ pub fn run() {
             unsubscribe,
             publish,
             publish_attachment,
+            mark_dm_read,
             park_blob,
             fetch_blob,
             create_group_descriptor,
@@ -2502,6 +2537,12 @@ pub fn run() {
                             let mut incoming_text = None;
                             let mut incoming_id = None;
                             if group_id.is_none() {
+                                if let Ok(read) = serde_json::from_slice::<DmReadPayload>(&plaintext) {
+                                    if read.kind == "read" && read.ids.len() <= 100 {
+                                        let _ = app_handle.emit("node://read", serde_json::json!({"from": from, "ids": read.ids}));
+                                        return;
+                                    }
+                                }
                                 if let Ok(control) = serde_json::from_slice::<DmTextPayload>(&plaintext) {
                                     if control.kind == "ack" {
                                         let mut outbox = state.outbox.lock().unwrap();

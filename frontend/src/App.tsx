@@ -4,7 +4,7 @@ import {
     addMember, acceptFriend, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
     fetchBlob, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
-    onDmAck, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
+    markDmRead, onDmAck, onDmRead, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
     acceptGroup, createGroupDescriptor, leaveGroup, listGroups, onGroupInvite, publishAttachment, publishChannel, publishChannelAction, publishChannelAttachment, publishPlaza, removeMember, renameServer, rotateKey, sendFriendRequest, sendGroup, sendGroupInvite, serverHistory, setChannel, setProfile, updateGroupMembers,
     setRole, shortId, subscribe, subscribeChannel, THEME, timeFor, unlock,
@@ -92,6 +92,7 @@ export default function App() {
     const seenServerActions = useRef(new Set<string>());
     const pendingAttachment = useRef<{serverId: string; channel: string; name: string; mime: string; size: number} | null>(null);
     const pendingDownload = useRef<{hash: string; name: string} | null>(null);
+    const readReceiptsSent = useRef(new Set<string>());
     const blobsRef = useRef<Record<string, number[]>>({});
 
     const live = useRef({
@@ -111,6 +112,19 @@ export default function App() {
     useEffect(() => {
         activeRef.current = {server: activeServer, channel: activeChannel, dm: activeDm, group: activeGroup};
     }, [activeServer, activeChannel, activeDm, activeGroup]);
+
+    useEffect(() => {
+        if (phase !== 'ready' || !activeDm) return;
+        const key = `dm:${activeDm}`;
+        const ids = (history[key] ?? [])
+            .filter((message) => !message.mine && !message.read && !readReceiptsSent.current.has(message.id))
+            .map((message) => message.id);
+        if (ids.length === 0) return;
+        ids.forEach((id) => readReceiptsSent.current.add(id));
+        void markDmRead(activeDm, ids).catch(() => {
+            ids.forEach((id) => readReceiptsSent.current.delete(id));
+        });
+    }, [phase, activeDm, history]);
 
     useEffect(() => {
         if (!notice) return;
@@ -741,6 +755,16 @@ export default function App() {
                         messages.map((message) => message.id === id ? {...message, delivery: "delivered"} : message),
                     ]),
                 ));
+            }),
+        );
+        track(
+            onDmRead(({from, ids}) => {
+                const key = `dm:${from}`;
+                const readIds = new Set(ids);
+                setHistory((current) => ({
+                    ...current,
+                    [key]: (current[key] ?? []).map((message) => readIds.has(message.id) ? {...message, read: true} : message),
+                }));
             }),
         );
         track(
@@ -1483,6 +1507,7 @@ export default function App() {
         setOnline(new Set());
         setBlobs({});
         historyLoaded.current.clear();
+        readReceiptsSent.current.clear();
         blobQueued.current.clear();
         setPlazaOpen(false);
         setPlazaPosts([]);
