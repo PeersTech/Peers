@@ -14,7 +14,7 @@ use crate::crypto::server::{
     PLAZA_TOPIC, PlazaMessage, ProfileNotice, Role, ServerDir, ServerRecord, ServerView,
     SignedList, SignedMessage, Snapshot,
 };
-use crate::crypto::{Identity, Keystore, SessionDir};
+use crate::crypto::{GroupDescriptor, GroupInvite, Identity, Keystore, SessionDir};
 use crate::error::PeersError;
 use crate::p2p::{NodeCommand, NodeEvent, NodeHandle};
 use crate::store::{
@@ -708,6 +708,40 @@ async fn mutate_server(
         .unwrap()
         .view(server_id, &me_str)
         .ok_or_else(|| PeersError::ServerNotFound.to_string())
+}
+
+#[tauri::command]
+fn create_group_descriptor(
+    state: State<'_, AppState>,
+    name: String,
+    peer_ids: Vec<String>,
+) -> Result<GroupDescriptor, String> {
+    if peer_ids.len() > 64 {
+        return Err("group members cannot exceed 64".into());
+    }
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    let dir = state.dir.lock().unwrap();
+    let dir = dir.as_ref().ok_or("not unlocked")?;
+    let mut members = Vec::with_capacity(peer_ids.len());
+    for peer_id in peer_ids {
+        let key = dir
+            .recipient_key(&peer_id)
+            .ok_or_else(|| format!("no validated encryption key for {peer_id}"))?;
+        members.push(crate::crypto::group::GroupMember {peer_id, x25519_pub: key});
+    }
+    GroupDescriptor::sign(&identity, &new_server_id(), &name, members).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn verify_group_invite(invite_json: String) -> Result<GroupInvite, String> {
+    let invite: GroupInvite = serde_json::from_str(&invite_json).map_err(|e| e.to_string())?;
+    invite.verify().map_err(|e| e.to_string())?;
+    Ok(invite)
 }
 
 #[tauri::command]
@@ -1618,6 +1652,8 @@ pub fn run() {
             publish_attachment,
             park_blob,
             fetch_blob,
+            create_group_descriptor,
+            verify_group_invite,
             create_server,
             list_servers,
             create_invite,

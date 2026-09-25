@@ -48,6 +48,28 @@ export interface ServerView {
     members: Member[];
 }
 
+export interface GroupMember {
+    peerId: string;
+    x25519Pub: number[];
+}
+
+export interface GroupDescriptor {
+    version: number;
+    groupId: string;
+    name: string;
+    ownerPeer: string;
+    ownerPub: number[];
+    members: GroupMember[];
+    revision: number;
+    createdAt: number;
+    sig: string;
+}
+
+export interface GroupInvite {
+    kind: "group-invite";
+    descriptor: GroupDescriptor;
+}
+
 export interface IdentityInfo {
     peerId: string;
     peerIdShort: string;
@@ -257,6 +279,10 @@ export const unlock = (password: string) => invoke<IdentityInfo>("unlock", {pass
 export const lock = () => invoke<void>("lock");
 
 export const createServer = (name: string) => invoke<ServerView>("create_server", {name});
+export const createGroupDescriptor = (name: string, peerIds: string[]) =>
+    invoke<GroupDescriptor>("create_group_descriptor", {name, peerIds});
+export const verifyGroupInvite = (inviteJson: string) =>
+    invoke<GroupInvite>("verify_group_invite", {inviteJson});
 export const listServers = () => invoke<ServerView[]>("list_servers");
 export const createInvite = (serverId: string) => invoke<string>("create_invite", {serverId});
 export const joinServer = (inviteJson: string, name: string) =>

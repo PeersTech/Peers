@@ -1,5 +1,6 @@
 pub mod card;
 pub mod cipher;
+pub mod group;
 pub mod code;
 pub mod identity;
 pub mod keystore;
@@ -9,5 +10,6 @@ pub mod server;
 pub mod session;
 
 pub use card::SessionDir;
+pub use group::{GroupDescriptor, GroupInvite};
 pub use identity::Identity;
 pub use keystore::Keystore;
