@@ -323,6 +323,8 @@ export const onFriendRequest = (cb: (e: {peerId: string; displayName: string; av
     listen<{peerId: string; displayName: string; avatarHash: string | null}>("friend://request", (e) => cb(e.payload));
 export const unlock = (password: string) => invoke<IdentityInfo>("unlock", {password});
 export const lock = () => invoke<void>("lock");
+export const exportStatePackage = () => invoke<string>("export_state_package");
+export const importStatePackage = (packageData: string) => invoke<void>("import_state_package", {packageData});
 
 export const createServer = (name: string) => invoke<ServerView>("create_server", {name});
 export const createGroupDescriptor = (name: string, peerIds: string[]) =>

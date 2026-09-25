@@ -56,6 +56,7 @@ const MAX_DM_ATTACHMENT_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_DM_ATTACHMENT_CHUNKS: usize = 512;
 const MAX_INCOMING_TRANSFERS: usize = 32;
 const MAX_DM_ENVELOPE_PLAINTEXT_BYTES: usize = 96 * 1024;
+const MAX_OUTBOX_ATTEMPTS: u32 = 32;
 
 fn validate_text(value: &str, max: usize, label: &str) -> Result<(), String> {
     if value.len() > max {
@@ -198,6 +199,8 @@ pub struct AppState {
     history: Mutex<History>,
     outbox: Mutex<Vec<crate::store::OutboxEntry>>,
     incoming_transfers: Mutex<HashMap<String, IncomingTransfer>>,
+    pending_incoming_friend_requests: Mutex<HashSet<String>>,
+    pending_outgoing_friend_requests: Mutex<HashSet<String>>,
     /// Peer ids with an open connection right now (presence).
     presence: Mutex<HashSet<String>>,
     /// Our own listen multiaddrs, learned from node `Listening` events.
@@ -237,6 +240,8 @@ impl Default for AppState {
             history: Mutex::new(History::default()),
             outbox: Mutex::new(Vec::new()),
             incoming_transfers: Mutex::new(HashMap::new()),
+            pending_incoming_friend_requests: Mutex::new(HashSet::new()),
+            pending_outgoing_friend_requests: Mutex::new(HashSet::new()),
             presence: Mutex::new(HashSet::new()),
             addrs: Mutex::new(Vec::new()),
             profile: Mutex::new(None),
@@ -376,6 +381,11 @@ async fn send_friend_request(
     if peer == me.peer_id {
         return Err("cannot send a friend request to yourself".into());
     }
+    state
+        .pending_outgoing_friend_requests
+        .lock()
+        .unwrap()
+        .insert(peer.to_string());
     // Include our profile and identity card in the request so the recipient
     // can verify us and establish a DM key without a prior server encounter.
     let (display_name, avatar_hash) = {
@@ -426,6 +436,15 @@ async fn accept_friend(state: State<'_, AppState>, peer_id: String) -> Result<()
         .ok_or("not unlocked")?;
     if peer == me.peer_id {
         return Err("cannot accept a friend request from yourself".into());
+    }
+    let peer_string = peer.to_string();
+    if !state
+        .pending_incoming_friend_requests
+        .lock()
+        .unwrap()
+        .remove(&peer_string)
+    {
+        return Err("no pending friend request from this peer".into());
     }
     // Subscribe to the requester's DM topic so we receive their messages.
     subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
@@ -551,7 +570,12 @@ async fn finish_unlock(
     let mut rx = handle.subscribe();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        while let Ok(ev) = rx.recv().await {
+        loop {
+            let ev = match rx.recv().await {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            };
             match &ev {
                 NodeEvent::Listening { addr } => {
                     let st = app2.state::<AppState>();
@@ -617,10 +641,22 @@ async fn finish_unlock(
                 } => {
                     let st = app2.state::<AppState>();
                     if from_card.verify_for_peer(from_peer).is_ok() {
-                        if let Some(dir) = st.dir.lock().unwrap().as_mut() {
-                            dir.remember_contact(from_peer, from_card);
+                        let accepted_request = accepted
+                            && st
+                                .pending_outgoing_friend_requests
+                                .lock()
+                                .unwrap()
+                                .remove(&from_peer);
+                        if accepted_request || !accepted {
+                            if let Some(dir) = st.dir.lock().unwrap().as_mut() {
+                                dir.remember_contact(from_peer, from_card);
+                            }
                         }
                         if !accepted {
+                            st.pending_incoming_friend_requests
+                                .lock()
+                                .unwrap()
+                                .insert(from_peer.to_string());
                             let _ = app2.emit(
                                 "friend://request",
                                 serde_json::json!({
@@ -731,6 +767,9 @@ async fn retry_outbox(state: &AppState) {
     }
     let mut subscribed = HashSet::new();
     for entry in entries {
+        if entry.attempts >= MAX_OUTBOX_ATTEMPTS {
+            continue;
+        }
         let identity = state.identity.lock().unwrap().clone();
         let Some(identity) = identity else { continue };
         let (topic, recipients) = if let Some(group_id) = &entry.group_id {
@@ -756,6 +795,12 @@ async fn retry_outbox(state: &AppState) {
                 vec![recipient],
             )
         };
+        {
+            let mut outbox = state.outbox.lock().unwrap();
+            if let Some(item) = outbox.iter_mut().find(|item| item.id == entry.id) {
+                item.attempts = item.attempts.saturating_add(1);
+            }
+        }
         let payload = {
             let mut dir = state.dir.lock().unwrap();
             let Some(dir) = dir.as_mut() else { continue };
@@ -772,12 +817,7 @@ async fn retry_outbox(state: &AppState) {
         }
         let node = state.node.lock().unwrap().clone();
         let Some(node) = node else { continue };
-        if node.send(NodeCommand::Publish { topic, data: payload }).await.is_ok() {
-            let mut outbox = state.outbox.lock().unwrap();
-            if let Some(item) = outbox.iter_mut().find(|item| item.id == entry.id) {
-                item.attempts = item.attempts.saturating_add(1);
-            }
-        }
+        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
     }
     persist(state);
 }
@@ -861,6 +901,20 @@ fn net_status(state: State<AppState>) -> Result<NetStatus, String> {
 }
 
 #[tauri::command]
+fn export_state_package(state: State<AppState>) -> Result<String, String> {
+    persist(&state);
+    state.store.export_sealed().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_state_package(state: State<AppState>, package: String) -> Result<(), String> {
+    if state.identity.lock().unwrap().is_some() || state.storage.lock().unwrap().is_some() {
+        return Err("lock Peers before importing a state package".into());
+    }
+    state.store.import_sealed(&package).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn lock(state: State<AppState>) -> Result<(), String> {
     persist(&state);
     *state.node.lock().unwrap() = None;
@@ -873,6 +927,8 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.history.lock().unwrap() = History::default();
     *state.outbox.lock().unwrap() = Vec::new();
     *state.incoming_transfers.lock().unwrap() = HashMap::new();
+    *state.pending_incoming_friend_requests.lock().unwrap() = HashSet::new();
+    *state.pending_outgoing_friend_requests.lock().unwrap() = HashSet::new();
     *state.presence.lock().unwrap() = HashSet::new();
     *state.addrs.lock().unwrap() = Vec::new();
     *state.profile.lock().unwrap() = None;
@@ -902,6 +958,12 @@ async fn publish_list(state: &AppState, server_id: &str) -> Result<(), String> {
         data,
     })
     .await?;
+    {
+        let mut servers = state.servers.lock().unwrap();
+        if let Some(rec) = servers.get_mut(server_id) {
+            rec.mark_list_published();
+        }
+    }
     Ok(())
 }
 
@@ -1050,7 +1112,13 @@ async fn accept_group(state: State<'_, AppState>, invite_json: String) -> Result
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
         for member in &invite.descriptor.members {
-            dir.remember_recipient_key(&member.peer_id, member.x25519_pub);
+            if let Some(existing) = dir.recipient_key(&member.peer_id) {
+                if existing != member.x25519_pub {
+                    return Err(format!("group member key conflicts with an existing contact: {}", member.peer_id));
+                }
+            } else {
+                dir.remember_recipient_key(&member.peer_id, member.x25519_pub);
+            }
         }
     }
     state.groups.lock().unwrap().insert(group_id.clone(), invite.descriptor.clone());
@@ -2915,6 +2983,8 @@ pub fn run() {
             retry_outbox_command,
             unlock,
             lock,
+            export_state_package,
+            import_state_package,
             subscribe,
             unsubscribe,
             publish,
@@ -3350,15 +3420,11 @@ pub fn run() {
                         .strip_prefix(crate::crypto::GROUP_TOPIC_PREFIX)
                         .map(str::to_string);
                     if let Some(group_id) = &group_id {
-                        let member = state
-                            .groups
-                            .lock()
-                            .unwrap()
-                            .get(group_id)
-                            .is_some_and(|group| {
-                                group.members.iter().any(|member| member.peer_id == identity.peer_id.to_string())
-                            });
-                        if !member {
+                        let group = state.groups.lock().unwrap().get(group_id).cloned();
+                        let Some(group) = group else { return };
+                        if !group.members.iter().any(|member| member.peer_id == identity.peer_id.to_string())
+                            || !group.members.iter().any(|member| member.peer_id == from)
+                        {
                             return;
                         }
                     }
@@ -3683,6 +3749,11 @@ pub fn run() {
                                     },
                                 );
                             }
+                            // The ACK below tells the sender to remove its
+                            // outbox entry. Persist the received message
+                            // first so a crash cannot turn that ACK into
+                            // permanent message loss.
+                            persist(&app_handle.state::<AppState>());
                             if group_id.is_none() {
                                 if let Some(message_id) = incoming_id.clone() {
                                     let ack_topic = format!("peers/v1/ch/{from}");

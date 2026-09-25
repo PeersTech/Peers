@@ -1,8 +1,8 @@
 import {useCallback, useEffect, useRef, useState, type FormEvent} from 'react';
 import type {UnlistenFn} from '@tauri-apps/api/event';
 import {
-    addMember, acceptFriend, bootstrapDirectoryNodes, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot,
-    fetchBlob, fetchDirectoryNodes, generatePhrase, getProfile, hasIdentity, importSnapshot, initFromPhrase, isUnlocked, joinServer,
+    addMember, acceptFriend, bootstrapDirectoryNodes, colorFor, contactProfiles, copyText, createInvite, createServer, dataUrl, dmHistory, exportSnapshot, exportStatePackage,
+    fetchBlob, fetchDirectoryNodes, generatePhrase, getProfile, hasIdentity, importSnapshot, importStatePackage, initFromPhrase, isUnlocked, joinServer,
     leaveServer, listServers, lock, lookupCode, mentionsMe, myCode, netStatus, onBlobFetched, onBlobFetchFailed, onBlobParked, onCodeResolved,
     markDmRead, markGroupRead, onDmAck, onDmRead, onGroupRead, onFriendRequest, onHolePunch, onJoinRequest, onNodeMessage, onPeerConnected, onPeerDisconnected, onPlazaMessage, onPlazaProfile, retryOutbox,
     onServerError, onServerList, onServerMessage, onlinePeers, parkBlob, peerName, plazaHistory, plazaWho, publish,
@@ -551,6 +551,30 @@ export default function App() {
             setSettingsOpen(false);
             setAvatarBytes(null);
             setPendingHash(null);
+        } catch (err) {
+            setError(String(err));
+        }
+    };
+
+    const exportDeviceState = async () => {
+        try {
+            const packageData = await exportStatePackage();
+            const url = URL.createObjectURL(new Blob([packageData], {type: "application/json"}));
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = `peers-state-${new Date().toISOString().slice(0, 10)}.json`;
+            anchor.click();
+            URL.revokeObjectURL(url);
+            setNotice("Encrypted state package exported");
+        } catch (err) {
+            setError(String(err));
+        }
+    };
+
+    const importDeviceState = async (file: File) => {
+        try {
+            await importStatePackage(await file.text());
+            setError("State package imported. Enter your recovery phrase to unlock it.");
         } catch (err) {
             setError(String(err));
         }
@@ -1892,6 +1916,21 @@ export default function App() {
                         </>
                     )}
 
+                    {!onboarding && (
+                        <label className="mb-4 block cursor-pointer rounded-lg border border-edge bg-surface-2 px-3 py-2 text-center text-xs text-muted hover:bg-surface-3">
+                            Import encrypted state package
+                            <input
+                                type="file"
+                                accept="application/json,.json"
+                                className="hidden"
+                                onChange={(event) => {
+                                    const file = event.target.files?.[0];
+                                    if (file) void importDeviceState(file);
+                                    event.target.value = "";
+                                }}
+                            />
+                        </label>
+                    )}
                     {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
                     <button
                         type="submit"
@@ -2331,7 +2370,20 @@ export default function App() {
                                     A code only locates someone — it is not proof of who they are.
                                     Check this peer id matches what your friend told you before accepting.
                                 </p>
-                                <div className="flex justify-end gap-2">
+                                <div className="mb-4 flex items-center justify-between rounded-lg bg-surface-1 p-3">
+                             <div>
+                                 <div className="text-xs text-ink">Device state transfer</div>
+                                 <div className="text-[10px] text-faint">Export the sealed package for another install.</div>
+                             </div>
+                             <button
+                                 type="button"
+                                 onClick={() => void exportDeviceState()}
+                                 className="rounded-md bg-surface-3 px-2 py-1 text-xs text-ink hover:bg-surface-4"
+                             >
+                                 Export
+                             </button>
+                         </div>
+                         <div className="flex justify-end gap-2">
                                     <button
                                         type="button"
                                         onClick={() => setResolved(null)}

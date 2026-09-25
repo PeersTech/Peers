@@ -92,10 +92,12 @@ fn hex_name(hash: &BlobHash) -> String {
 }
 
 fn parse_hex_name(name: &str) -> Option<BlobHash> {
-    if name.len() != 64 { return None; }
+    if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     let mut hash = [0u8; 32];
     for (i, byte) in hash.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&name[i * 2..i * 2 + 2], 16).ok()?;
+        *byte = u8::from_str_radix(name.get(i * 2..i * 2 + 2)?, 16).ok()?;
     }
     Some(hash)
 }

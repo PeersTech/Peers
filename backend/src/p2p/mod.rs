@@ -15,11 +15,12 @@ use libp2p::request_response::{
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
 use libp2p::swarm::SwarmEvent;
+use sha2::{Digest, Sha256};
 use libp2p::{
     autonat, gossipsub, identify, kad, ping, relay, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 /// How often the node re-checks that its relay reservations are still up.
@@ -46,10 +47,39 @@ const OBSERVED_CONFIRMATIONS: usize = 3;
 /// new address on every identify exchange cannot grow the map without bound.
 const MAX_OBSERVED_TRACKED: usize = 32;
 
+fn is_public_observed_address(addr: &Multiaddr) -> bool {
+    let mut has_ip = false;
+    for protocol in addr.iter() {
+        match protocol {
+            Protocol::Ip4(ip) => {
+                has_ip = true;
+                if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() {
+                    return false;
+                }
+            }
+            Protocol::Ip6(ip) => {
+                has_ip = true;
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+                    return false;
+                }
+                if let Some(ipv4) = ip.to_ipv4_mapped() {
+                    if ipv4.is_private() || ipv4.is_link_local() {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    has_ip
+}
+
 /// A public relay must not let arbitrary peers turn it into an unbounded
 /// topic relay. Only the application namespace is eligible.
 const MAX_RELAY_TOPICS: usize = 256;
 const MAX_RELAY_TOPIC_LEN: usize = 256;
+const MAX_RELAY_TOPICS_PER_PEER: usize = 16;
+const RELAY_TOPIC_TTL: Duration = Duration::from_secs(600);
 
 /// Gossip topic shared by relay nodes and clients. Clients publish tiny
 /// "please mesh topic X for me" notices on it so always-on relay nodes
@@ -322,12 +352,12 @@ pub fn hex_hash(h: &BlobHash) -> String {
 
 /// Parses a 64-char hex blob hash.
 pub fn parse_hex_hash(s: &str) -> Option<BlobHash> {
-    if s.len() != 64 {
+    if s.len() != 64 || !s.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
     }
     Some(out)
 }
@@ -348,6 +378,9 @@ struct Node {
     announced: HashSet<BlobHash>,
     /// Topics requested through the public relay-control topic.
     relay_topics: HashSet<String>,
+    /// Requester and expiry for each relay topic, preventing one peer from
+    /// filling the global relay table and allowing stale requests to expire.
+    relay_topic_owners: HashMap<String, HashMap<PeerId, Instant>>,
     /// Addresses learned from DHT routing updates + identify.
     peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     /// Relays we currently hold a circuit reservation with. A set, not a
@@ -457,6 +490,7 @@ impl Node {
             in_flight: HashSet::new(),
             announced,
             relay_topics: HashSet::new(),
+            relay_topic_owners: HashMap::new(),
             peer_addresses: HashMap::new(),
             relay_reservations: HashSet::new(),
             external_addrs: HashSet::new(),
@@ -551,6 +585,9 @@ impl Node {
     /// reading. Calling it on a single peer's say-so lets that one peer
     /// choose what we advertise about ourselves — so we require a quorum.
     fn note_observed(&mut self, peer: PeerId, addr: Multiaddr) {
+        if !is_public_observed_address(&addr) {
+            return;
+        }
         // Already adopted; nothing further to count.
         if self.external_addrs.contains(&addr) {
             return;
@@ -916,9 +953,36 @@ impl Node {
                     if self.relay && message.topic == control_hash {
                         if let Ok(ctrl) = serde_json::from_slice::<RelayControl>(&message.data) {
                             if ctrl.op == "subscribe" && valid_relay_topic(&ctrl.topic) {
-                                if self.relay_topics.len() >= MAX_RELAY_TOPICS
-                                    && !self.relay_topics.contains(&ctrl.topic)
-                                {
+                                let Some(requester) = message.source else { return };
+                                let now = Instant::now();
+                                let expired: Vec<String> = self
+                                    .relay_topic_owners
+                                    .iter()
+                                    .filter_map(|(topic, owners)| {
+                                        owners.retain(|_, expires| *expires > now);
+                                        (owners.is_empty()).then_some(topic.clone())
+                                    })
+                                    .collect();
+                                for topic in expired {
+                                    self.relay_topics.remove(&topic);
+                                    self.relay_topic_owners.remove(&topic);
+                                    self.topics.remove(&topic);
+                                    let _ = self.swarm.behaviour_mut().gossipsub.unsubscribe(&Sha256Topic::new(topic));
+                                }
+                                let allowed = {
+                                    let owners = self.relay_topic_owners.entry(ctrl.topic.clone()).or_default();
+                                    if !owners.contains_key(&requester) && owners.len() >= MAX_RELAY_TOPICS_PER_PEER {
+                                        false
+                                    } else if self.relay_topics.len() >= MAX_RELAY_TOPICS
+                                        && !self.relay_topics.contains(&ctrl.topic)
+                                    {
+                                        false
+                                    } else {
+                                        owners.insert(requester, now + RELAY_TOPIC_TTL);
+                                        true
+                                    }
+                                };
+                                if !allowed {
                                     self.emit(NodeEvent::Error {
                                         message: "relay topic limit reached".into(),
                                     });
@@ -1015,13 +1079,14 @@ impl Node {
                         if let Some(hash) = self.fetch_requests.remove(&request_id) {
                             self.in_flight.remove(&hash);
                             self.pending_fetches.retain(|_, h| *h != hash);
-                            let actual = self.blobs.put(&response);
+                            let actual: BlobHash = Sha256::digest(&response).into();
                             if actual != hash {
                                 self.emit(NodeEvent::BlobFetchFailed {
                                     hash: hex_hash(&hash),
                                     reason: "hash mismatch (corrupt or tampered)".into(),
                                 });
                             } else {
+                                self.blobs.put(&response);
                                 self.emit(NodeEvent::BlobFetched {
                                     hash: hex_hash(&hash),
                                     data: response,

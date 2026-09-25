@@ -215,6 +215,28 @@ impl Store {
         self.path.exists()
     }
 
+    /// Export the encrypted state envelope for manual device transfer. The
+    /// returned value is still sealed; plaintext is never returned to the UI.
+    pub fn export_sealed(&self) -> Result<String> {
+        let raw = fs::read(&self.path)?;
+        validate_sealed_file(&raw)?;
+        Ok(encode(&raw))
+    }
+
+    /// Replace the state envelope after structural validation. The caller
+    /// must be locked; the next unlock still verifies the user's secret.
+    pub fn import_sealed(&self, encoded: &str) -> Result<()> {
+        if encoded.len() > 96 * 1024 * 1024 {
+            return Err(PeersError::Keystore("state package is too large".into()));
+        }
+        let raw = decode(encoded)?;
+        if raw.len() > 64 * 1024 * 1024 {
+            return Err(PeersError::Keystore("state package is too large".into()));
+        }
+        validate_sealed_file(&raw)?;
+        atomic::write_private(&self.path, &raw)
+    }
+
     /// Unlocks the store: reads (or mints) the salt, derives the storage
     /// key from `password`, and hands back a handle that can load/save the
     /// sealed state. Fails with [`PeersError::BadPassword`] on a wrong
@@ -323,6 +345,23 @@ fn encode(bytes: &[u8]) -> String {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     STANDARD.encode(bytes)
+}
+
+fn validate_sealed_file(raw: &[u8]) -> Result<()> {
+    let file: StoreFile = serde_json::from_slice(raw)?;
+    if file.version != 1 {
+        return Err(PeersError::Keystore(format!(
+            "state version {} is not supported",
+            file.version
+        )));
+    }
+    let salt = decode(&file.salt)?;
+    let nonce = decode(&file.nonce)?;
+    let sealed = decode(&file.sealed)?;
+    if salt.len() != SALT_LEN || nonce.len() != 24 || sealed.is_empty() {
+        return Err(PeersError::Keystore("malformed encrypted state".into()));
+    }
+    Ok(())
 }
 
 fn decode(s: &str) -> Result<Vec<u8>> {

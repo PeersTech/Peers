@@ -271,6 +271,15 @@ impl ServerRecord {
         Ok(SignedList { payload, sig })
     }
 
+    /// Marks the transition list as published. The next list is signed by
+    /// the new current key, while the transition list remains signed by the
+    /// previous key so existing verifiers can advance safely.
+    pub fn mark_list_published(&mut self) {
+        if let Some(keys) = self.keys.as_mut() {
+            keys.prev = None;
+        }
+    }
+
     /// Verifies a list against our known key and advances the chain.
     pub fn verify_list(&mut self, list: &SignedList) -> Result<()> {
         if list.payload.server_id != self.id {

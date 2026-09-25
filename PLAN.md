@@ -163,6 +163,28 @@
 
 **Status:** done — channel attachments now support up to 8 MiB through signed DHT chunk manifests.
 
+### Security audit remediation — current slice
+
+- Remove unsolicited friend-accept key poisoning
+- Reject private/loopback external addresses before adoption
+- Bound relay topic ownership and retry sequence consumption
+- Persist incoming history before acknowledging delivery
+- Survive Tokio receiver lag without stopping event handling
+- Verify blob hashes before storage and make hash parsing panic-free
+- Reject removed group senders and prevent group key-map replacement
+- Repair server signing-key rotation
+
+**Status:** in progress
+
+### Multi-device state transfer — current slice
+
+- Export the already-sealed local state package without exposing plaintext
+- Validate and atomically import a state package while locked
+- Add explicit export/import controls to Settings
+- Keep automatic background sync as a later protocol extension
+
+**Status:** done — sealed state packages can be exported and imported while locked; automatic sync remains future work.
+
 
 
 Make Peers work internationally (cross-country, cross-NAT) using a network of

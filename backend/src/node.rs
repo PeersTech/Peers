@@ -22,16 +22,29 @@ fn load_or_create_identity() -> Result<Identity> {
         return Identity::unmarshal(&bytes);
     }
     let id = Identity::new()?;
+    let bytes = id.marshal()?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, id.marshal()?)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(id)
+    match options.open(&path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(id)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Identity::unmarshal(&std::fs::read(&path)?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// True when a listen address is worth handing to another machine. Loopback
@@ -95,7 +108,12 @@ pub async fn run_headless() -> Result<()> {
     let peer_for_log = peer.clone();
     tokio::spawn(async move {
         let peer = peer_for_log;
-        while let Ok(ev) = rx.recv().await {
+        loop {
+            let ev = match rx.recv().await {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            };
             match &ev {
                 NodeEvent::Listening { addr } => {
                     if is_shareable(addr, announced) {
