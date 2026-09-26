@@ -17,6 +17,8 @@ import {MessagePane} from './components/MessagePane';
 import {CallOverlay} from './components/CallOverlay';
 import {useCall} from './lib/calls';
 import {PluginHost, type PluginManifest} from './lib/plugins';
+import {generatePluginKey, type SignedPlugin} from './lib/plugin-signing';
+import {PluginTrustStore, type TrustedKey} from './lib/plugin-trust';
 import {purgeDrafts} from './lib/drafts';
 import {DialogHost} from './components/DialogHost';
 import {Modal} from './components/Modal';
@@ -93,7 +95,9 @@ export default function App() {
     const [friendRequests, setFriendRequests] = useState<{peerId: string; displayName: string; avatarHash: string | null}[]>([]);
     const call = useCall();
     const pluginHost = useRef<PluginHost | null>(null);
+    const [pluginTrust] = useState(() => new PluginTrustStore());
     const [plugin, setPlugin] = useState<PluginManifest | null>(null);
+    const [trustedKeys, setTrustedKeys] = useState<TrustedKey[]>([]);
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
@@ -587,10 +591,18 @@ export default function App() {
         }
     };
 
-    const loadPlugin = async (manifestFile: File, sourceFile: File) => {
+    const loadPlugin = async (manifestFile: File) => {
         try {
+            const signed = JSON.parse(await manifestFile.text()) as SignedPlugin;
+            // Trust is checked before the source is ever handed to a Worker, so
+            // an untrusted or tampered plugin never reaches the runtime.
+            const decision = await pluginTrust.evaluate(signed);
+            if (!decision.ok) {
+                setError(`Plugin rejected: ${decision.reason}`);
+                return;
+            }
             const host = new PluginHost();
-            const manifest = host.load(JSON.parse(await manifestFile.text()), await sourceFile.text());
+            const manifest = host.load(signed.manifest, signed.source);
             pluginHost.current?.dispose();
             pluginHost.current = host;
             setPlugin(manifest);
@@ -598,6 +610,46 @@ export default function App() {
         } catch (err) {
             setError(String(err));
         }
+    };
+
+    const generateTrustKey = async () => {
+        try {
+            const key = await generatePluginKey();
+            const trusted = {
+                keyId: key.keyId,
+                publicKey: Array.from(key.publicKey),
+                label: `key ${key.keyId}`,
+            };
+            pluginTrust.addKey(trusted);
+            setTrustedKeys(pluginTrust.listKeys());
+            setNotice(`Signing key ${key.keyId} created. Peers stores only the public half.`);
+        } catch (err) {
+            setError(String(err));
+        }
+    };
+
+    const importTrustKey = async (file: File) => {
+        try {
+            const parsed = JSON.parse(await file.text()) as TrustedKey;
+            if (!parsed || typeof parsed.keyId !== "string" || !Array.isArray(parsed.publicKey)) {
+                throw new Error("that file is not a plugin signing key");
+            }
+            pluginTrust.addKey({...parsed, label: parsed.label ?? `key ${parsed.keyId}`});
+            setTrustedKeys(pluginTrust.listKeys());
+            setNotice(`Trusted key ${parsed.keyId}`);
+        } catch (err) {
+            setError(String(err));
+        }
+    };
+
+    const revokeTrustKey = (keyId: string) => {
+        pluginTrust.revoke(keyId);
+        setTrustedKeys(pluginTrust.listKeys());
+        // A revoked key must not keep running the plugin it signed.
+        pluginHost.current?.dispose();
+        pluginHost.current = null;
+        setPlugin(null);
+        setNotice(`Key ${keyId} revoked and any plugin it signed was disabled`);
     };
 
     const disablePlugin = () => {
@@ -2522,18 +2574,14 @@ export default function App() {
                                 </div>
                             ) : (
                                 <label className="block cursor-pointer rounded-md bg-surface-3 px-3 py-1.5 text-center text-xs text-ink hover:bg-surface-4">
-                                    Load manifest + script
+                                    Load signed plugin
                                     <input
                                         type="file"
-                                        accept=".json,.js,application/json,text/javascript"
-                                        multiple
+                                        accept=".json,application/json"
                                         className="hidden"
                                         onChange={(e) => {
-                                            const files = Array.from(e.target.files ?? []);
-                                            const manifest = files.find((f) => f.name.endsWith('.json'));
-                                            const source = files.find((f) => f.name.endsWith('.js'));
-                                            if (manifest && source) void loadPlugin(manifest, source);
-                                            else setError("Select both a .json manifest and a .js script");
+                                            const file = e.target.files?.[0];
+                                            if (file) void loadPlugin(file);
                                             e.target.value = "";
                                         }}
                                     />
@@ -2541,6 +2589,51 @@ export default function App() {
                             )}
                             <div className="mt-1 text-[10px] text-faint">
                                 Only message transforms are permitted. No network, disk, shell, or key access.
+                            </div>
+                        </div>
+                        <div className="mb-4 rounded-lg bg-surface-1 p-3">
+                            <div className="mb-1 text-xs text-muted">Trusted signing keys</div>
+                            {trustedKeys.length === 0 && (
+                                <div className="mb-2 text-[10px] text-faint">
+                                    No keys trusted. A plugin will not load until you trust the key that signed it.
+                                </div>
+                            )}
+                            {trustedKeys.map((key) => (
+                                <div key={key.keyId} className="flex items-center justify-between gap-2 py-0.5">
+                                    <span className="truncate font-mono text-[10px] text-ink">
+                                        {key.keyId}
+                                        {pluginTrust.isRevoked(key.keyId) ? " (revoked)" : ""}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => revokeTrustKey(key.keyId)}
+                                        className="shrink-0 rounded px-2 py-0.5 text-[10px] text-muted hover:bg-surface-3 hover:text-ink"
+                                    >
+                                        Revoke
+                                    </button>
+                                </div>
+                            ))}
+                            <div className="mt-2 flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => void generateTrustKey()}
+                                    className="flex-1 rounded-md bg-surface-3 px-2 py-1 text-[10px] text-ink hover:bg-surface-4"
+                                >
+                                    New signing key
+                                </button>
+                                <label className="flex-1 cursor-pointer rounded-md bg-surface-3 px-2 py-1 text-center text-[10px] text-ink hover:bg-surface-4">
+                                    Import key
+                                    <input
+                                        type="file"
+                                        accept=".json,application/json"
+                                        className="hidden"
+                                        onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (file) void importTrustKey(file);
+                                            e.target.value = "";
+                                        }}
+                                    />
+                                </label>
                             </div>
                         </div>
                         <div className="mb-4 rounded-lg bg-surface-1 p-3">
