@@ -195,6 +195,12 @@ pub struct PersistedState {
 /// A single install. `device_id` is random and local; it is never derived from
 /// the recovery phrase, so it cannot collide across devices and cannot be used
 /// to correlate installs after a state import.
+///
+/// Known limitation: this lives in the sealed state file, which a state-package
+/// import copies wholesale, so an install that imports a package adopts the
+/// exporter's `device_id`. The correct fix is to move this record out of the
+/// account-scoped sealed state into a per-install file alongside the node
+/// identity, where an import cannot reach it.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LocalDevice {
     pub device_id: String,

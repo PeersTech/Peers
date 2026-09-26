@@ -578,6 +578,10 @@ async fn finish_unlock(
     retry_outbox(&state).await;
     *state.history.lock().unwrap() = history;
     *state.profile.lock().unwrap() = persisted.profile.clone();
+    // The device id must survive a restart. Without this the field stays None
+    // and the next local_device() call mints a fresh id, so an install would
+    // look like a new device on every launch.
+    *state.device.lock().unwrap() = persisted.device.clone();
 
     // Relay node events to the frontend and track presence.
     let mut rx = handle.subscribe();
@@ -947,6 +951,7 @@ fn lock(state: State<AppState>) -> Result<(), String> {
     *state.presence.lock().unwrap() = HashSet::new();
     *state.addrs.lock().unwrap() = Vec::new();
     *state.profile.lock().unwrap() = None;
+    *state.device.lock().unwrap() = None;
     *state.profiles.lock().unwrap() = HashMap::new();
     *state.plaza.lock().unwrap() = VecDeque::new();
     *state.plaza_seen.lock().unwrap() = HashMap::new();
