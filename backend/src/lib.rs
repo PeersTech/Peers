@@ -554,6 +554,17 @@ async fn finish_unlock(
             &mut history,
             &persisted,
         )?;
+        // Register our own X25519 key as a recipient for our own peer id.
+        //
+        // Two installs of one account share a peer id, so they subscribe to the
+        // same DM topic and both receive anything sent to it. Sealing to that
+        // topic needs a recipient key for ourselves, which nothing else
+        // provides. Both installs hold the same X25519 key, so the resulting
+        // session is the same one the other device derives, and this is what
+        // lets a device publish a delta the other one can open.
+        dir.as_mut()
+            .unwrap()
+            .remember_recipient_key(&id.peer_id.to_string(), id.x25519_public());
     }
 
     *state.outbox.lock().unwrap() = persisted.outbox.clone();
