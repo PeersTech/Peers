@@ -3,6 +3,7 @@ import {
     bytesToBase64, colorFor, memberName, parseMentions, shortId, type Contact, type Mention, type ServerMessageKind,
     type UiMessage,
 } from "../lib/api";
+import {draftKey as storageKey, shouldPersistDraft} from "../lib/drafts";
 
 interface Props {
     channelName: string;
@@ -105,7 +106,7 @@ function MentionComposer({
 
     useEffect(() => {
         try {
-            setValue(window.localStorage.getItem(`peers-draft:${draftKey}`) ?? "");
+            setValue(window.localStorage.getItem(storageKey(draftKey)) ?? "");
         } catch {
             setValue("");
         }
@@ -113,9 +114,10 @@ function MentionComposer({
     }, [draftKey]);
 
     useEffect(() => {
+        const key = storageKey(draftKey);
         try {
-            if (value) window.localStorage.setItem(`peers-draft:${draftKey}`, value);
-            else window.localStorage.removeItem(`peers-draft:${draftKey}`);
+            if (shouldPersistDraft(value)) window.localStorage.setItem(key, value);
+            else window.localStorage.removeItem(key);
         } catch {
             // Draft persistence is best effort.
         }

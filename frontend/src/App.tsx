@@ -17,6 +17,7 @@ import {MessagePane} from './components/MessagePane';
 import {CallOverlay} from './components/CallOverlay';
 import {useCall} from './lib/calls';
 import {PluginHost, type PluginManifest} from './lib/plugins';
+import {purgeDrafts} from './lib/drafts';
 import {DialogHost} from './components/DialogHost';
 import {Modal} from './components/Modal';
 import {qrDataUrl} from './lib/qr';
@@ -1775,6 +1776,13 @@ export default function App() {
             await lock();
         } catch (e) {
             setError(String(e));
+        }
+        // Drafts are plaintext in localStorage. Clearing the rest of the
+        // in-memory state but leaving them would mean lock does not lock.
+        try {
+            purgeDrafts(window.localStorage);
+        } catch {
+            // Best effort; storage may be unavailable.
         }
         setMe(null);
         setServers({});
