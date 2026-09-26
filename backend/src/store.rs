@@ -185,6 +185,21 @@ pub struct PersistedState {
     pub profile: Option<SignedProfile>,
     #[serde(default)]
     pub groups: Vec<GroupDescriptor>,
+    /// This install's identity among the user's devices. Every install gets a
+    /// distinct one, so two devices running the same recovery phrase are
+    /// distinguishable without changing how the human is identified.
+    #[serde(default)]
+    pub device: Option<LocalDevice>,
+}
+
+/// A single install. `device_id` is random and local; it is never derived from
+/// the recovery phrase, so it cannot collide across devices and cannot be used
+/// to correlate installs after a state import.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LocalDevice {
+    pub device_id: String,
+    pub label: String,
+    pub created_at: u64,
 }
 
 /// The file on disk: version + salt + one sealed payload.

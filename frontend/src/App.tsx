@@ -17,6 +17,7 @@ import {MessagePane} from './components/MessagePane';
 import {CallOverlay} from './components/CallOverlay';
 import {useCall} from './lib/calls';
 import {PluginHost, type PluginManifest} from './lib/plugins';
+import {localDevice, setDeviceLabel, type LocalDevice} from './lib/api';
 import {generatePluginKey, type SignedPlugin} from './lib/plugin-signing';
 import {PluginTrustStore, type TrustedKey} from './lib/plugin-trust';
 import {purgeDrafts} from './lib/drafts';
@@ -98,6 +99,33 @@ export default function App() {
     const [pluginTrust] = useState(() => new PluginTrustStore());
     const [plugin, setPlugin] = useState<PluginManifest | null>(null);
     const [trustedKeys, setTrustedKeys] = useState<TrustedKey[]>([]);
+    const [device, setDevice] = useState<LocalDevice | null>(null);
+
+    useEffect(() => {
+        if (phase !== 'ready') {
+            setDevice(null);
+            return;
+        }
+        let cancelled = false;
+        void localDevice()
+            .then((value) => {
+                if (!cancelled) setDevice(value);
+            })
+            .catch(() => {
+                // The device record is a convenience; settings still work without it.
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [phase]);
+
+    const renameDevice = async (label: string) => {
+        try {
+            setDevice(await setDeviceLabel(label));
+        } catch (err) {
+            setError(String(err));
+        }
+    };
     const booted = useRef(false);
     const historyLoaded = useRef(new Set<string>());
     const blobQueued = useRef(new Set<string>());
@@ -2634,6 +2662,29 @@ export default function App() {
                                         }}
                                     />
                                 </label>
+                            </div>
+                        </div>
+                        <div className="mb-4 rounded-lg bg-surface-1 p-3">
+                            <div className="mb-1 text-xs text-muted">This device</div>
+                            {device ? (
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        value={device.label}
+                                        onChange={(e) => setDevice({...device, label: e.target.value})}
+                                        onBlur={(e) => void renameDevice(e.target.value)}
+                                        maxLength={48}
+                                        aria-label="Device name"
+                                        className="min-w-0 flex-1 rounded bg-surface-2 px-2 py-1 text-xs text-ink outline-none focus:ring-1 focus:ring-accent/50"
+                                    />
+                                    <span className="shrink-0 font-mono text-[10px] text-faint">
+                                        {device.deviceId.slice(0, 8)}
+                                    </span>
+                                </div>
+                            ) : (
+                                <div className="text-[10px] text-faint">Unavailable while locked.</div>
+                            )}
+                            <div className="mt-1 text-[10px] text-faint">
+                                Other installs of this account are separate devices.
                             </div>
                         </div>
                         <div className="mb-4 rounded-lg bg-surface-1 p-3">

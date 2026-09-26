@@ -451,7 +451,15 @@ export const sendCallSignal = (
 export const onCallSignal = (cb: (payload: {peerId: string; callId: string; action: string; sdp?: string | null; candidate?: string | null}) => void) =>
     listen<{peerId: string; callId: string; action: string; sdp?: string | null; candidate?: string | null}>("node://call-signal", (e) => cb(e.payload));
 
-export const markDmRead = (peer: string, ids: string[]) =>
+export interface LocalDevice {
+    deviceId: string;
+    label: string;
+    createdAt: number;
+}
+export const localDevice = () => invoke<LocalDevice>("local_device");
+export const setDeviceLabel = (label: string) => invoke<LocalDevice>("set_device_label", {label});
+
+export const markDmRead =(peer: string, ids: string[]) =>
     invoke<void>("mark_dm_read", {peer, ids});
 export const markGroupRead = (groupId: string, ids: string[]) =>
     invoke<void>("mark_group_read", {groupId, ids});

@@ -218,6 +218,8 @@ pub struct AppState {
     addrs: Mutex<Vec<String>>,
     /// Our own signed display profile (name/about/avatar).
     profile: Mutex<Option<SignedProfile>>,
+    /// This install's device record, created on first read.
+    device: Mutex<Option<crate::store::LocalDevice>>,
     /// Cached, verified display profiles of peers we've met (peer id → profile).
     profiles: Mutex<HashMap<String, SignedProfile>>,
     /// Recent self-signed messages seen on the global Plaza (deduped by sig).
@@ -255,6 +257,7 @@ impl Default for AppState {
             presence: Mutex::new(HashSet::new()),
             addrs: Mutex::new(Vec::new()),
             profile: Mutex::new(None),
+            device: Mutex::new(None),
             profiles: Mutex::new(HashMap::new()),
             plaza: Mutex::new(VecDeque::new()),
             plaza_seen: Mutex::new(HashMap::new()),
@@ -755,6 +758,7 @@ fn persist(state: &AppState) {
                 let mut persisted = state_from(dir, &servers, &history, &profile, &groups);
                 persisted.outbox = outbox;
                 persisted.incoming_transfers = incoming_transfers;
+                persisted.device = state.device.lock().unwrap().clone();
                 persisted
             }
             None => PersistedState {
@@ -763,6 +767,7 @@ fn persist(state: &AppState) {
                 outbox,
                 incoming_transfers,
                 profile: profile.clone(),
+                device: state.device.lock().unwrap().clone(),
                 ..PersistedState::default()
             },
         }
@@ -2531,6 +2536,73 @@ fn get_profile(state: State<'_, AppState>) -> Result<Option<SignedProfile>, Stri
     Ok(state.profile.lock().unwrap().clone())
 }
 
+/// This install's device record, created on first read.
+///
+/// The id is random and local, never derived from the recovery phrase, so two
+/// installs of the same account are distinguishable without letting anyone
+/// correlate them from the id alone.
+fn ensure_device(state: &AppState) -> Result<crate::store::LocalDevice, String> {
+    let existing = state.device.lock().unwrap().clone();
+    if let Some(device) = existing {
+        return Ok(device);
+    }
+    let mut id = [0u8; 16];
+    OsRng.fill_bytes(&mut id);
+    let device = crate::store::LocalDevice {
+        device_id: id.iter().map(|byte| format!("{byte:02x}")).collect(),
+        label: default_device_label(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    {
+        let mut guard = state.device.lock().unwrap();
+        // Another caller may have won the race; keep the first record so the
+        // device id stays stable for the life of the install.
+        if let Some(winner) = guard.as_ref() {
+            return Ok(winner.clone());
+        }
+        *guard = Some(device.clone());
+    }
+    persist(state);
+    Ok(device)
+}
+
+#[tauri::command]
+fn local_device(state: State<'_, AppState>) -> Result<crate::store::LocalDevice, String> {
+    ensure_device(&state)
+}
+
+fn default_device_label() -> String {
+    // Best-effort hostname. It is a convenience label only and is editable.
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|value| value.trim().chars().take(48).collect::<String>())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "This device".to_string())
+}
+
+#[tauri::command]
+fn set_device_label(
+    state: State<'_, AppState>,
+    label: String,
+) -> Result<crate::store::LocalDevice, String> {
+    let label: String = label.trim().chars().take(48).collect();
+    if label.is_empty() {
+        return Err("device label cannot be empty".into());
+    }
+    // Ensure a record exists before renaming it.
+    ensure_device(&state)?;
+    let device = {
+        let mut guard = state.device.lock().unwrap();
+        let device = guard.as_mut().ok_or("device unavailable")?;
+        device.label = label;
+        device.clone()
+    };
+    persist(&state);
+    Ok(device)
+}
+
 /// Verified display profiles we've learned for other peers (peer id → profile).
 #[tauri::command]
 fn contact_profiles(state: State<'_, AppState>) -> Result<HashMap<String, SignedProfile>, String> {
@@ -3074,6 +3146,8 @@ pub fn run() {
             online_peers,
             set_profile,
             get_profile,
+        local_device,
+        set_device_label,
             contact_profiles,
             publish_plaza,
             plaza_history,
