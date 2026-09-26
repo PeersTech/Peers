@@ -350,21 +350,29 @@ fn valid_relay_topic(topic: &str) -> bool {
             || topic == crate::crypto::server::PLAZA_TOPIC)
 }
 
-impl Node {
-    /// Charges `bytes` against a peer's rolling relay budget. Returns true when
-    /// the peer is over budget and the message must be dropped.
+/// Rolling per-peer budget of bytes pushed into relay topics.
+///
+/// Kept separate from `Node` so the accounting is testable without standing up
+/// a swarm.
+#[derive(Default)]
+struct RelayBudgets {
+    used: HashMap<PeerId, (Instant, u64)>,
+}
+
+impl RelayBudgets {
+    /// Charges `bytes` to `peer`. Returns true when the peer is over budget
+    /// and the message must be dropped.
     ///
-    /// The over-budget state is kept rather than cleared so a peer cannot
-    /// reset by reconnecting: only the window expiry clears it. Entries for
-    /// idle peers are pruned so the map cannot grow without bound.
-    fn charge_relay_bytes(&mut self, peer: PeerId, bytes: u64) -> bool {
-        let now = Instant::now();
+    /// Over-budget state is kept rather than cleared, so a peer cannot reset
+    /// by reconnecting; only the window expiry clears it. Idle entries are
+    /// pruned once the map grows past its cap.
+    fn charge(&mut self, peer: PeerId, bytes: u64, now: Instant) -> bool {
         let window = Duration::from_millis(RELAY_BYTE_WINDOW_MS);
-        if self.relay_bytes.len() > MAX_RELAY_BUDGET_TRACKED {
-            self.relay_bytes
+        if self.used.len() > MAX_RELAY_BUDGET_TRACKED {
+            self.used
                 .retain(|_, (since, _)| now.duration_since(*since) <= window);
         }
-        let entry = self.relay_bytes.entry(peer).or_insert((now, 0));
+        let entry = self.used.entry(peer).or_insert((now, 0));
         if now.duration_since(entry.0) > window {
             *entry = (now, 0);
         }
@@ -412,7 +420,7 @@ struct Node {
     /// Rolling per-peer budget of bytes pushed into relay topics. Topic-count
     /// limits alone do not bound bandwidth: one peer owning a topic could
     /// still flood it with large messages.
-    relay_bytes: HashMap<PeerId, (Instant, u64)>,
+    relay_budgets: RelayBudgets,
     /// Addresses learned from DHT routing updates + identify.
     peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     /// Relays we currently hold a circuit reservation with. A set, not a
@@ -523,7 +531,7 @@ impl Node {
             announced,
             relay_topics: HashSet::new(),
             relay_topic_owners: HashMap::new(),
-            relay_bytes: HashMap::new(),
+            relay_budgets: RelayBudgets::default(),
             peer_addresses: HashMap::new(),
             relay_reservations: HashSet::new(),
             external_addrs: HashSet::new(),
@@ -985,7 +993,11 @@ impl Node {
                     // peers that only meet through them still gossip.
                     if self.relay {
                         if let Some(source) = message.source {
-                            if self.charge_relay_bytes(source, message.data.len() as u64) {
+                            if self.relay_budgets.charge(
+                                source,
+                                message.data.len() as u64,
+                                Instant::now(),
+                            ) {
                                 self.emit(NodeEvent::Error {
                                     message: "relay bandwidth limit reached".into(),
                                 });
@@ -1272,6 +1284,47 @@ mod status_tests {
         assert!(valid_relay_topic(crate::crypto::server::PLAZA_TOPIC));
         assert!(!valid_relay_topic("peers/v1/relay"));
         assert!(!valid_relay_topic("other/v1/ch/server/general"));
+    }
+
+    #[test]
+    fn relay_budget_allows_then_drops_once_spent() {
+        let mut budgets = RelayBudgets::default();
+        let peer = PeerId::random();
+        let now = Instant::now();
+        assert!(!budgets.charge(peer, RELAY_BYTE_BUDGET, now));
+        assert!(budgets.charge(peer, 1, now));
+    }
+
+    /// Reconnecting must not hand a flooding peer a fresh allowance.
+    #[test]
+    fn relay_budget_does_not_reset_on_reconnect() {
+        let mut budgets = RelayBudgets::default();
+        let peer = PeerId::random();
+        let now = Instant::now();
+        assert!(budgets.charge(peer, RELAY_BYTE_BUDGET + 1, now));
+        assert!(budgets.charge(peer, 1, now));
+    }
+
+    /// The window is what clears a peer, so an idle peer recovers on its own.
+    #[test]
+    fn relay_budget_recovers_after_the_window() {
+        let mut budgets = RelayBudgets::default();
+        let peer = PeerId::random();
+        let now = Instant::now();
+        assert!(budgets.charge(peer, RELAY_BYTE_BUDGET + 1, now));
+        let later = now + Duration::from_millis(RELAY_BYTE_WINDOW_MS + 1);
+        assert!(!budgets.charge(peer, 1, later));
+    }
+
+    /// One peer exhausting its budget must not affect anyone else.
+    #[test]
+    fn relay_budget_is_per_peer() {
+        let mut budgets = RelayBudgets::default();
+        let greedy = PeerId::random();
+        let quiet = PeerId::random();
+        let now = Instant::now();
+        assert!(budgets.charge(greedy, RELAY_BYTE_BUDGET + 1, now));
+        assert!(!budgets.charge(quiet, 1, now));
     }
 
     /// AutoNAT actually dialed us and got through, so this is not a guess.
