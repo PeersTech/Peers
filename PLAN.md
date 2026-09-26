@@ -199,9 +199,35 @@ same identity cannot open a connection to each other at all. The DHT and
 identify also map one peer id to one address, so two live endpoints would
 overwrite each other's advertisement.
 
-**Status: abandoned, not implemented.** A partial transport was written and then
-reverted, because the feature is gated on a product decision rather than on
-effort. `backend/src/lib.rs` is byte-identical to its pre-attempt state.
+**Status: unblocked, not yet implemented.** A partial transport was written and
+reverted earlier, when sync was believed to be gated on device rendezvous.
+
+**That belief was wrong, and it is worth recording why.** It came from
+generalising from *dialing*. Inbound connections are keyed by peer id, so a
+contact dialing you reaches exactly one device. But message delivery does not
+use that path: DMs are published to the gossipsub topic
+`peers/v1/ch/<peerId>`, and each install subscribes to that topic for its own
+peer id at unlock. Two installs of one account therefore derive the same topic
+string, mesh into the same topic, and **both receive every message sent to
+them**. Relay fan-out is per-subscriber, not per-dialed-peer.
+
+So there is no rendezvous problem for delivery. The remaining work is ordinary
+dedupe and suppression, not architecture:
+
+- Duplicate read receipts and delivery acks: both devices auto-send them.
+- Self-conversation: the same account messaging itself across two devices.
+- Outbox double-send: queued entries retry from both installs.
+
+**The keystone is now in place.** Sealing to the shared topic required a
+recipient key for one's own peer id, and `remember_recipient_key` was only ever
+called for group members. Unlock now registers the local X25519 key as a
+recipient for the local peer id. Because both installs hold the same X25519 key
+derived from the recovery phrase, the self-session is the one the other device
+derives, so a device can publish a delta the other one opens.
+
+Merge rules stay as written below: union by message id, union contacts, higher
+revision wins for descriptors, never downgrade read state, drafts and outbox
+never sync.
 
 ### Device model — the design to use if this is picked up
 
