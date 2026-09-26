@@ -211,23 +211,34 @@ peer id at unlock. Two installs of one account therefore derive the same topic
 string, mesh into the same topic, and **both receive every message sent to
 them**. Relay fan-out is per-subscriber, not per-dialed-peer.
 
-So there is no rendezvous problem for delivery. The remaining work is ordinary
-dedupe and suppression, not architecture:
+So there is no rendezvous problem for delivery, and — checked properly rather
+than assumed — there is no multi-device *correctness* problem either:
 
-- Duplicate read receipts and delivery acks: both devices auto-send them.
-- Self-conversation: the same account messaging itself across two devices.
-- Outbox double-send: queued entries retry from both installs.
+- **Duplicate read receipts** are harmless. The receiving handler is
+  idempotent: it sets `read: true` for the listed ids, so a second copy of the
+  same receipt is a no-op.
+- **Self-conversation** is already filtered. `onNodeMessage` drops anything
+  where `m.from === me.peerId`, which is exactly what stops device B from
+  showing the message device A just sent.
+- **Outbox double-send** cannot happen. The outbox is per-install local state,
+  and only the install the user typed on holds an entry.
 
-**The keystone is now in place.** Sealing to the shared topic required a
-recipient key for one's own peer id, and `remember_recipient_key` was only ever
-called for group members. Unlock now registers the local X25519 key as a
-recipient for the local peer id. Because both installs hold the same X25519 key
-derived from the recovery phrase, the self-session is the one the other device
-derives, so a device can publish a delta the other one opens.
+**Two devices therefore already work correctly.** Running the same account on a
+phone and a laptop behaves. What does not exist is *history sharing*: each
+install keeps its own conversation history, so a message received on the laptop
+does not appear on the phone if the phone was offline. That is a missing
+feature, not a bug.
 
-Merge rules stay as written below: union by message id, union contacts, higher
-revision wins for descriptors, never downgrade read state, drafts and outbox
-never sync.
+**The keystone is in place.** Sealing to the shared topic required a recipient
+key for one's own peer id, and `remember_recipient_key` was only ever called for
+group members. Unlock now registers the local X25519 key as a recipient for the
+local peer id. Because both installs hold the same X25519 key derived from the
+recovery phrase, the self-session is the one the other device derives, so a
+device can publish a delta the other one opens.
+
+Merge rules for that delta stay as written below: union by message id, union
+contacts, higher revision wins for descriptors, never downgrade read state,
+drafts and outbox never sync.
 
 ### Device model — the design to use if this is picked up
 
