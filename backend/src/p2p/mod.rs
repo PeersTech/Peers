@@ -79,6 +79,11 @@ fn is_public_observed_address(addr: &Multiaddr) -> bool {
 const MAX_RELAY_TOPICS: usize = 256;
 const MAX_RELAY_TOPIC_LEN: usize = 256;
 const MAX_RELAY_TOPICS_PER_PEER: usize = 16;
+/// Per-peer relayed bytes allowed per rolling window.
+const RELAY_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
+const RELAY_BYTE_WINDOW_MS: u128 = 60_000;
+/// How many peers we track relay budgets for before pruning idle entries.
+const MAX_RELAY_BUDGET_TRACKED: usize = 4_096;
 const RELAY_TOPIC_TTL: Duration = Duration::from_secs(600);
 
 /// Gossip topic shared by relay nodes and clients. Clients publish tiny
@@ -345,6 +350,29 @@ fn valid_relay_topic(topic: &str) -> bool {
             || topic == crate::crypto::server::PLAZA_TOPIC)
 }
 
+impl Node {
+    /// Charges `bytes` against a peer's rolling relay budget. Returns true when
+    /// the peer is over budget and the message must be dropped.
+    ///
+    /// The over-budget state is kept rather than cleared so a peer cannot
+    /// reset by reconnecting: only the window expiry clears it. Entries for
+    /// idle peers are pruned so the map cannot grow without bound.
+    fn charge_relay_bytes(&mut self, peer: PeerId, bytes: u64) -> bool {
+        let now = Instant::now();
+        let window = Duration::from_millis(RELAY_BYTE_WINDOW_MS);
+        if self.relay_bytes.len() > MAX_RELAY_BUDGET_TRACKED {
+            self.relay_bytes
+                .retain(|_, (since, _)| now.duration_since(*since) <= window);
+        }
+        let entry = self.relay_bytes.entry(peer).or_insert((now, 0));
+        if now.duration_since(entry.0) > window {
+            *entry = (now, 0);
+        }
+        entry.1 = entry.1.saturating_add(bytes);
+        entry.1 > RELAY_BYTE_BUDGET
+    }
+}
+
 /// Hex-encodes a blob hash.
 pub fn hex_hash(h: &BlobHash) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
@@ -381,6 +409,10 @@ struct Node {
     /// Requester and expiry for each relay topic, preventing one peer from
     /// filling the global relay table and allowing stale requests to expire.
     relay_topic_owners: HashMap<String, HashMap<PeerId, Instant>>,
+    /// Rolling per-peer budget of bytes pushed into relay topics. Topic-count
+    /// limits alone do not bound bandwidth: one peer owning a topic could
+    /// still flood it with large messages.
+    relay_bytes: HashMap<PeerId, (Instant, u64)>,
     /// Addresses learned from DHT routing updates + identify.
     peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     /// Relays we currently hold a circuit reservation with. A set, not a
@@ -491,6 +523,7 @@ impl Node {
             announced,
             relay_topics: HashSet::new(),
             relay_topic_owners: HashMap::new(),
+            relay_bytes: HashMap::new(),
             peer_addresses: HashMap::new(),
             relay_reservations: HashSet::new(),
             external_addrs: HashSet::new(),
@@ -950,6 +983,16 @@ impl Node {
                     let control_hash = Sha256Topic::new(RELAY_CONTROL_TOPIC.to_string()).hash();
                     // Relay nodes mesh any topic they're asked to relay, so
                     // peers that only meet through them still gossip.
+                    if self.relay {
+                        if let Some(source) = message.source {
+                            if self.charge_relay_bytes(source, message.data.len() as u64) {
+                                self.emit(NodeEvent::Error {
+                                    message: "relay bandwidth limit reached".into(),
+                                });
+                                return;
+                            }
+                        }
+                    }
                     if self.relay && message.topic == control_hash {
                         if let Ok(ctrl) = serde_json::from_slice::<RelayControl>(&message.data) {
                             if ctrl.op == "subscribe" && valid_relay_topic(&ctrl.topic) {
