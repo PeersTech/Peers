@@ -236,9 +236,20 @@ local peer id. Because both installs hold the same X25519 key derived from the
 recovery phrase, the self-session is the one the other device derives, so a
 device can publish a delta the other one opens.
 
-Merge rules for that delta stay as written below: union by message id, union
-contacts, higher revision wins for descriptors, never downgrade read state,
-drafts and outbox never sync.
+Merge rules for that delta are implemented, and two of them turned out to
+differ from the obvious guess once checked against the code: server messages
+dedupe on `sig` rather than message id, and `push_dm` does not dedupe empty ids
+at all, so id-less messages need a `(ts, text, mine)` fallback or they duplicate
+on every merge. Both push paths also truncate silently past the history cap,
+which is the one unacceptable outcome for a merge, so truncation is counted and
+returned in `MergeReport`. `read` and `delivered` are only ever set, never
+cleared, so a merge cannot make a read message look unread.
+
+**Not done:** `publish_sync_delta` exists and is sealed, encrypted, and capped,
+but nothing calls it. There is no timer, no UI trigger, and no retry. A delta
+also only carries history, not contacts or group descriptors, so two devices
+can diverge on those until the rest is built. Drafts and the outbox are never
+synced, by design.
 
 ### Device model — the design to use if this is picked up
 

@@ -310,8 +310,7 @@ Peers/
 ### Next
 
 - [ ] Full Rust compile, test, clippy, and multi-network verification pass
-- [ ] Multi-device state synchronization (two devices already run correctly;
-      they just do not share conversation history)
+- [x] Multi-device history sync (merge implemented; no automatic trigger yet)
 - [ ] Making devices visible to contacts, which changes signed profile bytes
 - [ ] TURN deployment and production call testing (runbook written)
 - [ ] Plugin publisher directory and key exchange (signing and revocation shipped)
