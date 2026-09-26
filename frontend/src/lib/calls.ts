@@ -20,6 +20,40 @@ interface CallSession extends ActiveCall {
 
 const stunUrl = (import.meta.env.VITE_STUN_URL as string | undefined) ?? "stun:stun.l.google.com:19302";
 
+export interface SignalPayload {
+    peerId: string;
+    callId: string;
+    action: string;
+    sdp?: string | null;
+    candidate?: string | null;
+}
+
+export type SignalDecision =
+    | {kind: "ignore"}
+    | {kind: "incoming"}
+    | {kind: "answer"}
+    | {kind: "ice"}
+    | {kind: "hangup"};
+
+/**
+ * Pure negotiation rules for an inbound signaling message.
+ *
+ * Every branch requires a matching call id once a session exists, so a stale
+ * or hostile signal cannot disturb a call already in progress. A second offer
+ * while a call is up is ignored rather than replacing the current one.
+ */
+export function decideSignal(payload: SignalPayload, activeCallId: string | null): SignalDecision {
+    const inSession = activeCallId !== null && activeCallId === payload.callId;
+    if (payload.action === "offer") {
+        return payload.sdp && activeCallId === null ? {kind: "incoming"} : {kind: "ignore"};
+    }
+    if (!inSession) return {kind: "ignore"};
+    if (payload.action === "answer") return payload.sdp ? {kind: "answer"} : {kind: "ignore"};
+    if (payload.action === "ice") return payload.candidate ? {kind: "ice"} : {kind: "ignore"};
+    if (payload.action === "hangup") return {kind: "hangup"};
+    return {kind: "ignore"};
+}
+
 /** Small WebRTC call controller. Signaling is E2E sealed by the backend;
  *  media stays peer-to-peer and is never published to a relay topic. */
 export function useCall() {
@@ -118,18 +152,26 @@ export function useCall() {
     useEffect(() => {
         let cancelled = false;
         const dispose = onCallSignal((payload) => {
-            if (payload.action === "offer" && payload.sdp && !session.current) {
-                setIncoming({peerId: payload.peerId, callId: payload.callId, sdp: payload.sdp});
-            } else if (payload.action === "answer" && session.current?.callId === payload.callId && payload.sdp) {
-                void session.current.pc.setRemoteDescription({type: "answer", sdp: payload.sdp});
-            } else if (payload.action === "ice" && session.current?.callId === payload.callId && payload.candidate) {
-                try {
-                    void session.current.pc.addIceCandidate(JSON.parse(payload.candidate));
-                } catch {
-                    // Ignore malformed candidates from an incompatible peer.
-                }
-            } else if (payload.action === "hangup" && session.current?.callId === payload.callId) {
-                cleanup();
+            const decision = decideSignal(payload, session.current?.callId ?? null);
+            switch (decision.kind) {
+                case "incoming":
+                    setIncoming({peerId: payload.peerId, callId: payload.callId, sdp: payload.sdp!});
+                    break;
+                case "answer":
+                    void session.current?.pc.setRemoteDescription({type: "answer", sdp: payload.sdp!});
+                    break;
+                case "ice":
+                    try {
+                        void session.current?.pc.addIceCandidate(JSON.parse(payload.candidate!));
+                    } catch {
+                        // Ignore malformed candidates from an incompatible peer.
+                    }
+                    break;
+                case "hangup":
+                    cleanup();
+                    break;
+                default:
+                    break;
             }
         });
         void dispose.then((unlisten) => {
