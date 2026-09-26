@@ -19,11 +19,70 @@ pub const MAX_BLOB_SIZE: usize = 64 * 1024;
 /// A blob hash (SHA-256 of the content, torrent-info-hash style).
 pub type BlobHash = [u8; 32];
 
+/// Ceiling on the in-memory blob cache. Disk is bounded separately; without
+/// this a peer could grow RAM simply by requesting many distinct blobs, since
+/// every disk hit is promoted into memory.
+const MAX_MEMORY_BLOB_BYTES: usize = 32 * 1024 * 1024;
+
+/// Byte-bounded LRU over recently used blob content.
+#[derive(Default)]
+struct MemCache {
+    entries: HashMap<BlobHash, (Vec<u8>, u64)>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl MemCache {
+    fn get(&mut self, hash: &BlobHash) -> Option<Vec<u8>> {
+        self.clock = self.clock.wrapping_add(1);
+        let seq = self.clock;
+        let entry = self.entries.get_mut(hash)?;
+        entry.1 = seq;
+        Some(entry.0.clone())
+    }
+
+    fn insert(&mut self, hash: BlobHash, data: Vec<u8>) {
+        if data.len() > MAX_MEMORY_BLOB_BYTES {
+            // A single entry larger than the whole budget would evict
+            // everything else and still not fit. Serve it from disk only.
+            return;
+        }
+        self.clock = self.clock.wrapping_add(1);
+        let seq = self.clock;
+        let len = data.len();
+        match self.entries.insert(hash, (data, seq)) {
+            Some((replaced, _)) => self.bytes = self.bytes.saturating_sub(replaced.len()),
+            None => self.bytes += len,
+        }
+        self.evict();
+    }
+
+    fn evict(&mut self) {
+        if self.bytes <= MAX_MEMORY_BLOB_BYTES {
+            return;
+        }
+        let mut by_age: Vec<(BlobHash, u64)> = self
+            .entries
+            .iter()
+            .map(|(hash, (_, seq))| (*hash, *seq))
+            .collect();
+        by_age.sort_unstable_by_key(|(_, seq)| *seq);
+        for (hash, _) in by_age {
+            if self.bytes <= MAX_MEMORY_BLOB_BYTES {
+                break;
+            }
+            if let Some((data, _)) = self.entries.remove(&hash) {
+                self.bytes = self.bytes.saturating_sub(data.len());
+            }
+        }
+    }
+}
+
 /// Local seed cache: content-addressed by SHA-256. Holds only ciphertext
 /// in production use and persists blobs under the platform config directory.
 #[derive(Clone)]
 pub struct BlobStore {
-    inner: Arc<Mutex<HashMap<BlobHash, Vec<u8>>>>,
+    inner: Arc<Mutex<MemCache>>,
     root: Option<PathBuf>,
 }
 
@@ -34,7 +93,7 @@ impl BlobStore {
             .map(|base| base.join("peers").join("blobs"))
             .filter(|path| fs::create_dir_all(path).is_ok());
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(MemCache::default())),
             root,
         }
     }
@@ -42,7 +101,7 @@ impl BlobStore {
     /// In-memory store for tests and callers that explicitly do not want disk.
     pub fn memory() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(MemCache::default())),
             root: None,
         }
     }
@@ -60,7 +119,7 @@ impl BlobStore {
     }
 
     pub fn get(&self, hash: &BlobHash) -> Option<Vec<u8>> {
-        if let Some(data) = self.inner.lock().unwrap().get(hash).cloned() {
+        if let Some(data) = self.inner.lock().unwrap().get(hash) {
             return Some(data);
         }
         let root = self.root.as_ref()?;
@@ -246,5 +305,65 @@ mod tests {
         let h2 = store.put(b"same content");
         assert_eq!(h1, h2);
         assert_eq!(store.get(&h1).unwrap(), b"same content");
+    }
+
+    /// The cache must stay inside its byte budget no matter how many distinct
+    /// blobs are pushed through it.
+    #[test]
+    fn mem_cache_evicts_to_stay_within_budget() {
+        let mut cache = MemCache::default();
+        let chunk = vec![0u8; 1024 * 1024];
+        let count = (MAX_MEMORY_BLOB_BYTES / chunk.len()) + 8;
+        let mut hashes = Vec::new();
+        for i in 0..count {
+            let mut data = chunk.clone();
+            data[0] = i as u8;
+            let hash: BlobHash = Sha256::digest(&data).into();
+            cache.insert(hash, data);
+            hashes.push(hash);
+        }
+        assert!(
+            cache.bytes <= MAX_MEMORY_BLOB_BYTES,
+            "cache grew past its budget"
+        );
+        // The oldest entries are the ones that must be gone.
+        assert!(cache.entries.get(&hashes[0]).is_none());
+    }
+
+    /// Reading a blob has to make it the most recently used, or the hot
+    /// attachment gets evicted while cold ones survive.
+    #[test]
+    fn mem_cache_read_refreshes_recency() {
+        let mut cache = MemCache::default();
+        let first: BlobHash = Sha256::digest(b"first").into();
+        let second: BlobHash = Sha256::digest(b"second").into();
+        cache.insert(first, b"first".to_vec());
+        cache.insert(second, b"second".to_vec());
+        // Touch `first` so `second` becomes the older of the two.
+        assert_eq!(cache.get(&first).unwrap(), b"first");
+        assert!(cache.entries.contains_key(&first));
+        assert!(cache.entries.contains_key(&second));
+    }
+
+    /// An entry bigger than the entire budget is served from disk, not held.
+    #[test]
+    fn mem_cache_declines_oversized_entries() {
+        let mut cache = MemCache::default();
+        let data = vec![0u8; MAX_MEMORY_BLOB_BYTES + 1];
+        let hash: BlobHash = Sha256::digest(&data).into();
+        cache.insert(hash, data);
+        assert_eq!(cache.bytes, 0);
+        assert!(cache.entries.is_empty());
+    }
+
+    /// Re-inserting the same hash must not double-count the budget.
+    #[test]
+    fn mem_cache_replacing_an_entry_keeps_the_count_accurate() {
+        let mut cache = MemCache::default();
+        let hash: BlobHash = Sha256::digest(b"payload").into();
+        cache.insert(hash, vec![0u8; 4096]);
+        cache.insert(hash, vec![0u8; 8192]);
+        assert_eq!(cache.bytes, 8192);
+        assert_eq!(cache.entries.len(), 1);
     }
 }
