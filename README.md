@@ -124,6 +124,21 @@ plaintext application topic into an end-to-end encrypted channel. See the
 [architecture and security documentation](https://github.com/PeersTech/docs/blob/main/content/docs/peers/architecture.mdx)
 for the complete model.
 
+Because a node accepts connections from anyone, abuse limits are part of that
+model rather than an optimisation:
+
+| Limit | Value |
+|---|---|
+| Established inbound connections | 64 client / 512 node, 8 per peer |
+| Relayed bytes per peer | 64 MiB per rolling minute, surviving reconnect |
+| Relay topics | 16 per peer, 256 global, with expiry |
+| Parked blobs on disk | 256 MiB, least-recently-accessed evicted |
+| Parked blobs in memory | 32 MiB, LRU evicted |
+| Message drafts | Purged on lock; refused above 16 KiB |
+
+The webview runs under a Content Security Policy with the `asset` protocol
+disabled, and the plugin Worker has no network, disk, shell, or key access.
+
 ## Cryptography
 
 | Component | Choice |
@@ -258,13 +273,21 @@ Peers/
 - [x] Encrypted resumable DM and group attachment chunks
 - [x] Relay v2, DCUtR, headless nodes, bootstrap, and capacity caps
 - [x] Seed-phrase recovery and deterministic identity
+- [x] Optional Directory API discovery and relay bootstrap
+- [x] Server-channel attachments through signed DHT chunk manifests
+- [x] Sealed multi-device state packages (manual export/import)
+- [x] WebRTC voice and video with sealed DM signaling
+- [x] Capability-restricted plugin runtime (message transforms)
 
 ### Next
 
 - [ ] Full Rust compile, test, clippy, and multi-network verification pass
 - [ ] Multi-device state synchronization
-- [ ] Directory client discovery integration
-- [ ] Calls and plugin interfaces
+- [ ] TURN deployment and production call testing
+- [ ] Plugin signing and revocation
+
+`cargo fmt --check` currently fails on `blobs.rs` and `p2p/mod.rs` for
+formatting that predates the current work, so CI needs a `cargo fmt` run.
 
 See [`PLAN.md`](PLAN.md) for implementation status and [`AGENTS.md`](AGENTS.md)
 for repository conventions.
