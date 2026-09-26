@@ -186,18 +186,35 @@ distribution, no format change, no migration, and nothing new to trust.
    each rule — a merge bug corrupts history, so this is the part to be careful
    with.
 3. A periodic timer in the node, gated on being unlocked and on having at least
-   one other device.
-4. Device discovery: same recovery phrase means the same peer id, so devices
-   need a way to learn each other's addresses before any of this works.
+   one linked device.
+4. Linking, so a device can learn another device's address.
 5. UI surface and a conflict-visible audit log.
 
-Step 4 is the real dependency and is unsolved. Two devices from one phrase have
-the same peer id, so they cannot find each other through the Directory, and a
-peer cannot dial itself. Until there is a rendezvous story, sync cannot be
-triggered even with steps 1-3 done.
+**Rendezvous decision: one-time address linking.** Two devices from one phrase
+share a peer id, so they cannot be discovered through the Directory and a peer
+cannot dial itself. Rather than a second per-device identity, a short-lived
+pairing code, or Directory registration, device A prints its multiaddr and
+device B links it once; after that, sync is automatic.
 
-**Status:** design recorded, nothing implemented. Do not attempt steps 1-3
-without solving device discovery first.
+This keeps a single identity per human, adds no central registry, and reuses
+the out-of-band trust model the project already applies to friend codes: a
+human moves one value, and only once. The cost is honest and should be stated
+in the UI — linking needs a live device on both ends, and a wiped device has to
+be unlinked and relinked by hand.
+
+Rejected: a second device-specific identity (pollutes the contact list with what
+are not separate people), a pairing code (needs trust-on-first-use and a new
+flow), and Directory registration (centralises discovery, against the point of
+the project).
+
+**Status:** design and rendezvous approach decided. Nothing implemented.
+
+### Verification note
+
+Every step above is Rust, and Cargo is off-limits for this work. Anything built
+here will be rustfmt-parse-verified only, exactly like the existing
+`RelayBudgets` and `MemCache` tests. The merge functions in step 2 are the part
+most worth running under `cargo test` before trusting.
 
 ### Remaining roadmap
 
