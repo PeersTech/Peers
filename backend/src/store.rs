@@ -71,6 +71,17 @@ pub struct DmMessage {
     pub attachment_data: Option<Vec<u8>>,
 }
 
+/// Result of merging a delta from another install of the same account.
+///
+/// `dropped_by_cap` is reported so history loss is visible. The cap in
+/// `push_*` is silent, which is unacceptable for a merge: a delta larger than
+/// the cap would otherwise discard messages with no signal at all.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MergeOutcome {
+    pub added: usize,
+    pub dropped_by_cap: usize,
+}
+
 /// Keyed message history. Server channels are keyed `"{serverId}/{channel}"`
 /// and store the raw signed messages (so they can be re-verified); DMs are
 /// keyed by the remote peer id.
@@ -124,6 +135,85 @@ impl History {
             let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
             messages.drain(0..overflow);
         }
+    }
+
+    /// Identity used to dedupe a DM. `id` is only reliable when present:
+    /// `DmMessage.id` defaults to empty, and `push_dm` does not dedupe empty
+    /// ids, so those need a content fallback or they duplicate on every merge.
+    fn dm_identity(message: &DmMessage) -> (String, u64, String, bool) {
+        (
+            message.id.clone(),
+            message.ts,
+            message.text.clone(),
+            message.mine,
+        )
+    }
+
+    /// Merges DM history from another install into this one.
+    ///
+    /// A duplicate never overwrites: `read` and `delivered` are only ever set,
+    /// never cleared, so merging cannot make a read message look unread again.
+    pub fn merge_dm_delta(&mut self, peer: &str, incoming: Vec<DmMessage>) -> MergeOutcome {
+        let messages = self.dm.entry(peer.to_string()).or_default();
+        let mut seen: std::collections::HashSet<(String, u64, String, bool)> =
+            messages.iter().map(dm_identity).collect();
+        let mut added = 0;
+        for message in incoming {
+            if seen.contains(&dm_identity(&message)) {
+                // Fold a duplicate's progress flags into the one we already
+                // hold, then move on.
+                if let Some(existing) = messages
+                    .iter_mut()
+                    .find(|m| dm_identity(m) == dm_identity(&message))
+                {
+                    existing.read |= message.read;
+                    existing.delivered |= message.delivered;
+                }
+                continue;
+            }
+            seen.insert(dm_identity(&message));
+            messages.push(message);
+            added += 1;
+        }
+        messages.sort_by_key(|message| message.ts);
+        let mut outcome = MergeOutcome {
+            added,
+            dropped_by_cap: 0,
+        };
+        if messages.len() > MAX_HISTORY_PER_CONVERSATION {
+            let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
+            messages.drain(0..overflow);
+            outcome.dropped_by_cap = overflow;
+        }
+        outcome
+    }
+
+    /// Merges server-channel history. Server messages dedupe on `sig`, which is
+    /// what `push_server` already uses, so the same message from two installs
+    /// collapses to one.
+    pub fn merge_server_delta(&mut self, key: &str, incoming: Vec<SignedMessage>) -> MergeOutcome {
+        let messages = self.server.entry(key.to_string()).or_default();
+        let mut seen: std::collections::HashSet<String> =
+            messages.iter().map(|m| m.sig.clone()).collect();
+        let mut added = 0;
+        for message in incoming {
+            if !seen.insert(message.sig.clone()) {
+                continue;
+            }
+            messages.push(message);
+            added += 1;
+        }
+        messages.sort_by_key(|message| message.ts);
+        let mut outcome = MergeOutcome {
+            added,
+            dropped_by_cap: 0,
+        };
+        if messages.len() > MAX_HISTORY_PER_CONVERSATION {
+            let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
+            messages.drain(0..overflow);
+            outcome.dropped_by_cap = overflow;
+        }
+        outcome
     }
 
     pub fn server_messages(&self, key: &str) -> &[SignedMessage] {
@@ -519,5 +609,111 @@ mod tests {
         let raw = fs::read_to_string(&store.path).unwrap();
         assert!(!raw.contains("super secret"));
         assert!(!raw.contains("sensitive-peer"));
+    }
+
+    fn dm(id: &str, ts: u64, text: &str, mine: bool) -> DmMessage {
+        DmMessage {
+            peer: "bob".into(),
+            text: text.into(),
+            ts,
+            mine,
+            id: id.into(),
+            sender: None,
+            read: false,
+            delivered: false,
+            attachment_hash: None,
+            attachment_name: None,
+            attachment_mime: None,
+            attachment_data: None,
+        }
+    }
+
+    #[test]
+    fn merge_adds_only_missing_dm_messages() {
+        let mut history = History::default();
+        history.push_dm("bob", dm("1", 10, "one", false));
+        let outcome = history.merge_dm_delta(
+            "bob",
+            vec![dm("1", 10, "one", false), dm("2", 20, "two", false)],
+        );
+        assert_eq!(
+            outcome,
+            MergeOutcome {
+                added: 1,
+                dropped_by_cap: 0
+            }
+        );
+        assert_eq!(history.dm_messages("bob").len(), 2);
+    }
+
+    /// `push_dm` does not dedupe empty ids, so a delta replayed from another
+    /// install would duplicate every id-less message without this fallback.
+    #[test]
+    fn merge_dedupes_dm_messages_that_have_no_id() {
+        let mut history = History::default();
+        let anonymous = dm("", 10, "same text", false);
+        history.push_dm("bob", anonymous.clone());
+        let outcome = history.merge_dm_delta("bob", vec![anonymous.clone(), anonymous]);
+        assert_eq!(outcome.added, 0);
+        assert_eq!(history.dm_messages("bob").len(), 1);
+    }
+
+    /// A merge must never make a read message look unread again.
+    #[test]
+    fn merge_never_downgrades_read_or_delivered() {
+        let mut history = History::default();
+        let mut existing = dm("1", 10, "one", false);
+        existing.read = true;
+        existing.delivered = true;
+        history.push_dm("bob", existing);
+        history.merge_dm_delta("bob", vec![dm("1", 10, "one", false)]);
+        let merged = &history.dm_messages("bob")[0];
+        assert!(merged.read && merged.delivered);
+    }
+
+    /// Progress flags travel the other way too: if the other install read a
+    /// message we have not, that must be recorded.
+    #[test]
+    fn merge_adopts_progress_from_the_other_install() {
+        let mut history = History::default();
+        history.push_dm("bob", dm("1", 10, "one", false));
+        let mut progressed = dm("1", 10, "one", false);
+        progressed.read = true;
+        history.merge_dm_delta("bob", vec![progressed]);
+        assert!(history.dm_messages("bob")[0].read);
+    }
+
+    /// Out-of-order arrival must still leave history ordered by time.
+    #[test]
+    fn merge_sorts_by_timestamp() {
+        let mut history = History::default();
+        history.merge_dm_delta(
+            "bob",
+            vec![
+                dm("3", 30, "three", false),
+                dm("1", 10, "one", false),
+                dm("2", 20, "two", false),
+            ],
+        );
+        let times: Vec<u64> = history.dm_messages("bob").iter().map(|m| m.ts).collect();
+        assert_eq!(times, vec![10, 20, 30]);
+    }
+
+    /// Truncation must be reported, not silent. Losing history quietly is the
+    /// worst failure mode a merge can have.
+    #[test]
+    fn merge_reports_history_dropped_by_the_cap() {
+        let mut history = History::default();
+        let over = MAX_HISTORY_PER_CONVERSATION + 5;
+        let incoming: Vec<DmMessage> = (0..over)
+            .map(|i| dm(&format!("{i}"), i as u64, "x", false))
+            .collect();
+        let outcome = history.merge_dm_delta("bob", incoming);
+        assert_eq!(outcome.added, over);
+        assert_eq!(outcome.dropped_by_cap, 5);
+        assert_eq!(
+            history.dm_messages("bob").len(),
+            MAX_HISTORY_PER_CONVERSATION
+        );
     }
 }

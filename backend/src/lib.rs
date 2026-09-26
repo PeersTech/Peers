@@ -115,6 +115,19 @@ struct DmReadPayload {
     ids: Vec<String>,
 }
 
+/// A history delta from another install of the same account.
+///
+/// Devices share a peer id, so this is published to the account's own DM topic
+/// and every install of that account receives it. The payload is a JSON object
+/// of conversation key to message array; drafts and the outbox are never
+/// included.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DmSyncDeltaPayload {
+    kind: String,
+    payload: String,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DmCallSignalPayload {
@@ -2295,6 +2308,59 @@ async fn publish_attachment(
     Ok(id)
 }
 
+/// Publishes this install's conversation history to our own DM topic, where
+/// every other install of the same account receives it.
+///
+/// Sealing to our own peer id works because unlock registers our own X25519 key
+/// as a recipient for ourselves.
+#[tauri::command]
+async fn publish_sync_delta(state: State<'_, AppState>) -> Result<usize, String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
+    let body = {
+        let history = state.history.lock().unwrap();
+        SyncDeltaBody {
+            dm: history.dm.clone(),
+            server: history.server.clone(),
+        }
+    };
+    let encoded = serde_json::to_vec(&body).map_err(|e| format!("encode sync delta: {e}"))?;
+    if encoded.len() > MAX_SYNC_DELTA_BYTES {
+        return Err("history is too large to sync in one delta".into());
+    }
+    let payload = {
+        let mut dir = state.dir.lock().unwrap();
+        let dir = dir.as_mut().ok_or("not unlocked")?;
+        let recipient = dir
+            .recipient_key(&identity.peer_id.to_string())
+            .ok_or("no session with this identity yet")?;
+        let topic = format!("peers/v1/ch/{}", identity.peer_id);
+        dir.seal(
+            &identity,
+            &[recipient],
+            topic.as_bytes(),
+            &serde_json::to_vec(&serde_json::json!({
+                "kind": "sync-delta",
+                "payload": String::from_utf8_lossy(&encoded),
+            }))
+            .map_err(|e| e.to_string())?,
+        )?
+    };
+    let topic = format!("peers/v1/ch/{}", identity.peer_id);
+    subscribe_with_relay(&state, topic.clone()).await?;
+    let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
+    node.send(NodeCommand::Publish { topic, data: payload })
+        .await
+        .map_err(|e| e.to_string())?;
+    let total: usize = body.dm.values().map(|m| m.len()).sum::<usize>()
+        + body.server.values().map(|m| m.len()).sum::<usize>();
+    Ok(total)
+}
+
 #[tauri::command]
 async fn send_call_signal(
     state: State<'_, AppState>,
@@ -2557,6 +2623,62 @@ fn get_profile(state: State<'_, AppState>) -> Result<Option<SignedProfile>, Stri
 /// The id is random and local, never derived from the recovery phrase, so two
 /// installs of the same account are distinguishable without letting anyone
 /// correlate them from the id alone.
+/// Ceiling on a single sync delta. Generous enough for a full conversation,
+/// small enough that a hostile peer cannot force an unbounded allocation.
+const MAX_SYNC_DELTA_BYTES: usize = 8 * 1024 * 1024;
+
+/// What one merge did. Returned so a caller can surface truncation instead of
+/// history loss being invisible.
+#[derive(Debug, Default)]
+struct MergeReport {
+    added: usize,
+    dropped_by_cap: usize,
+    rejected: bool,
+}
+
+/// The wire shape of a history delta: conversation key to messages.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncDeltaBody {
+    #[serde(default)]
+    dm: HashMap<String, Vec<crate::store::DmMessage>>,
+    #[serde(default)]
+    server: HashMap<String, Vec<crate::crypto::server::SignedMessage>>,
+}
+
+/// Merges a history delta from another install of this account.
+///
+/// Failures are swallowed on purpose: a malformed or hostile delta must never
+/// disturb the history we already hold. Truncation is counted and reported
+/// rather than dropped silently, because a merge that quietly discards
+/// messages is the worst outcome available here.
+fn merge_sync_delta(state: &AppState, payload: &str) -> MergeReport {
+    let mut report = MergeReport::default();
+    if payload.len() > MAX_SYNC_DELTA_BYTES {
+        report.rejected = true;
+        return report;
+    }
+    let Ok(body) = serde_json::from_str::<SyncDeltaBody>(payload) else {
+        report.rejected = true;
+        return report;
+    };
+    {
+        let mut history = state.history.lock().unwrap();
+        for (peer, messages) in body.dm {
+            let outcome = history.merge_dm_delta(&peer, messages);
+            report.added += outcome.added;
+            report.dropped_by_cap += outcome.dropped_by_cap;
+        }
+        for (key, messages) in body.server {
+            let outcome = history.merge_server_delta(&key, messages);
+            report.added += outcome.added;
+            report.dropped_by_cap += outcome.dropped_by_cap;
+        }
+    }
+    persist(state);
+    report
+}
+
 fn ensure_device(state: &AppState) -> Result<crate::store::LocalDevice, String> {
     let existing = state.device.lock().unwrap().clone();
     if let Some(device) = existing {
@@ -3127,6 +3249,7 @@ pub fn run() {
             publish,
             publish_attachment,
             send_call_signal,
+        publish_sync_delta,
             mark_group_read,
             mark_dm_read,
             park_blob,
@@ -3610,6 +3733,12 @@ pub fn run() {
                                 }
                             }
                             if group_id.is_none() {
+                                if let Ok(delta) = serde_json::from_slice::<DmSyncDeltaPayload>(&plaintext) {
+                                    if delta.kind == "sync-delta" {
+                                        merge_sync_delta(&state, &delta.payload);
+                                        return;
+                                    }
+                                }
                                 if let Ok(signal) = serde_json::from_slice::<DmCallSignalPayload>(&plaintext) {
                                     if signal.kind == "call-signal" {
                                         let _ = app_handle.emit(
