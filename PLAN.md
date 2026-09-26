@@ -148,8 +148,25 @@
 - Automatic background state synchronization
 - TURN deployment and production call testing
 - Plugin signing/revocation workflow
+- `cargo fmt` run: `blobs.rs` and `p2p/mod.rs` already fail `fmt --check` at HEAD,
+  so CI is red independently of the current work
 
 **Status:** in progress
+
+### Audit remediation — completed this pass
+
+- Tauri `csp: null` replaced with a real policy; `assetProtocol` disabled
+- Parked blobs written `0600` instead of world-readable under a default umask
+- Disk blob cache bounded to 256 MiB, evicting least-recently-accessed files
+- In-memory blob cache bounded to 32 MiB with LRU eviction
+- Per-peer relay byte budget on a rolling window, with reconnect-proof accounting
+- Directory registrations capped per source IP
+- Drafts purged on lock and refused above 16 KiB
+- Egg pinned to an immutable commit; `rustup-init` verified before execution
+
+**Status:** done for the items above. Every Rust test added in this pass is
+rustfmt-parse-verified only, because Cargo is off-limits; none has been compiled
+or executed.
 
 ### Completion sequence
 
