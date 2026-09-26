@@ -160,6 +160,11 @@ the bundle. That is fine for a self-hosted server you control, and is not fine
 for a shared deployment — issue per-user, time-limited credentials from a TURN
 service such as coturn's `use-auth-secret` if you need real access control.
 
+For a shared deployment, set only `VITE_TURN_URL` and fetch a short-lived
+username and credential at runtime. The full runbook, including the relay port
+range and the credential-signing snippet, is in the docs under **Calls and
+TURN**.
+
 ## Cryptography
 
 | Component | Choice |
@@ -308,7 +313,7 @@ Peers/
 - [ ] Multi-device state synchronization (two devices already run correctly;
       they just do not share conversation history)
 - [ ] Making devices visible to contacts, which changes signed profile bytes
-- [ ] TURN deployment and production call testing
+- [ ] TURN deployment and production call testing (runbook written)
 - [ ] Plugin publisher directory and key exchange (signing and revocation shipped)
 
 `cargo fmt --check` currently fails on `blobs.rs` and `p2p/mod.rs` for
