@@ -227,6 +227,34 @@ Rebuild order if resumed: write the identity/contact keying tests first, then
 the keying change, then merge, then the UI. A merge bug corrupts history and
 must not be written without tests.
 
+**Progress: the per-install device record is done.** Every install now has a
+random local `device_id` and an editable label, persisted in the sealed state
+and shown in Settings. The id is random rather than derived from the recovery
+phrase, so installs cannot collide or be correlated from the id. The state
+field is `serde(default)`, so existing installs load unchanged.
+
+**The next step touches signed data and needs care.** To make devices visible
+to contacts, the device id has to travel. The obvious place is
+`SignedProfile`, and that is not a safe field to add casually.
+
+`SignedProfile::sign` signs `serde_json::to_vec(&p)` — the whole struct. A
+profile signed by an older client has no device field in those bytes. A newer
+client that deserializes it and re-serializes will emit the field, producing
+different bytes, and **every existing profile stops verifying**. The failure is
+silent: no error, contacts simply cannot authenticate each other's names and
+avatars any more.
+
+The fix is `#[serde(default, skip_serializing_if = "String::is_empty")]` so an
+absent or empty device id is omitted on re-serialization and reproduces the
+original bytes exactly. That is the intended approach, but it must be proven
+with a test that verifies a *legacy* profile (no device field) against a current
+verifier before it is trusted. Do not add the field without that test.
+
+An alternative that avoids signing entirely: carry the device id in the
+presence or peer-card layer rather than the signed profile. Less tamper
+evidence, but a device label cannot then be impersonated into someone's
+profile, which is probably the better trade.
+
 ### Remaining roadmap
 
 - Rust compile, test, clippy, and multi-network verification — deferred by user instruction

@@ -300,11 +300,13 @@ Peers/
 - [x] WebRTC voice and video with sealed DM signaling
 - [x] Capability-restricted plugin runtime (message transforms)
 - [x] Ed25519 plugin signing, explicit key trust, and revocation
+- [x] Per-install device record (random id and editable label)
 
 ### Next
 
 - [ ] Full Rust compile, test, clippy, and multi-network verification pass
 - [ ] Multi-device state synchronization
+- [ ] Making devices visible to contacts, which changes signed profile bytes
 - [ ] TURN deployment and production call testing
 - [ ] Plugin publisher directory and key exchange (signing and revocation shipped)
 
