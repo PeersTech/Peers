@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {decideSignal, type SignalPayload} from "./calls";
+import {buildIceServers, decideSignal, type SignalPayload} from "./calls";
 
 const payload = (over: Partial<SignalPayload> = {}): SignalPayload => ({
     peerId: "peer-a",
@@ -55,5 +55,42 @@ describe("call signal negotiation", () => {
     /// A caller that has already sent an offer must not also ring itself.
     it("does not ring when our own offer is echoed back mid-session", () => {
         expect(decideSignal(payload(), "call-1")).toEqual({kind: "ignore"});
+    });
+});
+
+describe("ice server configuration", () => {
+    it("uses the STUN server when that is all there is", () => {
+        expect(buildIceServers({stun: "stun:example.test:3478"})).toEqual([
+            {urls: "stun:example.test:3478"},
+        ]);
+    });
+
+    it("adds TURN when a url, username, and credential are all present", () => {
+        expect(
+            buildIceServers({
+                stun: "stun:example.test:3478",
+                turnUrl: "turn:turn.example.test:3478",
+                turnUsername: "peers",
+                turnCredential: "secret",
+            }),
+        ).toEqual([
+            {urls: "stun:example.test:3478"},
+            {urls: "turn:turn.example.test:3478", username: "peers", credential: "secret"},
+        ]);
+    });
+
+    /// A TURN entry missing credentials can break ICE outright rather than
+    /// falling back, so an incomplete config must be dropped entirely.
+    it.each([
+        ["no credential", {turnUrl: "turn:t.test:3478", turnUsername: "peers"}],
+        ["no username", {turnUrl: "turn:t.test:3478", turnCredential: "secret"}],
+        ["no url", {turnUsername: "peers", turnCredential: "secret"}],
+    ])("drops an incomplete TURN config with %s", (_label, partial) => {
+        const servers = buildIceServers({stun: "stun:example.test:3478", ...partial});
+        expect(servers).toEqual([{urls: "stun:example.test:3478"}]);
+    });
+
+    it("returns an empty list when nothing is configured", () => {
+        expect(buildIceServers({})).toEqual([]);
     });
 });

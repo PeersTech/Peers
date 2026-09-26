@@ -139,6 +139,27 @@ model rather than an optimisation:
 The webview runs under a Content Security Policy with the `asset` protocol
 disabled, and the plugin Worker has no network, disk, shell, or key access.
 
+### Call configuration
+
+Calls need STUN, and TURN for the hardest NAT cases. Both are build-time
+variables in `frontend/`:
+
+| Variable | Purpose |
+|---|---|
+| `VITE_STUN_URL` | STUN server. Defaults to a public Google STUN. |
+| `VITE_TURN_URL` | TURN server, e.g. `turn:turn.example.com:3478` |
+| `VITE_TURN_USERNAME` | TURN username |
+| `VITE_TURN_CREDENTIAL` | TURN credential |
+
+TURN is only used when the URL, username, and credential are all set. A TURN
+entry with missing credentials can fail ICE outright instead of falling back to
+STUN, so an incomplete config is dropped rather than half-applied.
+
+These are baked in at build time, which means the TURN credential ships inside
+the bundle. That is fine for a self-hosted server you control, and is not fine
+for a shared deployment — issue per-user, time-limited credentials from a TURN
+service such as coturn's `use-auth-secret` if you need real access control.
+
 ## Cryptography
 
 | Component | Choice |

@@ -20,6 +20,43 @@ interface CallSession extends ActiveCall {
 
 const stunUrl = (import.meta.env.VITE_STUN_URL as string | undefined) ?? "stun:stun.l.google.com:19302";
 
+export interface IceConfig {
+    urls: string;
+    username?: string;
+    credential?: string;
+}
+
+/**
+ * Builds the ICE server list from build-time configuration.
+ *
+ * TURN is only included when a URL, username, and credential are all present:
+ * a half-configured TURN entry makes ICE fail outright in some implementations
+ * rather than falling back to STUN, so an incomplete config is ignored.
+ */
+export function buildIceServers(config: {
+    stun?: string;
+    turnUrl?: string;
+    turnUsername?: string;
+    turnCredential?: string;
+}): RTCIceServer[] {
+    const servers: RTCIceServer[] = [];
+    if (config.stun) servers.push({urls: config.stun});
+    const {turnUrl, turnUsername, turnCredential} = config;
+    if (turnUrl && turnUsername && turnCredential) {
+        servers.push({urls: turnUrl, username: turnUsername, credential: turnCredential});
+    }
+    return servers;
+}
+
+function configuredIceServers(): RTCIceServer[] {
+    return buildIceServers({
+        stun: stunUrl,
+        turnUrl: import.meta.env.VITE_TURN_URL as string | undefined,
+        turnUsername: import.meta.env.VITE_TURN_USERNAME as string | undefined,
+        turnCredential: import.meta.env.VITE_TURN_CREDENTIAL as string | undefined,
+    });
+}
+
 export interface SignalPayload {
     peerId: string;
     callId: string;
@@ -78,7 +115,7 @@ export function useCall() {
 
     const makeSession = useCallback(async (peerId: string, callId: string) => {
         const localStream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
-        const pc = new RTCPeerConnection({iceServers: [{urls: stunUrl}]});
+        const pc = new RTCPeerConnection({iceServers: configuredIceServers()});
         localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
         const next: CallSession = {peerId, callId, localStream, remoteStream: null, pc};
         session.current = next;
