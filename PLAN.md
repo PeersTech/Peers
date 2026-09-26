@@ -140,7 +140,7 @@
 - Reject filesystem, shell, credential, network, and DOM capabilities
 - Keep signing/revocation as a separate release-hardening step
 
-**Status:** done — the constrained message-transform runtime is implemented; signing/revocation remains pending.
+**Status:** done — the constrained message-transform runtime, Ed25519 signing, explicit key trust, and revocation are all implemented and reachable from Settings.
 
 ### Multi-device state synchronization — design
 
@@ -193,18 +193,47 @@ distribution, no format change, no migration, and nothing new to trust.
 
 Step 4 is the real dependency and is unsolved. Two devices from one phrase have
 the same peer id, so they cannot find each other through the Directory, and a
-peer cannot dial itself. Until there is a rendezvous story, sync cannot be
-triggered even with steps 1-3 done.
+peer cannot dial itself. libp2p reinforces this: `libp2p-swarm` returns
+`DialError::LocalPeerId` when asked to dial its own id, so two instances of the
+same identity cannot open a connection to each other at all. The DHT and
+identify also map one peer id to one address, so two live endpoints would
+overwrite each other's advertisement.
 
-**Status:** design recorded, nothing implemented. Do not attempt steps 1-3
-without solving device discovery first.
+**Status: abandoned, not implemented.** A partial transport was written and then
+reverted, because the feature is gated on a product decision rather than on
+effort. `backend/src/lib.rs` is byte-identical to its pre-attempt state.
+
+### Device model — the design to use if this is picked up
+
+Model the "several endpoints per person" idea at the layer where it works:
+
+| | Key | Shared across devices |
+|---|---|---|
+| libp2p peer id | one per install | no — routing must stay unambiguous |
+| Application identity (Ed25519) | derived from the recovery phrase | yes — this is the person |
+| Contact list row | keyed on application identity | one row per human, with a device list |
+| DM session keys | derived from application identity | both devices can talk to the same contacts |
+
+This keeps one person as one contact, gives every device a routable peer id so
+devices can find and dial each other, and makes the state store keyed by
+application identity so the takeover/divergence problem above disappears.
+
+The open question is a product one: whether a contact should see one entry with
+a device list, or a separate row per device. The first is recommended, but it
+changes what "peer id" means throughout the app, so it is not a decision to
+make inside an implementation pass.
+
+Rebuild order if resumed: write the identity/contact keying tests first, then
+the keying change, then merge, then the UI. A merge bug corrupts history and
+must not be written without tests.
 
 ### Remaining roadmap
 
 - Rust compile, test, clippy, and multi-network verification — deferred by user instruction
 - Device rendezvous, then multi-device state synchronization
 - TURN deployment and production call testing
-- Plugin signing/revocation workflow
+- Plugin signing/revocation workflow — shipped; a publisher directory or key
+  exchange would be the next step, and is a product decision
 - `cargo fmt` run: `blobs.rs` and `p2p/mod.rs` already fail `fmt --check` at HEAD,
   so CI is red independently of the current work
 

@@ -278,13 +278,14 @@ Peers/
 - [x] Sealed multi-device state packages (manual export/import)
 - [x] WebRTC voice and video with sealed DM signaling
 - [x] Capability-restricted plugin runtime (message transforms)
+- [x] Ed25519 plugin signing, explicit key trust, and revocation
 
 ### Next
 
 - [ ] Full Rust compile, test, clippy, and multi-network verification pass
 - [ ] Multi-device state synchronization
 - [ ] TURN deployment and production call testing
-- [ ] Plugin signing and revocation
+- [ ] Plugin publisher directory and key exchange (signing and revocation shipped)
 
 `cargo fmt --check` currently fails on `blobs.rs` and `p2p/mod.rs` for
 formatting that predates the current work, so CI needs a `cargo fmt` run.
