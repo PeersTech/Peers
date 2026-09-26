@@ -305,15 +305,135 @@ profile, which is probably the better trade.
 
 ### Remaining roadmap
 
-- Rust compile, test, clippy, and multi-network verification — deferred by user instruction
-- Device rendezvous, then multi-device state synchronization
-- TURN deployment and production call testing
-- Plugin signing/revocation workflow — shipped; a publisher directory or key
-  exchange would be the next step, and is a product decision
-- `cargo fmt` run: `blobs.rs` and `p2p/mod.rs` already fail `fmt --check` at HEAD,
-  so CI is red independently of the current work
+- Rust compile, test, clippy, and multi-network verification — deferred by user
+  instruction, planned for whenever a VPS is available
+- TURN deployment and production call testing — runbook written, no server yet
+- Plugin publisher directory and key exchange — a product decision, not code
 
 **Status:** in progress
+
+---
+
+# Outstanding work — parked deliberately
+
+Everything below is unfinished on purpose and is parked for a later pass. The
+ordering is by risk, not by size: the verification debt is first because
+everything else in Rust sits on top of it.
+
+## 1. The Rust backend has never been compiled
+
+**This is the most important item on this page.** Not one Cargo command has been
+run in this workstream. The frontend, dir-api, docs, and egg are all verified
+by their own toolchains. The backend is verified only by `rustfmt` parsing and by
+reading crate sources.
+
+That check is better than nothing — it caught two real errors: `SwarmBuilder` has
+no `incoming_connection_limit` in libp2p-swarm 0.47.1 (the real API is the
+`connection_limits::Behaviour` field, which already exists), and an `isUnlocked`
+function was being used as a boolean state. Both looked correct and both were
+wrong.
+
+Nine tests have never been executed:
+
+| Where | What |
+|---|---|
+| `p2p/mod.rs` | four `RelayBudgets` tests: window, per-peer isolation, no reset on reconnect |
+| `p2p/blobs.rs` | four `MemCache` tests: LRU eviction, recency, oversized refusal, byte accounting |
+| `store.rs` | six `merge_dm_delta` tests: dedupe, empty-id fallback, progress both ways, ordering, cap reporting |
+
+**Run `cargo fmt` and `cargo test` before shipping any of this.** The merge is
+the one place in the codebase where a bug destroys user data quietly instead of
+failing loudly, and it is the least tested code in the repository.
+
+## 2. `cargo fmt` fails on pre-existing drift
+
+`cargo fmt --check` fails at HEAD, before any of this work:
+
+| File | Diffs |
+|---|---|
+| `backend/src/lib.rs` | 98 |
+| `backend/src/p2p/mod.rs` | 11 |
+| `backend/src/p2p/blobs.rs` | 3 |
+
+None of it was introduced here — every file was diffed against a `git worktree`
+of HEAD to confirm the count was unchanged, and the one apparent difference was
+a `rustfmt` separator between two pre-existing diffs, not new code. CI is red
+independently of this workstream. One `cargo fmt` run clears it.
+
+## 3. Multi-device sync has no trigger
+
+The merge works. Nothing calls it.
+
+`publish_sync_delta` is sealed, encrypted, size-capped, and registered as a
+Tauri command — but there is no timer, no UI button, and no retry, so a device
+never sends a delta on its own. Still to build:
+
+- an automatic trigger: on unlock, then periodically while unlocked
+- a retry path, since a delta published before the other device is online is lost
+- a visible result, so the user can tell sync ran and what it moved
+- `MergeReport` is returned but never surfaced; truncation by the history cap
+  should be visible rather than silent
+
+## 4. Sync carries history only
+
+Deltas carry conversation history and nothing else. Two devices still diverge on
+contacts, group descriptors, server membership, and roles. The merge rules for
+those are written in the device-model section: union for contacts, higher
+revision wins for descriptors, never downgrade read state.
+
+Drafts and the outbox are never synced, by design — drafts are plaintext and are
+purged on lock, and the outbox is bound to local transport state.
+
+## 5. The device record is local-only
+
+Every install has a random `device_id` and an editable label, and it survives a
+restart. It is **not** visible to contacts: making it travel means changing
+signed profile bytes, and `SignedProfile::sign` signs the whole serialized
+struct, so a new client re-serializing an old profile produces different bytes
+and every existing profile stops verifying, silently.
+
+The safe approach is `skip_serializing_if` on an empty id so the original bytes
+reproduce exactly, proven with a legacy-profile test. Alternatively carry it on
+the presence layer, which needs no signing change.
+
+Note also that the record currently lives in the sealed state file, so a
+state-package import copies the exporter's `device_id`. It belongs in a
+per-install file alongside the node identity.
+
+## 6. Plugin publisher directory
+
+Signing, trust, and revocation are shipped and reachable from Settings. What
+does not exist is any way for a key to reach a user other than manual import.
+A publisher directory, a key server, or key transparency are all product
+decisions about trust distribution, not code, and were deliberately left open.
+
+## 7. Real call testing
+
+The WebRTC path is unexercised across networks. TURN is supported and the
+runbook is written, but no call has been made between two hosts, so the relay
+port range, `external-ip`, and ICE behaviour are all unverified in practice.
+Two machines on different networks are needed.
+
+---
+
+## A note on how to read this plan's history
+
+Several architectural claims recorded earlier in this file were wrong and have
+been corrected in place rather than deleted. The wrong ones:
+
+- that inbound connections were uncapped — they are not; `connection_limits` was
+  already implemented and had been missed by grepping one file
+- that duplicate read receipts, self-conversation, and outbox double-send would
+  break with two devices — all three are already handled; the receive path is
+  idempotent, `onNodeMessage` filters our own peer id, and the outbox is
+  per-install
+- that multi-device sync was blocked on device rendezvous — it is not. Delivery
+  is topic-based and reaches every subscriber, so no rendezvous is needed
+- that merge rules were "union by message id" — server messages dedupe on `sig`,
+  and `push_dm` does not dedupe empty ids at all
+
+Where this file states a behaviour, check it against the code before relying on
+it.
 
 ### Audit remediation — completed this pass
 

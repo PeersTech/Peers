@@ -311,12 +311,16 @@ Peers/
 
 - [ ] Full Rust compile, test, clippy, and multi-network verification pass
 - [x] Multi-device history sync (merge implemented; no automatic trigger yet)
+- [ ] An automatic trigger for multi-device sync, plus contacts/descriptors
 - [ ] Making devices visible to contacts, which changes signed profile bytes
 - [ ] TURN deployment and production call testing (runbook written)
 - [ ] Plugin publisher directory and key exchange (signing and revocation shipped)
 
-`cargo fmt --check` currently fails on `blobs.rs` and `p2p/mod.rs` for
+`cargo fmt --check` currently fails on `lib.rs`, `blobs.rs`, and `p2p/mod.rs` for
 formatting that predates the current work, so CI needs a `cargo fmt` run.
+
+[`PLAN.md`](PLAN.md) carries the full parked-work list under **Outstanding
+work**, ordered by risk rather than size.
 
 See [`PLAN.md`](PLAN.md) for implementation status and [`AGENTS.md`](AGENTS.md)
 for repository conventions.
