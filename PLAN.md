@@ -142,10 +142,67 @@
 
 **Status:** done — the constrained message-transform runtime is implemented; signing/revocation remains pending.
 
+### Multi-device state synchronization — design
+
+**The blocker that rules out the obvious design.** `Store::open` mints a random
+per-device salt on first run and stores it inside the sealed state file. The
+storage key is `Argon2id(password, salt)`. Two devices that share a recovery
+phrase therefore derive *different* keys, and device B cannot decrypt device
+A's `state.json`.
+
+This is exactly why the existing manual transfer works as a **takeover**: the
+importing device writes the exporting device's file wholesale, salt included,
+so every later unlock reuses the exporter's salt. It is not a merge, and two
+devices both editing after an import will silently diverge.
+
+Making the salt deterministic from the identity would let devices share a
+sealed file directly, but it changes the derived key for every existing
+install. Existing users would find their state unreadable, so that is a
+migration with no safe rollback and is not acceptable.
+
+**Chosen design: sync deltas over the existing sealed DM transport.** Devices
+keep their own salt and their own store. Each device periodically publishes an
+encrypted delta addressed to a known device, using the DM sealing that already
+works between any two peers and has been exercised since the start. No new key
+distribution, no format change, no migration, and nothing new to trust.
+
+**Merge rules**, chosen so that conflicts are impossible rather than resolved:
+
+| Field | Rule | Why |
+|---|---|---|
+| Messages | union by message id | ids are UUIDs, so a duplicate is a duplicate |
+| Contacts and friends | union | adding is monotonic |
+| Group descriptors | higher `revision` wins | the wire format already carries a revision |
+| Servers and roles | higher revision, else union of membership | |
+| Delivery and read state | per-message union, existing state kept | never downgrade to "unread" |
+| Profile | last received wins | no trusted clock; accept the staleness |
+| Drafts | never synced | plaintext, already purged on lock |
+| Outbox | never synced | it is bound to the local transport state |
+
+**Work still required**, none of it started:
+
+1. A `sync` payload kind alongside `DmTextPayload` in `lib.rs`.
+2. Merge functions over `PersistedState` with the rules above, plus tests for
+   each rule — a merge bug corrupts history, so this is the part to be careful
+   with.
+3. A periodic timer in the node, gated on being unlocked and on having at least
+   one other device.
+4. Device discovery: same recovery phrase means the same peer id, so devices
+   need a way to learn each other's addresses before any of this works.
+5. UI surface and a conflict-visible audit log.
+
+Step 4 is the real dependency and is unsolved. Two devices from one phrase have
+the same peer id, so they cannot find each other through the Directory, and a
+peer cannot dial itself. Until there is a rendezvous story, sync cannot be
+triggered even with steps 1-3 done.
+
+**Status:** design recorded, nothing implemented. Do not attempt steps 1-3
+without solving device discovery first.
+
 ### Remaining roadmap
 
 - Rust compile, test, clippy, and multi-network verification — deferred by user instruction
-- Automatic background state synchronization
+- Device rendezvous, then multi-device state synchronization
 - TURN deployment and production call testing
 - Plugin signing/revocation workflow
 - `cargo fmt` run: `blobs.rs` and `p2p/mod.rs` already fail `fmt --check` at HEAD,
