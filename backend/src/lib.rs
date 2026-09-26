@@ -115,18 +115,6 @@ struct DmReadPayload {
     ids: Vec<String>,
 }
 
-/// A multi-device state delta. Devices from one recovery phrase share a peer
-/// id, so this travels to a linked device address rather than being addressed
-/// to a peer id. `revision` is a monotonic counter carried by the sender so a
-/// receiver can discard an out-of-order or replayed delta.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DmSyncDeltaPayload {
-    kind: String,
-    revision: u64,
-    payload: String,
-}
-
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DmCallSignalPayload {
@@ -3532,22 +3520,6 @@ pub fn run() {
                                 }
                             }
                             if group_id.is_none() {
-                                if let Ok(delta) = serde_json::from_slice::<DmSyncDeltaPayload>(&plaintext) {
-                                    if delta.kind == "sync-delta" {
-                                        // Emitted rather than merged inline: the
-                                        // merge rules need the unlocked store
-                                        // and must never run on a locked node.
-                                        let _ = app_handle.emit(
-                                            "node://sync-delta",
-                                            serde_json::json!({
-                                                "peerId": from,
-                                                "revision": delta.revision,
-                                                "payload": delta.payload,
-                                            }),
-                                        );
-                                        return;
-                                    }
-                                }
                                 if let Ok(signal) = serde_json::from_slice::<DmCallSignalPayload>(&plaintext) {
                                     if signal.kind == "call-signal" {
                                         let _ = app_handle.emit(
