@@ -168,22 +168,22 @@ impl History {
             enforce_conversation_cap(&mut self.dm, peer, &|message: &DmMessage| message.ts);
         let messages = self.dm.entry(peer.to_string()).or_default();
         let mut seen: std::collections::HashSet<(String, u64, String, bool)> =
-            messages.iter().map(dm_identity).collect();
+            messages.iter().map(Self::dm_identity).collect();
         let mut added = 0;
         for message in incoming {
-            if seen.contains(&dm_identity(&message)) {
+            if seen.contains(&Self::dm_identity(&message)) {
                 // Fold a duplicate's progress flags into the one we already
                 // hold, then move on.
                 if let Some(existing) = messages
                     .iter_mut()
-                    .find(|m| dm_identity(m) == dm_identity(&message))
+                    .find(|m| Self::dm_identity(m) == Self::dm_identity(&message))
                 {
                     existing.read |= message.read;
                     existing.delivered |= message.delivered;
                 }
                 continue;
             }
-            seen.insert(dm_identity(&message));
+            seen.insert(Self::dm_identity(&message));
             messages.push(message);
             added += 1;
         }
@@ -307,7 +307,7 @@ pub struct PersistedState {
 /// exporter's `device_id`. The correct fix is to move this record out of the
 /// account-scoped sealed state into a per-install file alongside the node
 /// identity, where an import cannot reach it.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LocalDevice {
     pub device_id: String,
     pub label: String,
@@ -361,7 +361,8 @@ impl Store {
             return Err(PeersError::Keystore("state package is too large".into()));
         }
         validate_sealed_file(&raw)?;
-        atomic::write_private(&self.path, &raw)
+        atomic::write_private(&self.path, &raw)?;
+        Ok(())
     }
 
     /// Unlocks the store: reads (or mints) the salt, derives the storage
@@ -517,6 +518,10 @@ pub fn state_from(
         incoming_transfers: Vec::new(),
         profile: profile.clone(),
         groups: groups.to_vec(),
+        // Owned by the caller, which has them in hand: this function only sees
+        // the session dir, servers, history and profile.
+        outbox: Vec::new(),
+        device: None,
     }
 }
 
@@ -637,7 +642,6 @@ mod tests {
             sender: None,
             read: false,
             delivered: false,
-            attachment_hash: None,
             attachment_name: None,
             attachment_mime: None,
             attachment_data: None,

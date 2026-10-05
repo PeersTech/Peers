@@ -436,7 +436,11 @@ async fn send_friend_request(state: State<'_, AppState>, peer_id: String) -> Res
     // Publish to the target's friend-request topic and listen on our own
     // topic for the signed acceptance that completes key exchange.
     let topic = format!("{FRIEND_REQUEST_TOPIC_PREFIX}{peer}");
-    subscribe_with_relay(&state, format!("{FRIEND_REQUEST_TOPIC_PREFIX}{me.peer_id}")).await?;
+    subscribe_with_relay(
+        &state,
+        format!("{FRIEND_REQUEST_TOPIC_PREFIX}{}", me.peer_id),
+    )
+    .await?;
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Publish {
@@ -574,17 +578,14 @@ async fn finish_unlock(
             &mut history,
             &persisted,
         )?;
-        // Register our own X25519 key as a recipient for our own peer id.
-        //
-        // Two installs of one account share a peer id, so they subscribe to the
-        // same DM topic and both receive anything sent to it. Sealing to that
-        // topic needs a recipient key for ourselves, which nothing else
-        // provides. Both installs hold the same X25519 key, so the resulting
-        // session is the same one the other device derives, and this is what
-        // lets a device publish a delta the other one can open.
-        dir.as_mut()
-            .unwrap()
-            .remember_recipient_key(&id.peer_id.to_string(), id.x25519_public());
+        // Note: we deliberately do NOT register our own X25519 key as our own
+        // recipient key. Two installs of one account share a peer id and the
+        // same X25519 key, and message keys are derived per direction from a
+        // comparison of the two public keys — so identical keys make both ends
+        // pick the same direction and a delta sealed to ourselves is sealed with
+        // the receiving direction. It cannot be opened; the failure is a silent
+        // `BadCipher`. `crypto::card::tests` pins this. Multi-device delta
+        // delivery needs a distinct key per device instead.
     }
 
     *state.outbox.lock().unwrap() = persisted.outbox.clone();
@@ -607,8 +608,17 @@ async fn finish_unlock(
     let handle = p2p::spawn(id.clone(), false)?;
     *state.identity.lock().unwrap() = Some(id.clone());
     *state.node.lock().unwrap() = Some(handle.clone());
-    for group in state.groups.lock().unwrap().values() {
-        let _ = subscribe_with_relay(&state, group_topic(&group.group_id)).await;
+    // Collected first: holding the groups guard across an await would make this
+    // future non-Send, which Tauri rejects for commands.
+    let group_ids: Vec<String> = state
+        .groups
+        .lock()
+        .unwrap()
+        .values()
+        .map(|group| group.group_id.clone())
+        .collect();
+    for group_id in group_ids {
+        let _ = subscribe_with_relay(&state, group_topic(&group_id)).await;
     }
     *state.storage.lock().unwrap() = Some(store_handle);
     retry_outbox(&state).await;
@@ -694,12 +704,12 @@ async fn finish_unlock(
                 } => {
                     let st = app2.state::<AppState>();
                     if from_card.verify_for_peer(from_peer).is_ok() {
-                        let accepted_request = accepted
+                        let accepted_request = *accepted
                             && st
                                 .pending_outgoing_friend_requests
                                 .lock()
                                 .unwrap()
-                                .remove(&from_peer);
+                                .remove(from_peer);
                         if accepted_request || !accepted {
                             if let Some(dir) = st.dir.lock().unwrap().as_mut() {
                                 dir.remember_contact(from_peer, from_card);
@@ -1121,18 +1131,23 @@ async fn create_group_descriptor(
         .unwrap()
         .clone()
         .ok_or("not unlocked")?;
-    let dir = state.dir.lock().unwrap();
-    let dir = dir.as_ref().ok_or("not unlocked")?;
-    let mut members = Vec::with_capacity(peer_ids.len());
-    for peer_id in peer_ids {
-        let key = dir
-            .recipient_key(&peer_id)
-            .ok_or_else(|| format!("no validated encryption key for {peer_id}"))?;
-        members.push(crate::crypto::group::GroupMember {
-            peer_id,
-            x25519_pub: key,
-        });
-    }
+    // Scoped so the guard is released before the await below; holding a
+    // std MutexGuard across an await makes the future non-Send.
+    let members = {
+        let dir = state.dir.lock().unwrap();
+        let dir = dir.as_ref().ok_or("not unlocked")?;
+        let mut members = Vec::with_capacity(peer_ids.len());
+        for peer_id in peer_ids {
+            let key = dir
+                .recipient_key(&peer_id)
+                .ok_or_else(|| format!("no validated encryption key for {peer_id}"))?;
+            members.push(crate::crypto::group::GroupMember {
+                peer_id,
+                x25519_pub: key,
+            });
+        }
+        members
+    };
     let descriptor = GroupDescriptor::sign(&identity, &new_server_id(), &name, members)
         .map_err(|e| e.to_string())?;
     let group_id = descriptor.group_id.clone();
@@ -1187,7 +1202,7 @@ async fn deliver_group_invite(
         .groups
         .lock()
         .unwrap()
-        .get(&group_id)
+        .get(group_id)
         .cloned()
         .ok_or("group not found")?;
     if !descriptor
@@ -1345,7 +1360,8 @@ async fn send_group(
         });
     persist(&state);
     let _ = subscribe_with_relay(&state, topic.clone()).await;
-    if let Some(node) = state.node.lock().unwrap().clone() {
+    let node_opt = state.node.lock().unwrap().clone();
+    if let Some(node) = node_opt {
         let _ = node
             .send(NodeCommand::Publish {
                 topic,
@@ -1566,7 +1582,8 @@ async fn send_group_attachment(
         });
     persist(&state);
     let _ = subscribe_with_relay(&state, topic.clone()).await;
-    if let Some(node) = state.node.lock().unwrap().clone() {
+    let node_opt = state.node.lock().unwrap().clone();
+    if let Some(node) = node_opt {
         let _ = node
             .send(NodeCommand::Publish {
                 topic,
@@ -2295,7 +2312,8 @@ async fn publish(
     // auto-created by an incoming message never had `subscribe()` called for
     // it, and gossipsub refuses to publish to an unsubscribed topic.
     let _ = subscribe_with_relay(&state, topic.clone()).await;
-    if let Some(node) = state.node.lock().unwrap().clone() {
+    let node_opt = state.node.lock().unwrap().clone();
+    if let Some(node) = node_opt {
         let _ = node
             .send(NodeCommand::Publish {
                 topic,
@@ -2487,7 +2505,8 @@ async fn publish_attachment(
         });
     persist(&state);
     let _ = subscribe_with_relay(&state, topic.clone()).await;
-    if let Some(node) = state.node.lock().unwrap().clone() {
+    let node_opt = state.node.lock().unwrap().clone();
+    if let Some(node) = node_opt {
         let _ = node
             .send(NodeCommand::Publish {
                 topic,
@@ -2507,7 +2526,7 @@ async fn publish_attachment(
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
                 mine: true,
-                sender: Some(me.clone()),
+                sender: Some(identity.peer_id.to_string()),
                 id: id.clone(),
                 read: false,
                 delivered: false,
@@ -2521,11 +2540,20 @@ async fn publish_attachment(
     Ok(id)
 }
 
-/// Publishes this install's conversation history to our own DM topic, where
-/// every other install of the same account receives it.
+/// Publishes this install's conversation history as a delta on the account's
+/// own DM topic.
 ///
-/// Sealing to our own peer id works because unlock registers our own X25519 key
-/// as a recipient for ourselves.
+/// **Not working, and it says so.** Two installs of one account share one X25519
+/// key, and message keys are derived per direction from a comparison of the two
+/// public keys. Identical keys make both ends pick the same direction, so the
+/// sender seals with the receiving direction and the other install fails with a
+/// silent `BadCipher`. `crypto::card::tests` pins that.
+///
+/// Nothing exchanges a second device key yet, so the recipient list is always
+/// empty and this returns an error rather than publishing an undecryptable
+/// delta. The merge that consumes these deltas is implemented and tested
+/// (`store::tests`); only delivery is missing. The fix is one X25519 key per
+/// device, with devices' keys exchanged in a canonical order.
 #[tauri::command]
 async fn publish_sync_delta(state: State<'_, AppState>) -> Result<usize, String> {
     let identity = state
@@ -2545,16 +2573,37 @@ async fn publish_sync_delta(state: State<'_, AppState>) -> Result<usize, String>
     if encoded.len() > MAX_SYNC_DELTA_BYTES {
         return Err("history is too large to sync in one delta".into());
     }
+    // Deliberately unreachable for now, and it must stay that way until devices
+    // have distinct keys.
+    //
+    // `recipient_keys` is backed by the contacts map, which only ever holds
+    // *other people's* keys — a peer's card, or a group member's key. Nothing
+    // puts a second device of this account in there, so filtering our own key
+    // out leaves the list empty and this returns an error. That is the correct
+    // outcome: a delta published on the account's own topic must be sealed to
+    // another device's key, and no such key is exchanged yet. Sealing it to our
+    // own key instead produces a message the other install cannot decrypt
+    // (see `crypto::card::tests`), so publishing nothing is better than
+    // publishing something that always fails at the far end.
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
-        let recipient = dir
-            .recipient_key(&identity.peer_id.to_string())
-            .ok_or("no session with this identity yet")?;
+        let mut recipients: Vec<[u8; 32]> = dir
+            .recipient_keys()
+            .into_iter()
+            .filter(|key| *key != identity.x25519_public())
+            .collect();
+        recipients.truncate(MAX_SYNC_DELTA_RECIPIENTS);
+        if recipients.is_empty() {
+            return Err(
+                "history sync needs a second device key for this account, which does not exist yet"
+                    .into(),
+            );
+        }
         let topic = format!("peers/v1/ch/{}", identity.peer_id);
         dir.seal(
             &identity,
-            &[recipient],
+            &recipients,
             topic.as_bytes(),
             &serde_json::to_vec(&serde_json::json!({
                 "kind": "sync-delta",
@@ -2875,6 +2924,10 @@ fn get_profile(state: State<'_, AppState>) -> Result<Option<SignedProfile>, Stri
 /// small enough that a hostile peer cannot force an unbounded allocation.
 const MAX_SYNC_DELTA_BYTES: usize = 8 * 1024 * 1024;
 
+/// Devices sealed into one delta. Every extra recipient copies the whole
+/// history, so this is a cost bound as much as a safety one.
+const MAX_SYNC_DELTA_RECIPIENTS: usize = 8;
+
 /// What one merge did. Returned so a caller can surface truncation instead of
 /// history loss being invisible.
 #[derive(Debug, Default)]
@@ -2966,6 +3019,7 @@ fn local_device(state: State<'_, AppState>) -> Result<crate::store::LocalDevice,
 fn default_device_label() -> String {
     // Best-effort hostname. It is a convenience label only and is editable.
     std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
         .map(|value| value.trim().chars().take(48).collect::<String>())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "This device".to_string())
@@ -3301,7 +3355,8 @@ async fn receive_attachment_chunk(
             .ok()
     };
     if let Some(ack_payload) = ack_payload {
-        if let Some(node) = state.node.lock().unwrap().clone() {
+        let node_opt = state.node.lock().unwrap().clone();
+        if let Some(node) = node_opt {
             let _ = node
                 .send(NodeCommand::Publish {
                     topic: topic.to_string(),
@@ -3485,7 +3540,8 @@ async fn receive_group_attachment_chunk(
             .ok()
     };
     if let Some(ack_payload) = ack_payload {
-        if let Some(node) = state.node.lock().unwrap().clone() {
+        let node_opt = state.node.lock().unwrap().clone();
+        if let Some(node) = node_opt {
             let _ = node
                 .send(NodeCommand::Publish {
                     topic: topic.to_string(),
@@ -3623,13 +3679,19 @@ pub fn run() {
             // Decrypt incoming envelopes as they arrive and forward them as
             // frontend-friendly events.
             let app_handle = app.handle().clone();
-            app.listen("node://event", move |event| {
+                app.listen("node://event", move |event| {
+                    // The listen handler is synchronous but this body awaits, so run it on
+                    // the async runtime. A clone is needed because the handler is `Fn` and is
+                    // called once per event.
+                    let app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
                 let payload: NodeEvent = match serde_json::from_str(event.payload()) {
                     Ok(ev) => ev,
                     Err(_) => return,
                 };
-                if let NodeEvent::Message { topic, from, data } = payload {
+                if let NodeEvent::Message { topic, from, data } = &payload {
+                    let (topic, from, data) = (topic.clone(), from.clone(), data);
                     // Server control plane: member lists and join notices
                     // travel as plaintext JSON on `peers/v1/srv/{id}`.
                     if let Some(server_id) = topic.strip_prefix("peers/v1/srv/") {
@@ -3651,11 +3713,10 @@ pub fn run() {
                                                 .members
                                                 .iter()
                                                 .filter_map(|m| {
-                                                    m.card.clone().filter_map(|c| {
-                                                        c.verify_for_peer(&m.peer_id)
-                                                            .ok()
-                                                            .map(|_| (m.peer_id.clone(), c))
-                                                    })
+                                                    let c = m.card.as_ref()?;
+                                                    c.verify_for_peer(&m.peer_id)
+                                                        .ok()
+                                                        .map(|_| (m.peer_id.clone(), c.clone()))
                                                 })
                                                 .collect();
                                             // ...and every verified profile too.
@@ -3984,6 +4045,16 @@ pub fn run() {
                         Ok(_) => {}
                         Err(_) => return,
                     }
+                    // An envelope from our own peer id is our own outgoing DM
+                    // coming back — we also subscribe to the topic we publish on.
+                    // `open` refuses it, which keeps us from ingesting it twice.
+                    //
+                    // It also means a sync delta sealed to our own key can never
+                    // be opened: two installs of one account share that key, so
+                    // the per-direction message key collapses and the ciphertext
+                    // fails to authenticate. Delivering deltas between devices
+                    // needs a distinct X25519 key per device, sealed to the
+                    // other devices' keys.
                     // Open against the live dir so contact caching and session
                     // replay-tracking mutations are not lost.
                     let opened = {
@@ -4309,7 +4380,7 @@ pub fn run() {
                                             .unwrap_or(0),
                                         mine: false,
                                         sender: Some(from.clone()),
-                                         id: incoming_id.unwrap_or_default(),
+                                         id: incoming_id.clone().unwrap_or_default(),
                                          read: false,
             delivered: false,
                                         attachment_name: attachment.as_ref().map(|(payload, _)| payload.name.clone()),
@@ -4345,7 +4416,7 @@ pub fn run() {
                                         }
                                     }
                                 }
-                            } else if let (Some(group_id), Some(message_id)) = (&group_id, incoming_id.clone()) {
+                            } else if let (Some(group_id), Some(message_id)) = (&group_id, &incoming_id) {
                                 let ack_payload = {
                                     let mut dir = state.dir.lock().unwrap();
                                     let Some(dir) = dir.as_mut() else { return };
@@ -4415,7 +4486,8 @@ pub fn run() {
                         serde_json::json!({ "hash": hash }),
                     );
                 }
-            });
+                    });
+                });
             Ok(())
         })
         .run(tauri::generate_context!())

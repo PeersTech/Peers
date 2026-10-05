@@ -111,7 +111,11 @@ pub fn default_display_name(peer_id: &libp2p::PeerId) -> String {
         "Pear", "Comet", "Duck", "Ghost", "Taco", "Beetle", "Cloud", "Fox", "Cactus", "Orbit",
         "Llama", "Waffle",
     ];
-    let bytes = peer_id.as_ref();
+    // `PeerId::as_ref` hands back the Multihash, not its bytes, so go via
+    // `to_bytes`. `Multihash::digest` is shadowed here by the `sha2::Digest`
+    // trait's associated function of the same name, which takes no `self`.
+    let owned = peer_id.to_bytes();
+    let bytes = owned.as_slice();
     let a = bytes[bytes.len() - 1] as usize % ADJS.len();
     let n = bytes[0] as usize % NOUNS.len();
     format!("{}{}", ADJS[a], NOUNS[n])
@@ -311,13 +315,59 @@ impl SessionDir {
     /// Opens a `seal`-produced envelope addressed to us. Verifies the sender
     /// card, picks our copy, and decrypts with replay protection. On success
     /// the sender's card is trusted and cached, and the plaintext returned.
+    /// Opens an envelope addressed to us, rejecting one we sealed to ourselves.
+    ///
+    /// The rejection exists because we also subscribe to the topic we publish
+    /// on, so our own outgoing DM comes straight back and would otherwise be
+    /// ingested twice.
+    ///
+    /// It is also load-bearing for crypto reasons, not just tidiness. Message
+    /// keys are derived per direction, where the direction comes from comparing
+    /// our public key against the recipient's. When both are the same key —
+    /// which is exactly the case for two installs of one account — both ends
+    /// compute `local_is_low == false` and pick the same direction, so a message
+    /// sealed to ourselves is sealed with the *receiving* direction and cannot
+    /// be opened here at all. Refusing it early turns a silent `BadCipher` into
+    /// a clear one.
+    ///
+    /// The consequence for multi-device sync: sealing a delta to our own key
+    /// cannot work. A delta needs a distinct recipient key per device, with the
+    /// devices' public keys in a known canonical order so both sides agree on
+    /// direction. See `another_install_of_the_same_account_opens_a_self_addressed_delta`
+    /// and the test beside it for the failure this produces.
     pub fn open(&mut self, identity: &Identity, aad: &[u8], payload: &[u8]) -> Result<Vec<u8>> {
         let card = parse_card(payload)?;
-        card.verify()?;
-
         if card.x25519_pub == identity.x25519_public() {
             return Err(PeersError::Other("message from ourselves".into()));
         }
+        self.open_verified(identity, aad, payload, card)
+    }
+
+    /// Decrypts without the self-addressing check, for tests and for callers
+    /// that have already established the envelope is not our own echo.
+    ///
+    /// Note this does not make self-addressed envelopes decryptable: a session
+    /// with an identical peer key collapses the per-direction message key, so
+    /// this still fails with `BadCipher`. See [`SessionDir::open`].
+    pub fn open_including_self(
+        &mut self,
+        identity: &Identity,
+        aad: &[u8],
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let card = parse_card(payload)?;
+        self.open_verified(identity, aad, payload, card)
+    }
+
+    fn open_verified(
+        &mut self,
+        identity: &Identity,
+        aad: &[u8],
+        payload: &[u8],
+        card: PeerCard,
+    ) -> Result<Vec<u8>> {
+        card.verify()?;
+
         if payload.len() < 131 {
             return Err(PeersError::BadCipher);
         }
@@ -397,6 +447,93 @@ mod tests {
 
     fn pair() -> (Identity, Identity) {
         (Identity::new().unwrap(), Identity::new().unwrap())
+    }
+
+    /// Two installs of one account share a peer id and hold the same X25519
+    /// key. A device publishing a history delta to that shared key looks like
+    /// it works — the envelope is well formed and the recipient key resolves —
+    /// but the receiving install cannot decrypt it.
+    ///
+    /// Message keys are derived per direction, and the direction comes from
+    /// comparing our public key against the recipient's. Identical keys make
+    /// both ends compute the same `local_is_low`, so they derive the same
+    /// direction for the same message, and the sender seals with the receiving
+    /// direction. This pins that failure so it cannot come back unnoticed: it is
+    /// a silent `BadCipher`, not a compile error.
+    #[test]
+    fn a_delta_sealed_to_our_own_key_cannot_be_opened_by_the_other_install() {
+        let id = Identity::new().unwrap();
+        let peer = id.peer_id.to_string();
+        let aad = b"peers/v1/ch/self";
+        let mut installer_a = SessionDir::new();
+        installer_a.remember_recipient_key(&peer, id.x25519_public());
+        let sealed = installer_a
+            .seal(&id, &[id.x25519_public()], aad, b"delta")
+            .unwrap();
+
+        let mut installer_b = SessionDir::new();
+        let err = installer_b
+            .open_including_self(&id, aad, &sealed)
+            .expect_err("direction collapse means this cannot open");
+        assert!(
+            matches!(err, PeersError::BadCipher),
+            "expected a cipher failure, got {err:?}"
+        );
+    }
+
+    /// A distinct recipient key is what makes it work, so the same flow must
+    /// succeed when the recipient is not us. This is the shape a real fix needs:
+    /// one X25519 key per device, sealed to the *other* devices' keys.
+    #[test]
+    fn a_delta_sealed_to_another_installs_key_opens() {
+        let sender = Identity::new().unwrap();
+        let recipient = Identity::new().unwrap();
+        let aad = b"peers/v1/ch/self";
+
+        // Each install registers the other's key, as `remember_contact` does.
+        let mut dir_sender = SessionDir::new();
+        dir_sender
+            .remember_recipient_key(&recipient.peer_id.to_string(), recipient.x25519_public());
+        let sealed = dir_sender
+            .seal(
+                &sender,
+                &[recipient.x25519_public()],
+                aad,
+                b"{\"kind\":\"sync-delta\"}",
+            )
+            .unwrap();
+
+        let mut dir_recipient = SessionDir::new();
+        dir_recipient.remember_recipient_key(&sender.peer_id.to_string(), sender.x25519_public());
+        let plaintext = dir_recipient
+            .open(&recipient, aad, &sealed)
+            .expect("a delta for another install's key must open");
+        assert_eq!(plaintext, b"{\"kind\":\"sync-delta\"}");
+    }
+
+    /// The delta is bound to its topic, so one lifted onto another topic must
+    /// not open even with the right key.
+    #[test]
+    fn a_delta_is_bound_to_its_aad() {
+        let sender = Identity::new().unwrap();
+        let recipient = Identity::new().unwrap();
+        let mut dir_sender = SessionDir::new();
+        dir_sender
+            .remember_recipient_key(&recipient.peer_id.to_string(), recipient.x25519_public());
+        let sealed = dir_sender
+            .seal(
+                &sender,
+                &[recipient.x25519_public()],
+                b"peers/v1/ch/one",
+                b"delta",
+            )
+            .unwrap();
+
+        let mut dir_recipient = SessionDir::new();
+        dir_recipient.remember_recipient_key(&sender.peer_id.to_string(), sender.x25519_public());
+        assert!(dir_recipient
+            .open(&recipient, b"peers/v1/ch/two", &sealed)
+            .is_err());
     }
 
     #[test]

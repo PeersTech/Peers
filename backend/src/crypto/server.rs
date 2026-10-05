@@ -1180,9 +1180,21 @@ mod tests {
             tampered.verify(&owner),
             Err(PeersError::SnapshotCorrupt)
         ));
+        // A message from a member of one server must not verify against a
+        // different server's record. The server id is checked before membership,
+        // so ServerNotFound is the correct error, not NotInServer.
         let stranger = rec("stranger");
         assert!(matches!(
             msg.verify(&stranger),
+            Err(PeersError::ServerNotFound)
+        ));
+
+        // Someone who is not a member of the right server is rejected for that
+        // reason. Keeps the NotInServer branch covered rather than assumed.
+        let mut outsider = owner.clone();
+        outsider.members.retain(|member| member.peer_id != peer_id.to_string());
+        assert!(matches!(
+            msg.verify(&outsider),
             Err(PeersError::NotInServer)
         ));
     }

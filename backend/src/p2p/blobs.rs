@@ -51,7 +51,13 @@ impl MemCache {
         let seq = self.clock;
         let len = data.len();
         match self.entries.insert(hash, (data, seq)) {
-            Some((replaced, _)) => self.bytes = self.bytes.saturating_sub(replaced.len()),
+            Some((replaced, _)) => {
+                // Drop the old copy's bytes, then charge for the new one. Only
+                // doing the first leaves `bytes` at zero after a replace, which
+                // silently disables the budget.
+                self.bytes = self.bytes.saturating_sub(replaced.len());
+                self.bytes += len;
+            }
             None => self.bytes += len,
         }
         self.evict();
@@ -89,7 +95,7 @@ pub struct BlobStore {
 impl BlobStore {
     pub fn new() -> Self {
         let root = dirs::config_dir()
-            .or_else(dirs::data_local_dir())
+            .or_else(dirs::data_local_dir)
             .map(|base| base.join("peers").join("blobs"))
             .filter(|path| fs::create_dir_all(path).is_ok());
         Self {
@@ -338,7 +344,7 @@ mod tests {
             "cache grew past its budget"
         );
         // The oldest entries are the ones that must be gone.
-        assert!(cache.entries.get(&hashes[0]).is_none());
+        assert!(!cache.entries.contains_key(&hashes[0]));
     }
 
     /// Reading a blob has to make it the most recently used, or the hot
@@ -374,7 +380,8 @@ mod tests {
         let hash: BlobHash = Sha256::digest(b"payload").into();
         cache.insert(hash, vec![0u8; 4096]);
         cache.insert(hash, vec![0u8; 8192]);
-        assert_eq!(cache.bytes, 8192);
         assert_eq!(cache.entries.len(), 1);
+        // Replaced data is discarded, so only the newest copy counts.
+        assert_eq!(cache.bytes, 8192);
     }
 }

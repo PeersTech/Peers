@@ -8,12 +8,12 @@ use crate::error::{PeersError, Result};
 use behaviour::Behaviour;
 use blobs::{BlobHash, BlobStore};
 use futures::StreamExt;
-use libp2p::dial_opts::DialOpts;
 use libp2p::gossipsub::Sha256Topic;
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
+use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{
     autonat, gossipsub, identify, kad, ping, relay, Multiaddr, PeerId, Swarm, SwarmBuilder,
@@ -372,7 +372,7 @@ impl RelayBudgets {
     /// by reconnecting; only the window expiry clears it. Idle entries are
     /// pruned once the map grows past its cap.
     fn charge(&mut self, peer: PeerId, bytes: u64, now: Instant) -> bool {
-        let window = Duration::from_millis(RELAY_BYTE_WINDOW_MS);
+        let window = Duration::from_millis(RELAY_BYTE_WINDOW_MS as u64);
         if self.used.len() > MAX_RELAY_BUDGET_TRACKED {
             self.used
                 .retain(|_, (since, _)| now.duration_since(*since) <= window);
@@ -456,25 +456,13 @@ struct Node {
 /// On desktops (no battery), always returns `true`. This is a best-effort
 /// heuristic — the caller should re-check periodically.
 pub fn battery_relay_ok() -> bool {
-    match battery::Manager::new() {
-        Ok(mgr) => match mgr.batteries() {
-            Ok(mut bats) => {
-                if let Some(Ok(bat)) = bats.next() {
-                    let on_ac = bat.state() == battery::State::Charging
-                        || bat.state() == battery::State::Full;
-                    let enough = bat
-                        .energy_remaining()
-                        .map(|r| r.get::<battery::units::energy::watt_hour>() > 2.0)
-                        .unwrap_or(true);
-                    on_ac || enough
-                } else {
-                    true // No battery = desktop
-                }
-            }
-            Err(_) => true,
-        },
-        Err(_) => true,
-    }
+    // `battery::get` yields one item per battery, and yields nothing at all on a
+    // machine with none, which is the desktop case we want to allow.
+    let Some(bat) = battery::get().next() else {
+        return true;
+    };
+    let on_ac = matches!(bat.state(), battery::State::Charging | battery::State::Full);
+    on_ac || bat.percentage() > 20.0
 }
 
 /// Retry bookkeeping for one relay target.
@@ -930,9 +918,9 @@ impl Node {
                     // candidate. It is only a *claim*, though, so we wait for
                     // several independent peers to say the same thing before
                     // acting on it. See OBSERVED_CONFIRMATIONS.
-                    if let Some(observed) = info.observed_addr.clone() {
-                        self.note_observed(peer, observed);
-                    }
+                    // identify reports this as a bare address, not an option.
+                    let observed = info.observed_addr.clone();
+                    self.note_observed(peer, observed);
                 }
             }
             behaviour::Event::RelayClient(ev) => {
@@ -1025,7 +1013,7 @@ impl Node {
                                 let now = Instant::now();
                                 let expired: Vec<String> = self
                                     .relay_topic_owners
-                                    .iter()
+                                    .iter_mut()
                                     .filter_map(|(topic, owners)| {
                                         owners.retain(|_, expires| *expires > now);
                                         (owners.is_empty()).then_some(topic.clone())
@@ -1046,13 +1034,15 @@ impl Node {
                                         .relay_topic_owners
                                         .entry(ctrl.topic.clone())
                                         .or_default();
-                                    if !owners.contains_key(&requester)
-                                        && owners.len() >= MAX_RELAY_TOPICS_PER_PEER
-                                    {
-                                        false
-                                    } else if self.relay_topics.len() >= MAX_RELAY_TOPICS
-                                        && !self.relay_topics.contains(&ctrl.topic)
-                                    {
+                                    // Two independent limits, so the second is a
+                                    // separate check rather than an `else if`:
+                                    // this peer must stay under its per-peer topic
+                                    // cap, and the node under its global one.
+                                    let over_per_peer = !owners.contains_key(&requester)
+                                        && owners.len() >= MAX_RELAY_TOPICS_PER_PEER;
+                                    let over_global = self.relay_topics.len() >= MAX_RELAY_TOPICS
+                                        && !self.relay_topics.contains(&ctrl.topic);
+                                    if over_per_peer || over_global {
                                         false
                                     } else {
                                         owners.insert(requester, now + RELAY_TOPIC_TTL);
@@ -1333,7 +1323,7 @@ mod status_tests {
         let peer = PeerId::random();
         let now = Instant::now();
         assert!(budgets.charge(peer, RELAY_BYTE_BUDGET + 1, now));
-        let later = now + Duration::from_millis(RELAY_BYTE_WINDOW_MS + 1);
+        let later = now + Duration::from_millis(RELAY_BYTE_WINDOW_MS as u64 + 1);
         assert!(!budgets.charge(peer, 1, later));
     }
 
