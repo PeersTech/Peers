@@ -80,6 +80,34 @@ pub struct DmMessage {
 pub struct MergeOutcome {
     pub added: usize,
     pub dropped_by_cap: usize,
+    pub evicted_conversations: usize,
+}
+
+/// Applies the conversation cap before `key` is inserted, evicting the
+/// conversation whose newest message is oldest. Returns whether one was evicted.
+///
+/// All four write paths share this: `push_*` already capped, but a merge that
+/// skipped it would let one delta create unbounded conversations, and `persist`
+/// re-serializes the entire history on every merge.
+fn enforce_conversation_cap<T>(
+    map: &mut HashMap<String, Vec<T>>,
+    key: &str,
+    ts_of: &impl Fn(&T) -> u64,
+) -> bool {
+    if map.contains_key(key) || map.len() < MAX_HISTORY_CONVERSATIONS {
+        return false;
+    }
+    let oldest = map
+        .iter()
+        .min_by_key(|(_, messages)| messages.last().map(ts_of).unwrap_or(0))
+        .map(|(key, _)| key.clone());
+    match oldest {
+        Some(oldest) => {
+            map.remove(&oldest);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Keyed message history. Server channels are keyed `"{serverId}/{channel}"`
@@ -94,16 +122,7 @@ pub struct History {
 
 impl History {
     pub fn push_server(&mut self, key: &str, msg: SignedMessage) {
-        if !self.server.contains_key(key) && self.server.len() >= MAX_HISTORY_CONVERSATIONS {
-            let oldest = self
-                .server
-                .iter()
-                .min_by_key(|(_, messages)| messages.last().map(|message| message.ts).unwrap_or(0))
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                self.server.remove(&oldest);
-            }
-        }
+        enforce_conversation_cap(&mut self.server, key, &|message: &SignedMessage| message.ts);
         let messages = self.server.entry(key.to_string()).or_default();
         if messages.iter().any(|existing| existing.sig == msg.sig) {
             return;
@@ -116,16 +135,7 @@ impl History {
     }
 
     pub fn push_dm(&mut self, peer: &str, msg: DmMessage) {
-        if !self.dm.contains_key(peer) && self.dm.len() >= MAX_HISTORY_CONVERSATIONS {
-            let oldest = self
-                .dm
-                .iter()
-                .min_by_key(|(_, messages)| messages.last().map(|message| message.ts).unwrap_or(0))
-                .map(|(peer, _)| peer.clone());
-            if let Some(oldest) = oldest {
-                self.dm.remove(&oldest);
-            }
-        }
+        enforce_conversation_cap(&mut self.dm, peer, &|message: &DmMessage| message.ts);
         let messages = self.dm.entry(peer.to_string()).or_default();
         if !msg.id.is_empty() && messages.iter().any(|existing| existing.id == msg.id) {
             return;
@@ -154,6 +164,8 @@ impl History {
     /// A duplicate never overwrites: `read` and `delivered` are only ever set,
     /// never cleared, so merging cannot make a read message look unread again.
     pub fn merge_dm_delta(&mut self, peer: &str, incoming: Vec<DmMessage>) -> MergeOutcome {
+        let evicted =
+            enforce_conversation_cap(&mut self.dm, peer, &|message: &DmMessage| message.ts);
         let messages = self.dm.entry(peer.to_string()).or_default();
         let mut seen: std::collections::HashSet<(String, u64, String, bool)> =
             messages.iter().map(dm_identity).collect();
@@ -179,6 +191,7 @@ impl History {
         let mut outcome = MergeOutcome {
             added,
             dropped_by_cap: 0,
+            evicted_conversations: usize::from(evicted),
         };
         if messages.len() > MAX_HISTORY_PER_CONVERSATION {
             let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
@@ -192,6 +205,8 @@ impl History {
     /// what `push_server` already uses, so the same message from two installs
     /// collapses to one.
     pub fn merge_server_delta(&mut self, key: &str, incoming: Vec<SignedMessage>) -> MergeOutcome {
+        let evicted =
+            enforce_conversation_cap(&mut self.server, key, &|message: &SignedMessage| message.ts);
         let messages = self.server.entry(key.to_string()).or_default();
         let mut seen: std::collections::HashSet<String> =
             messages.iter().map(|m| m.sig.clone()).collect();
@@ -207,6 +222,7 @@ impl History {
         let mut outcome = MergeOutcome {
             added,
             dropped_by_cap: 0,
+            evicted_conversations: usize::from(evicted),
         };
         if messages.len() > MAX_HISTORY_PER_CONVERSATION {
             let overflow = messages.len() - MAX_HISTORY_PER_CONVERSATION;
@@ -640,7 +656,8 @@ mod tests {
             outcome,
             MergeOutcome {
                 added: 1,
-                dropped_by_cap: 0
+                dropped_by_cap: 0,
+                evicted_conversations: 0
             }
         );
         assert_eq!(history.dm_messages("bob").len(), 2);
@@ -715,5 +732,43 @@ mod tests {
             history.dm_messages("bob").len(),
             MAX_HISTORY_PER_CONVERSATION
         );
+    }
+
+    /// Regression test. `push_dm` capped conversations at 512 but the merge
+    /// paths did not, so a single delta naming thousands of distinct peers
+    /// would grow history without bound — and `persist` re-serializes the whole
+    /// of it on every merge.
+    #[test]
+    fn merge_caps_the_number_of_conversations() {
+        let mut history = History::default();
+        let mut evicted = 0;
+        for i in 0..(MAX_HISTORY_CONVERSATIONS + 10) {
+            let mut message = dm(&format!("{i}"), i as u64, "x", false);
+            message.peer = format!("peer-{i}");
+            evicted += history
+                .merge_dm_delta(&message.peer.clone(), vec![message])
+                .evicted_conversations;
+        }
+        assert_eq!(history.dm.len(), MAX_HISTORY_CONVERSATIONS);
+        assert_eq!(evicted, 10);
+    }
+
+    /// A peer already at the cap must not be evicted by its own delta, and the
+    /// oldest conversation is the one that goes.
+    #[test]
+    fn merge_evicts_the_oldest_conversation() {
+        let mut history = History::default();
+        for i in 0..MAX_HISTORY_CONVERSATIONS {
+            let mut message = dm(&format!("{i}"), i as u64, "x", false);
+            message.peer = format!("peer-{i}");
+            history.push_dm(&message.peer.clone(), message);
+        }
+        let mut fresh = dm("new", 9_999, "new", false);
+        fresh.peer = "brand-new".into();
+        let outcome = history.merge_dm_delta("brand-new", vec![fresh]);
+        assert_eq!(outcome.evicted_conversations, 1);
+        assert!(!history.dm.contains_key("peer-0"));
+        assert!(history.dm.contains_key("brand-new"));
+        assert_eq!(history.dm.len(), MAX_HISTORY_CONVERSATIONS);
     }
 }

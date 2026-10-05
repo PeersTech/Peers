@@ -94,14 +94,8 @@ mod tests {
 
     #[test]
     fn normalize_accepts_human_spacing() {
-        assert_eq!(
-            normalize_code("4827 1193 6052").unwrap(),
-            "482711936052"
-        );
-        assert_eq!(
-            normalize_code("4827-1193-6052").unwrap(),
-            "482711936052"
-        );
+        assert_eq!(normalize_code("4827 1193 6052").unwrap(), "482711936052");
+        assert_eq!(normalize_code("4827-1193-6052").unwrap(), "482711936052");
         assert_eq!(normalize_code(" 482711936052 ").unwrap(), "482711936052");
     }
 

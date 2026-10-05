@@ -971,25 +971,46 @@ impl SignedMessage {
         {
             return Err(PeersError::SnapshotCorrupt);
         }
-        let kind = if self.kind.is_empty() { "chat" } else { self.kind.as_str() };
+        let kind = if self.kind.is_empty() {
+            "chat"
+        } else {
+            self.kind.as_str()
+        };
         let has_attachment_metadata = !self.attachment_hash.is_empty()
             || !self.attachment_chunk_hashes.is_empty()
             || !self.attachment_name.is_empty()
             || !self.attachment_mime.is_empty()
             || self.attachment_size > 0;
         let valid_shape = match kind {
-            "chat" => self.target_sig.is_empty() && self.reaction.is_empty() && !has_attachment_metadata,
-            "reply" => !self.target_sig.is_empty() && self.reaction.is_empty() && !has_attachment_metadata,
-            "edit" => !self.target_sig.is_empty() && self.reaction.is_empty() && !self.text.is_empty() && !has_attachment_metadata,
+            "chat" => {
+                self.target_sig.is_empty() && self.reaction.is_empty() && !has_attachment_metadata
+            }
+            "reply" => {
+                !self.target_sig.is_empty() && self.reaction.is_empty() && !has_attachment_metadata
+            }
+            "edit" => {
+                !self.target_sig.is_empty()
+                    && self.reaction.is_empty()
+                    && !self.text.is_empty()
+                    && !has_attachment_metadata
+            }
             "delete" | "pin" | "unpin" => {
-                !self.target_sig.is_empty() && self.reaction.is_empty() && self.text.is_empty() && !has_attachment_metadata
+                !self.target_sig.is_empty()
+                    && self.reaction.is_empty()
+                    && self.text.is_empty()
+                    && !has_attachment_metadata
             }
             "reaction" => {
-                !self.target_sig.is_empty() && !self.reaction.is_empty() && self.text.is_empty() && !has_attachment_metadata
+                !self.target_sig.is_empty()
+                    && !self.reaction.is_empty()
+                    && self.text.is_empty()
+                    && !has_attachment_metadata
             }
             "attachment" => {
-                let legacy = self.attachment_hash.len() == 64 && self.attachment_chunk_hashes.is_empty();
-                let chunked = self.attachment_hash.is_empty() && !self.attachment_chunk_hashes.is_empty();
+                let legacy =
+                    self.attachment_hash.len() == 64 && self.attachment_chunk_hashes.is_empty();
+                let chunked =
+                    self.attachment_hash.is_empty() && !self.attachment_chunk_hashes.is_empty();
                 self.target_sig.is_empty()
                     && self.reaction.is_empty()
                     && (legacy || chunked)
@@ -1102,7 +1123,10 @@ mod tests {
         let new = owner.signed_list().unwrap();
         let mut joiner = ServerRecord::new_joined(&owner.invite().unwrap());
         joiner.verify_list(&new).unwrap();
-        assert!(matches!(joiner.verify_list(&old), Err(PeersError::StaleRevision)));
+        assert!(matches!(
+            joiner.verify_list(&old),
+            Err(PeersError::StaleRevision)
+        ));
     }
 
     #[test]

@@ -277,7 +277,10 @@ mod tests {
         fs::write(&path, legacy).unwrap();
 
         let ks = Keystore::new(path.clone());
-        assert!(matches!(ks.load("anything"), Err(PeersError::StaleKeystore)));
+        assert!(matches!(
+            ks.load("anything"),
+            Err(PeersError::StaleKeystore)
+        ));
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

@@ -1,7 +1,7 @@
 pub mod card;
 pub mod cipher;
-pub mod group;
 pub mod code;
+pub mod group;
 pub mod identity;
 pub mod keystore;
 pub mod mnemonic;

@@ -135,12 +135,20 @@ impl BlobStore {
     /// Hashes already persisted on disk, used to restore provider state after
     /// a process restart.
     pub fn hashes(&self) -> Vec<BlobHash> {
-        let Some(root) = &self.root else { return Vec::new() };
-        let Ok(entries) = fs::read_dir(root) else { return Vec::new() };
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
         entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                let name = entry.file_name().to_str()?.strip_suffix(".blob")?.to_string();
+                let name = entry
+                    .file_name()
+                    .to_str()?
+                    .strip_suffix(".blob")?
+                    .to_string();
                 parse_hex_name(&name)
             })
             .collect()
@@ -200,7 +208,10 @@ impl BlobStore {
 }
 
 fn hex_name(hash: &BlobHash) -> String {
-    format!("{}.blob", hash.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    format!(
+        "{}.blob",
+        hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    )
 }
 
 fn parse_hex_name(name: &str) -> Option<BlobHash> {

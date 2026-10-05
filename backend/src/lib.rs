@@ -8,11 +8,10 @@ mod store;
 pub use node::run_headless;
 
 use crate::crypto::card::{PeerCard, SignedProfile};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::crypto::server::{
     channel_topic, new_server_id, server_topic, ChannelConfig, Invite, JoinNotice, Member,
-    PLAZA_TOPIC, PlazaMessage, ProfileNotice, Role, ServerDir, ServerRecord, ServerView,
-    SignedList, SignedMessage, Snapshot,
+    PlazaMessage, ProfileNotice, Role, ServerDir, ServerRecord, ServerView, SignedList,
+    SignedMessage, Snapshot, PLAZA_TOPIC,
 };
 use crate::crypto::{group_topic, GroupDescriptor, GroupInvite, Identity, Keystore, SessionDir};
 use crate::error::PeersError;
@@ -21,10 +20,11 @@ use crate::store::{
     state_apply, state_from, DmMessage, History, IncomingTransfer, PersistedState, Store,
     StoreHandle,
 };
-use rand::rngs::OsRng;
-use rand::RngCore;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
@@ -178,7 +178,11 @@ struct GroupAttachmentChunkPayload {
 }
 
 fn validate_profile_fields(profile: &SignedProfile) -> Result<(), String> {
-    validate_text(&profile.display_name, MAX_DISPLAY_NAME_BYTES, "display name")?;
+    validate_text(
+        &profile.display_name,
+        MAX_DISPLAY_NAME_BYTES,
+        "display name",
+    )?;
     validate_text(&profile.about, MAX_ABOUT_BYTES, "about")?;
     if let Some(hash) = &profile.avatar_hash {
         validate_text(hash, 128, "avatar hash")?;
@@ -391,10 +395,7 @@ async fn add_contact(state: State<'_, AppState>, peer_id: String) -> Result<(), 
 /// and optional avatar hash so the recipient knows who is asking. We also
 /// subscribe to their DM topic so we receive their messages once they accept.
 #[tauri::command]
-async fn send_friend_request(
-    state: State<'_, AppState>,
-    peer_id: String,
-) -> Result<(), String> {
+async fn send_friend_request(state: State<'_, AppState>, peer_id: String) -> Result<(), String> {
     let peer: PeerId = peer_id
         .parse()
         .map_err(|_| "that is not a valid peer id".to_string())?;
@@ -438,8 +439,11 @@ async fn send_friend_request(
     subscribe_with_relay(&state, format!("{FRIEND_REQUEST_TOPIC_PREFIX}{me.peer_id}")).await?;
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload })
-        .await?;
+    node.send(NodeCommand::Publish {
+        topic,
+        data: payload,
+    })
+    .await?;
     // Also subscribe to their DM topic so we get their reply once they accept.
     subscribe_with_relay(&state, format!("peers/v1/ch/{peer}")).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
@@ -500,8 +504,11 @@ async fn accept_friend(state: State<'_, AppState>, peer_id: String) -> Result<()
     let topic = format!("{FRIEND_REQUEST_TOPIC_PREFIX}{peer}");
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload })
-        .await?;
+    node.send(NodeCommand::Publish {
+        topic,
+        data: payload,
+    })
+    .await?;
     Ok(())
 }
 
@@ -589,7 +596,12 @@ async fn finish_unlock(
     *state.groups.lock().unwrap() = persisted
         .groups
         .iter()
-        .filter(|group| group.members.iter().any(|member| member.peer_id == id.peer_id.to_string()))
+        .filter(|group| {
+            group
+                .members
+                .iter()
+                .any(|member| member.peer_id == id.peer_id.to_string())
+        })
         .map(|group| (group.group_id.clone(), group.clone()))
         .collect();
     let handle = p2p::spawn(id.clone(), false)?;
@@ -816,9 +828,15 @@ async fn retry_outbox(state: &AppState) {
         let identity = state.identity.lock().unwrap().clone();
         let Some(identity) = identity else { continue };
         let (topic, recipients) = if let Some(group_id) = &entry.group_id {
-            let Some(descriptor) = state.groups.lock().unwrap().get(group_id).cloned() else { continue };
+            let Some(descriptor) = state.groups.lock().unwrap().get(group_id).cloned() else {
+                continue;
+            };
             let me = identity.peer_id.to_string();
-            let topic = if entry.topic.is_empty() { group_topic(group_id) } else { entry.topic.clone() };
+            let topic = if entry.topic.is_empty() {
+                group_topic(group_id)
+            } else {
+                entry.topic.clone()
+            };
             let recipients: Vec<[u8; 32]> = {
                 let dir = state.dir.lock().unwrap();
                 let Some(dir) = dir.as_ref() else { continue };
@@ -829,12 +847,26 @@ async fn retry_outbox(state: &AppState) {
                     .filter_map(|member| dir.recipient_key(&member.peer_id))
                     .collect()
             };
-            if recipients.is_empty() { continue; }
+            if recipients.is_empty() {
+                continue;
+            }
             (topic, recipients)
         } else {
-            let Some(recipient) = state.dir.lock().unwrap().as_ref().and_then(|dir| dir.recipient_key(&entry.peer)) else { continue };
+            let Some(recipient) = state
+                .dir
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|dir| dir.recipient_key(&entry.peer))
+            else {
+                continue;
+            };
             (
-                if entry.topic.is_empty() { format!("peers/v1/ch/{}", entry.peer) } else { entry.topic.clone() },
+                if entry.topic.is_empty() {
+                    format!("peers/v1/ch/{}", entry.peer)
+                } else {
+                    entry.topic.clone()
+                },
                 vec![recipient],
             )
         };
@@ -847,7 +879,12 @@ async fn retry_outbox(state: &AppState) {
         let payload = {
             let mut dir = state.dir.lock().unwrap();
             let Some(dir) = dir.as_mut() else { continue };
-            match dir.seal(&identity, &recipients, topic.as_bytes(), entry.payload.as_bytes()) {
+            match dir.seal(
+                &identity,
+                &recipients,
+                topic.as_bytes(),
+                entry.payload.as_bytes(),
+            ) {
                 Ok(payload) => payload,
                 Err(_) => continue,
             }
@@ -860,11 +897,15 @@ async fn retry_outbox(state: &AppState) {
         }
         let node = state.node.lock().unwrap().clone();
         let Some(node) = node else { continue };
-        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+        let _ = node
+            .send(NodeCommand::Publish {
+                topic,
+                data: payload,
+            })
+            .await;
     }
     persist(state);
 }
-
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -900,8 +941,13 @@ async fn bootstrap_directory_nodes(
     let mut unique = HashSet::new();
     let mut parsed = Vec::with_capacity(addrs.len());
     for value in addrs {
-        let addr: Multiaddr = value.parse().map_err(|_| "directory returned an invalid multiaddr".to_string())?;
-        if !addr.iter().any(|protocol| matches!(protocol, Protocol::P2p(_))) {
+        let addr: Multiaddr = value
+            .parse()
+            .map_err(|_| "directory returned an invalid multiaddr".to_string())?;
+        if !addr
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::P2p(_)))
+        {
             return Err("directory multiaddr must include a peer id".into());
         }
         if unique.insert(addr.to_string()) {
@@ -926,7 +972,13 @@ async fn retry_outbox_command(state: State<'_, AppState>) -> Result<(), String> 
 #[tauri::command]
 fn net_status(state: State<AppState>) -> Result<NetStatus, String> {
     let listen_addrs = state.addrs.lock().unwrap().clone();
-    let external: Vec<String> = state.external_addrs.lock().unwrap().iter().cloned().collect();
+    let external: Vec<String> = state
+        .external_addrs
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
     let relay_reservations = state.relay_reservations.lock().unwrap().len();
     let peers = state.presence.lock().unwrap().len();
     let outbox_pending = state.outbox.lock().unwrap().len();
@@ -954,7 +1006,10 @@ fn import_state_package(state: State<AppState>, package: String) -> Result<(), S
     if state.identity.lock().unwrap().is_some() || state.storage.lock().unwrap().is_some() {
         return Err("lock Peers before importing a state package".into());
     }
-    state.store.import_sealed(&package).map_err(|e| e.to_string())
+    state
+        .store
+        .import_sealed(&package)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1073,12 +1128,19 @@ async fn create_group_descriptor(
         let key = dir
             .recipient_key(&peer_id)
             .ok_or_else(|| format!("no validated encryption key for {peer_id}"))?;
-        members.push(crate::crypto::group::GroupMember {peer_id, x25519_pub: key});
+        members.push(crate::crypto::group::GroupMember {
+            peer_id,
+            x25519_pub: key,
+        });
     }
     let descriptor = GroupDescriptor::sign(&identity, &new_server_id(), &name, members)
         .map_err(|e| e.to_string())?;
     let group_id = descriptor.group_id.clone();
-    state.groups.lock().unwrap().insert(group_id.clone(), descriptor.clone());
+    state
+        .groups
+        .lock()
+        .unwrap()
+        .insert(group_id.clone(), descriptor.clone());
     subscribe_with_relay(&state, group_topic(&group_id)).await?;
     Ok(descriptor)
 }
@@ -1092,7 +1154,14 @@ fn verify_group_invite(invite_json: String) -> Result<GroupInvite, String> {
 
 #[tauri::command]
 fn list_groups(state: State<'_, AppState>) -> Result<Vec<GroupDescriptor>, String> {
-    let me = state.identity.lock().unwrap().clone().ok_or("not unlocked")?.peer_id.to_string();
+    let me = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?
+        .peer_id
+        .to_string();
     Ok(state
         .groups
         .lock()
@@ -1108,7 +1177,12 @@ async fn deliver_group_invite(
     group_id: &str,
     peer_id: &str,
 ) -> Result<(), String> {
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let descriptor = state
         .groups
         .lock()
@@ -1116,20 +1190,31 @@ async fn deliver_group_invite(
         .get(&group_id)
         .cloned()
         .ok_or("group not found")?;
-    if !descriptor.members.iter().any(|member| member.peer_id == peer_id) {
+    if !descriptor
+        .members
+        .iter()
+        .any(|member| member.peer_id == peer_id)
+    {
         return Err("peer is not a group member".into());
     }
     let topic = format!("peers/v1/ch/{peer_id}");
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
-        let recipient = dir.recipient_key(&peer_id).ok_or("no encryption key for this peer")?;
-        let invite = serde_json::to_vec(&GroupInvite::new(descriptor)).map_err(|e| e.to_string())?;
+        let recipient = dir
+            .recipient_key(&peer_id)
+            .ok_or("no encryption key for this peer")?;
+        let invite =
+            serde_json::to_vec(&GroupInvite::new(descriptor)).map_err(|e| e.to_string())?;
         dir.seal(&identity, &[recipient], topic.as_bytes(), &invite)?
     };
     subscribe_with_relay(state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    node.send(NodeCommand::Publish {
+        topic,
+        data: payload,
+    })
+    .await?;
     Ok(())
 }
 
@@ -1143,12 +1228,25 @@ async fn send_group_invite(
 }
 
 #[tauri::command]
-async fn accept_group(state: State<'_, AppState>, invite_json: String) -> Result<GroupDescriptor, String> {
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+async fn accept_group(
+    state: State<'_, AppState>,
+    invite_json: String,
+) -> Result<GroupDescriptor, String> {
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let invite: GroupInvite = serde_json::from_str(&invite_json).map_err(|e| e.to_string())?;
     invite.verify().map_err(|e| e.to_string())?;
     let me = identity.peer_id.to_string();
-    if !invite.descriptor.members.iter().any(|member| member.peer_id == me) {
+    if !invite
+        .descriptor
+        .members
+        .iter()
+        .any(|member| member.peer_id == me)
+    {
         return Err("this group invitation does not include you".into());
     }
     let group_id = invite.descriptor.group_id.clone();
@@ -1158,23 +1256,39 @@ async fn accept_group(state: State<'_, AppState>, invite_json: String) -> Result
         for member in &invite.descriptor.members {
             if let Some(existing) = dir.recipient_key(&member.peer_id) {
                 if existing != member.x25519_pub {
-                    return Err(format!("group member key conflicts with an existing contact: {}", member.peer_id));
+                    return Err(format!(
+                        "group member key conflicts with an existing contact: {}",
+                        member.peer_id
+                    ));
                 }
             } else {
                 dir.remember_recipient_key(&member.peer_id, member.x25519_pub);
             }
         }
     }
-    state.groups.lock().unwrap().insert(group_id.clone(), invite.descriptor.clone());
+    state
+        .groups
+        .lock()
+        .unwrap()
+        .insert(group_id.clone(), invite.descriptor.clone());
     subscribe_with_relay(&state, group_topic(&group_id)).await?;
     Ok(invite.descriptor)
 }
 
 #[tauri::command]
-async fn send_group(state: State<'_, AppState>, group_id: String, text: String) -> Result<String, String> {
+async fn send_group(
+    state: State<'_, AppState>,
+    group_id: String,
+    text: String,
+) -> Result<String, String> {
     validate_text(&text, MAX_TEXT_BYTES, "group message")?;
     let id = new_message_id();
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let me = identity.peer_id.to_string();
     let descriptor = state
         .groups
@@ -1206,24 +1320,38 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
         if recipients.is_empty() {
             return Err("no group members have validated encryption keys".into());
         }
-        dir.seal(&identity, &recipients, topic.as_bytes(), outbox_payload.as_bytes())?
+        dir.seal(
+            &identity,
+            &recipients,
+            topic.as_bytes(),
+            outbox_payload.as_bytes(),
+        )?
     };
-    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-        id: id.clone(),
-        peer: format!("group:{group_id}"),
-        payload: outbox_payload,
-        topic: topic.clone(),
-        group_id: Some(group_id.clone()),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        attempts: 0,
-    });
+    state
+        .outbox
+        .lock()
+        .unwrap()
+        .push(crate::store::OutboxEntry {
+            id: id.clone(),
+            peer: format!("group:{group_id}"),
+            payload: outbox_payload,
+            topic: topic.clone(),
+            group_id: Some(group_id.clone()),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            attempts: 0,
+        });
     persist(&state);
     let _ = subscribe_with_relay(&state, topic.clone()).await;
     if let Some(node) = state.node.lock().unwrap().clone() {
-        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+        let _ = node
+            .send(NodeCommand::Publish {
+                topic,
+                data: payload,
+            })
+            .await;
     }
     state.history.lock().unwrap().push_dm(
         &format!("group:{group_id}"),
@@ -1260,7 +1388,12 @@ async fn send_group_attachment_chunked(
             "Group attachments must be between 1 and {MAX_DM_ATTACHMENT_TOTAL_BYTES} bytes"
         ));
     }
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let me = identity.peer_id.to_string();
     let descriptor = state
         .groups
@@ -1274,7 +1407,9 @@ async fn send_group_attachment_chunked(
     }
     {
         let dir = state.dir.lock().unwrap();
-        let Some(dir) = dir.as_ref() else { return Err("not unlocked".into()) };
+        let Some(dir) = dir.as_ref() else {
+            return Err("not unlocked".into());
+        };
         if !descriptor
             .members
             .iter()
@@ -1306,18 +1441,22 @@ async fn send_group_attachment_chunked(
             "data": B64.encode(chunk),
         }))
         .map_err(|e| e.to_string())?;
-        state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-            id: chunk_id,
-            peer: format!("group:{group_id}"),
-            payload,
-            topic: topic.clone(),
-            group_id: Some(group_id.clone()),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            attempts: 0,
-        });
+        state
+            .outbox
+            .lock()
+            .unwrap()
+            .push(crate::store::OutboxEntry {
+                id: chunk_id,
+                peer: format!("group:{group_id}"),
+                payload,
+                topic: topic.clone(),
+                group_id: Some(group_id.clone()),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                attempts: 0,
+            });
     }
     persist(state);
     let _ = subscribe_with_relay(state, topic).await;
@@ -1361,7 +1500,12 @@ async fn send_group_attachment(
     if data.is_empty() {
         return Err("Group attachments must be at least 1 byte".into());
     }
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let me = identity.peer_id.to_string();
     let descriptor = state
         .groups
@@ -1397,24 +1541,38 @@ async fn send_group_attachment(
         if recipients.is_empty() {
             return Err("no group members have validated encryption keys".into());
         }
-        dir.seal(&identity, &recipients, topic.as_bytes(), outbox_payload.as_bytes())?
+        dir.seal(
+            &identity,
+            &recipients,
+            topic.as_bytes(),
+            outbox_payload.as_bytes(),
+        )?
     };
-    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-        id: id.clone(),
-        peer: format!("group:{group_id}"),
-        payload: outbox_payload,
-        topic: topic.clone(),
-        group_id: Some(group_id.clone()),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        attempts: 0,
-    });
+    state
+        .outbox
+        .lock()
+        .unwrap()
+        .push(crate::store::OutboxEntry {
+            id: id.clone(),
+            peer: format!("group:{group_id}"),
+            payload: outbox_payload,
+            topic: topic.clone(),
+            group_id: Some(group_id.clone()),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            attempts: 0,
+        });
     persist(&state);
     let _ = subscribe_with_relay(&state, topic.clone()).await;
     if let Some(node) = state.node.lock().unwrap().clone() {
-        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+        let _ = node
+            .send(NodeCommand::Publish {
+                topic,
+                data: payload,
+            })
+            .await;
     }
     state.history.lock().unwrap().push_dm(
         &format!("group:{group_id}"),
@@ -1448,7 +1606,12 @@ async fn update_group_members(
     if peer_ids.len() > 64 {
         return Err("group members cannot exceed 64".into());
     }
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let descriptor = state
         .groups
         .lock()
@@ -1474,8 +1637,14 @@ async fn update_group_members(
             })
             .collect::<std::result::Result<Vec<_>, String>>()?
     };
-    let next = descriptor.revise(&identity, members).map_err(|e| e.to_string())?;
-    state.groups.lock().unwrap().insert(group_id.clone(), next.clone());
+    let next = descriptor
+        .revise(&identity, members)
+        .map_err(|e| e.to_string())?;
+    state
+        .groups
+        .lock()
+        .unwrap()
+        .insert(group_id.clone(), next.clone());
     subscribe_with_relay(&state, group_topic(&group_id)).await?;
     for member in &next.members {
         if member.peer_id != identity.peer_id.to_string() {
@@ -1488,7 +1657,12 @@ async fn update_group_members(
 
 #[tauri::command]
 async fn leave_group(state: State<'_, AppState>, group_id: String) -> Result<(), String> {
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let descriptor = state
         .groups
         .lock()
@@ -1501,7 +1675,8 @@ async fn leave_group(state: State<'_, AppState>, group_id: String) -> Result<(),
     }
     state.groups.lock().unwrap().remove(&group_id);
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Unsubscribe(group_topic(&group_id))).await?;
+    node.send(NodeCommand::Unsubscribe(group_topic(&group_id)))
+        .await?;
     persist(&state);
     Ok(())
 }
@@ -1734,15 +1909,22 @@ async fn leave_server(state: State<'_, AppState>, server_id: String) -> Result<(
         let servers = state.servers.lock().unwrap();
         servers
             .get(&server_id)
-            .map(|rec| rec.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>())
+            .map(|rec| {
+                rec.channels
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     };
     state.servers.lock().unwrap().remove(&server_id);
     node.send(NodeCommand::Unsubscribe(server_topic(&server_id)))
         .await?;
     for channel in channels {
-        node.send(NodeCommand::Unsubscribe(channel_topic(&server_id, &channel)))
-            .await?;
+        node.send(NodeCommand::Unsubscribe(channel_topic(
+            &server_id, &channel,
+        )))
+        .await?;
     }
     persist(&state);
     Ok(())
@@ -1943,7 +2125,9 @@ async fn publish_channel_attachment(
         return Err("invalid attachment hash".into());
     }
     if size == 0 || size > MAX_BLOB_BYTES as u64 {
-        return Err(format!("attachment must be between 1 and {MAX_BLOB_BYTES} bytes"));
+        return Err(format!(
+            "attachment must be between 1 and {MAX_BLOB_BYTES} bytes"
+        ));
     }
     let me = identity.peer_id.to_string();
     {
@@ -2047,7 +2231,11 @@ async fn unsubscribe(state: State<'_, AppState>, channel: String) -> Result<(), 
 /// card from the sender travels inside the envelope, so no out-of-band
 /// exchange is needed).
 #[tauri::command]
-async fn publish(state: State<'_, AppState>, channel: String, text: String) -> Result<String, String> {
+async fn publish(
+    state: State<'_, AppState>,
+    channel: String,
+    text: String,
+) -> Result<String, String> {
     let identity = state
         .identity
         .lock()
@@ -2086,25 +2274,34 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
         // envelope cannot be opened by anyone else subscribed to this topic.
         dir.seal(&identity, &[rcpt], topic.as_bytes(), &body)?
     };
-    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-        id: id.clone(),
-        peer: channel.clone(),
-        payload: outbox_payload,
-        topic: topic.clone(),
-        group_id: None,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        attempts: 0,
-    });
+    state
+        .outbox
+        .lock()
+        .unwrap()
+        .push(crate::store::OutboxEntry {
+            id: id.clone(),
+            peer: channel.clone(),
+            payload: outbox_payload,
+            topic: topic.clone(),
+            group_id: None,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            attempts: 0,
+        });
     persist(&state);
     // Subscribe (and ask relay nodes to mesh) first: a DM whose entry was
     // auto-created by an incoming message never had `subscribe()` called for
     // it, and gossipsub refuses to publish to an unsubscribed topic.
     let _ = subscribe_with_relay(&state, topic.clone()).await;
     if let Some(node) = state.node.lock().unwrap().clone() {
-        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+        let _ = node
+            .send(NodeCommand::Publish {
+                topic,
+                data: payload,
+            })
+            .await;
     }
     {
         let mut history = state.history.lock().unwrap();
@@ -2121,7 +2318,7 @@ async fn publish(state: State<'_, AppState>, channel: String, text: String) -> R
                 sender: Some(me.clone()),
                 id: id.clone(),
                 read: false,
-            delivered: false,
+                delivered: false,
                 attachment_name: None,
                 attachment_mime: None,
                 attachment_data: None,
@@ -2157,7 +2354,10 @@ async fn publish_attachment_chunked(
             return Err("not unlocked".into());
         };
         if dir.recipient_key(&peer).is_none() {
-            return Err("no encryption key for this peer yet — meet them on a server or the Plaza first".into());
+            return Err(
+                "no encryption key for this peer yet — meet them on a server or the Plaza first"
+                    .into(),
+            );
         }
     }
     let message_id = new_message_id();
@@ -2180,18 +2380,22 @@ async fn publish_attachment_chunked(
             "data": B64.encode(chunk),
         }))
         .map_err(|e| e.to_string())?;
-        state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-            id: chunk_id,
-            peer: peer.clone(),
-            payload,
-            topic: topic.clone(),
-            group_id: None,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            attempts: 0,
-        });
+        state
+            .outbox
+            .lock()
+            .unwrap()
+            .push(crate::store::OutboxEntry {
+                id: chunk_id,
+                peer: peer.clone(),
+                payload,
+                topic: topic.clone(),
+                group_id: None,
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                attempts: 0,
+            });
     }
     persist(state);
     let _ = subscribe_with_relay(state, topic).await;
@@ -2265,22 +2469,31 @@ async fn publish_attachment(
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
         dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
     };
-    state.outbox.lock().unwrap().push(crate::store::OutboxEntry {
-        id: id.clone(),
-        peer: peer.clone(),
-        payload: outbox_payload,
-        topic: topic.clone(),
-        group_id: None,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        attempts: 0,
-    });
+    state
+        .outbox
+        .lock()
+        .unwrap()
+        .push(crate::store::OutboxEntry {
+            id: id.clone(),
+            peer: peer.clone(),
+            payload: outbox_payload,
+            topic: topic.clone(),
+            group_id: None,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            attempts: 0,
+        });
     persist(&state);
     let _ = subscribe_with_relay(&state, topic.clone()).await;
     if let Some(node) = state.node.lock().unwrap().clone() {
-        let _ = node.send(NodeCommand::Publish { topic, data: payload }).await;
+        let _ = node
+            .send(NodeCommand::Publish {
+                topic,
+                data: payload,
+            })
+            .await;
     }
     {
         let mut history = state.history.lock().unwrap();
@@ -2297,7 +2510,7 @@ async fn publish_attachment(
                 sender: Some(me.clone()),
                 id: id.clone(),
                 read: false,
-            delivered: false,
+                delivered: false,
                 attachment_name: Some(name),
                 attachment_mime: Some(mime),
                 attachment_data: Some(data),
@@ -2353,9 +2566,12 @@ async fn publish_sync_delta(state: State<'_, AppState>) -> Result<usize, String>
     let topic = format!("peers/v1/ch/{}", identity.peer_id);
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload })
-        .await
-        .map_err(|e| e.to_string())?;
+    node.send(NodeCommand::Publish {
+        topic,
+        data: payload,
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let total: usize = body.dm.values().map(|m| m.len()).sum::<usize>()
         + body.server.values().map(|m| m.len()).sum::<usize>();
     Ok(total)
@@ -2370,7 +2586,10 @@ async fn send_call_signal(
     sdp: Option<String>,
     candidate: Option<String>,
 ) -> Result<(), String> {
-    if call_id.is_empty() || call_id.len() > 64 || !matches!(action.as_str(), "offer" | "answer" | "ice" | "hangup") {
+    if call_id.is_empty()
+        || call_id.len() > 64
+        || !matches!(action.as_str(), "offer" | "answer" | "ice" | "hangup")
+    {
         return Err("invalid call signal".into());
     }
     if sdp.as_ref().is_some_and(|value| value.len() > 64 * 1024)
@@ -2378,7 +2597,12 @@ async fn send_call_signal(
     {
         return Err("call signal payload is too large".into());
     }
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let topic = format!("peers/v1/ch/{peer}");
     let body = serde_json::to_vec(&serde_json::json!({
         "kind": "call-signal",
@@ -2391,12 +2615,18 @@ async fn send_call_signal(
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
-        let recipient = dir.recipient_key(&peer).ok_or("no encryption key for this peer")?;
+        let recipient = dir
+            .recipient_key(&peer)
+            .ok_or("no encryption key for this peer")?;
         dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
     };
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    node.send(NodeCommand::Publish {
+        topic,
+        data: payload,
+    })
+    .await?;
     Ok(())
 }
 
@@ -2412,7 +2642,12 @@ async fn mark_group_read(
     if ids.iter().any(|id| id.is_empty() || id.len() > 64) {
         return Err("invalid group read receipt message id".into());
     }
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let me = identity.peer_id.to_string();
     let descriptor = state
         .groups
@@ -2424,7 +2659,9 @@ async fn mark_group_read(
     let topic = group_topic(&group_id);
     let recipients: Vec<[u8; 32]> = {
         let dir = state.dir.lock().unwrap();
-        let Some(dir) = dir.as_ref() else { return Err("not unlocked".into()) };
+        let Some(dir) = dir.as_ref() else {
+            return Err("not unlocked".into());
+        };
         descriptor
             .members
             .iter()
@@ -2448,7 +2685,11 @@ async fn mark_group_read(
     };
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    node.send(NodeCommand::Publish {
+        topic,
+        data: payload,
+    })
+    .await?;
     Ok(())
 }
 
@@ -2464,19 +2705,30 @@ async fn mark_dm_read(
     if ids.iter().any(|id| id.is_empty() || id.len() > 64) {
         return Err("invalid read receipt message id".into());
     }
-    let identity = state.identity.lock().unwrap().clone().ok_or("not unlocked")?;
+    let identity = state
+        .identity
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not unlocked")?;
     let topic = format!("peers/v1/ch/{peer}");
     let body = serde_json::to_vec(&serde_json::json!({"kind": "read", "ids": ids}))
         .map_err(|e| e.to_string())?;
     let payload = {
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
-        let recipient = dir.recipient_key(&peer).ok_or("no encryption key for this peer")?;
+        let recipient = dir
+            .recipient_key(&peer)
+            .ok_or("no encryption key for this peer")?;
         dir.seal(&identity, &[recipient], topic.as_bytes(), &body)?
     };
     subscribe_with_relay(&state, topic.clone()).await?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
-    node.send(NodeCommand::Publish { topic, data: payload }).await?;
+    node.send(NodeCommand::Publish {
+        topic,
+        data: payload,
+    })
+    .await?;
     Ok(())
 }
 
@@ -2592,12 +2844,8 @@ async fn set_profile(
             }
             publish_list(&state, &rec.id).await?;
         } else {
-            let notice = serde_json::to_vec(&ProfileNotice::new(
-                &rec.id,
-                &me,
-                profile.clone(),
-            ))
-            .map_err(|e| e.to_string())?;
+            let notice = serde_json::to_vec(&ProfileNotice::new(&rec.id, &me, profile.clone()))
+                .map_err(|e| e.to_string())?;
             let _ = node
                 .send(NodeCommand::Publish {
                     topic: server_topic(&rec.id),
@@ -2633,6 +2881,7 @@ const MAX_SYNC_DELTA_BYTES: usize = 8 * 1024 * 1024;
 struct MergeReport {
     added: usize,
     dropped_by_cap: usize,
+    evicted_conversations: usize,
     rejected: bool,
 }
 
@@ -2668,11 +2917,13 @@ fn merge_sync_delta(state: &AppState, payload: &str) -> MergeReport {
             let outcome = history.merge_dm_delta(&peer, messages);
             report.added += outcome.added;
             report.dropped_by_cap += outcome.dropped_by_cap;
+            report.evicted_conversations += outcome.evicted_conversations;
         }
         for (key, messages) in body.server {
             let outcome = history.merge_server_delta(&key, messages);
             report.added += outcome.added;
             report.dropped_by_cap += outcome.dropped_by_cap;
+            report.evicted_conversations += outcome.evicted_conversations;
         }
     }
     persist(state);
@@ -2775,11 +3026,27 @@ fn push_plaza(state: &AppState, msg: PlazaMessage) {
 /// Publishes our signed display profile on the Plaza so anyone "here"
 /// learns who we are. Best-effort; called on unlock and after set_profile.
 async fn announce_plaza_profile(state: &AppState) {
-    let Some(identity) = state.identity.lock().unwrap().clone() else { return };
-    let Some(node) = state.node.lock().unwrap().clone() else { return };
-    let Some(profile) = state.profile.lock().unwrap().clone() else { return };
-    let Ok(card) = PeerCard::sign(&identity) else { return };
-    let Ok(msg) = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_PROFILE, "", Some(profile), Some(card)) else { return };
+    let Some(identity) = state.identity.lock().unwrap().clone() else {
+        return;
+    };
+    let Some(node) = state.node.lock().unwrap().clone() else {
+        return;
+    };
+    let Some(profile) = state.profile.lock().unwrap().clone() else {
+        return;
+    };
+    let Ok(card) = PeerCard::sign(&identity) else {
+        return;
+    };
+    let Ok(msg) = PlazaMessage::sign(
+        &identity.keypair,
+        PlazaMessage::KIND_PROFILE,
+        "",
+        Some(profile),
+        Some(card),
+    ) else {
+        return;
+    };
     if let Ok(data) = serde_json::to_vec(&msg) {
         let _ = node
             .send(NodeCommand::Publish {
@@ -2805,7 +3072,13 @@ async fn publish_plaza(state: State<'_, AppState>, text: String) -> Result<(), S
         return Ok(());
     }
     let card = PeerCard::sign(&identity)?;
-    let msg = PlazaMessage::sign(&identity.keypair, PlazaMessage::KIND_CHAT, &text, None, Some(card))?;
+    let msg = PlazaMessage::sign(
+        &identity.keypair,
+        PlazaMessage::KIND_CHAT,
+        &text,
+        None,
+        Some(card),
+    )?;
     let data = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
     let node = state.node.lock().unwrap().clone().ok_or("not unlocked")?;
     node.send(NodeCommand::Publish {
@@ -2987,7 +3260,7 @@ async fn receive_attachment_chunk(
                     sender: Some(transfer.peer),
                     id: transfer.message_id,
                     read: false,
-            delivered: false,
+                    delivered: false,
                     attachment_name: Some(transfer.name),
                     attachment_mime: Some(transfer.mime),
                     attachment_data: Some(data),
@@ -3018,9 +3291,14 @@ async fn receive_attachment_chunk(
     .map_err(|e| e.to_string())?;
     let ack_payload = {
         let mut dir = state.dir.lock().unwrap();
-        let Some(dir) = dir.as_mut() else { return Ok(()) };
-        let Some(recipient) = dir.recipient_key(from) else { return Ok(()) };
-        dir.seal(identity, &[recipient], topic.as_bytes(), &ack_body).ok()
+        let Some(dir) = dir.as_mut() else {
+            return Ok(());
+        };
+        let Some(recipient) = dir.recipient_key(from) else {
+            return Ok(());
+        };
+        dir.seal(identity, &[recipient], topic.as_bytes(), &ack_body)
+            .ok()
     };
     if let Some(ack_payload) = ack_payload {
         if let Some(node) = state.node.lock().unwrap().clone() {
@@ -3197,9 +3475,14 @@ async fn receive_group_attachment_chunk(
     .map_err(|e| e.to_string())?;
     let ack_payload = {
         let mut dir = state.dir.lock().unwrap();
-        let Some(dir) = dir.as_mut() else { return Ok(()) };
-        let Some(recipient) = dir.recipient_key(from) else { return Ok(()) };
-        dir.seal(identity, &[recipient], topic.as_bytes(), &ack_body).ok()
+        let Some(dir) = dir.as_mut() else {
+            return Ok(());
+        };
+        let Some(recipient) = dir.recipient_key(from) else {
+            return Ok(());
+        };
+        dir.seal(identity, &[recipient], topic.as_bytes(), &ack_body)
+            .ok()
     };
     if let Some(ack_payload) = ack_payload {
         if let Some(node) = state.node.lock().unwrap().clone() {
@@ -4158,7 +4441,10 @@ mod tests {
             outbox_pending: 0,
         };
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains("\"listenAddrs\""), "frontend expects camelCase");
+        assert!(
+            json.contains("\"listenAddrs\""),
+            "frontend expects camelCase"
+        );
         assert!(json.contains("\"externalAddrs\""));
         assert!(json.contains("\"relayReservations\""));
         assert!(json.contains("\"reachabilityMeasured\""));

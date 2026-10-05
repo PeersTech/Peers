@@ -114,7 +114,9 @@ impl GroupDescriptor {
         copy.sig.clear();
         let bytes = serde_json::to_vec(&copy).map_err(PeersError::Serde)?;
         if !owner.verify(&signed_bytes(&bytes), &sig) {
-            return Err(PeersError::Crypto("invalid group descriptor signature".into()));
+            return Err(PeersError::Crypto(
+                "invalid group descriptor signature".into(),
+            ));
         }
         let derived = libp2p::PeerId::from_public_key(&owner.into()).to_string();
         if derived != self.owner_peer {
@@ -127,7 +129,10 @@ impl GroupDescriptor {
         if self.version != 1
             || self.group_id.is_empty()
             || self.group_id.len() > 64
-            || !self.group_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || !self
+                .group_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             || self.name.is_empty()
             || self.name.len() > MAX_GROUP_NAME
             || self.members.is_empty()
@@ -143,7 +148,9 @@ impl GroupDescriptor {
                 || member.peer_id.len() > 128
                 || member.peer_id.as_str() <= previous
             {
-                return Err(PeersError::Other("group members must be sorted and unique".into()));
+                return Err(PeersError::Other(
+                    "group members must be sorted and unique".into(),
+                ));
             }
             previous = &member.peer_id;
             owner_present |= member.peer_id == self.owner_peer;
@@ -168,7 +175,10 @@ impl GroupInvite {
     pub const KIND: &'static str = "group-invite";
 
     pub fn new(descriptor: GroupDescriptor) -> Self {
-        Self { kind: Self::KIND.to_string(), descriptor }
+        Self {
+            kind: Self::KIND.to_string(),
+            descriptor,
+        }
     }
 
     pub fn verify(&self) -> Result<()> {
@@ -198,20 +208,18 @@ mod tests {
     use super::*;
 
     fn member(identity: &Identity) -> GroupMember {
-        GroupMember { peer_id: identity.peer_id.to_string(), x25519_pub: identity.x25519_public() }
+        GroupMember {
+            peer_id: identity.peer_id.to_string(),
+            x25519_pub: identity.x25519_public(),
+        }
     }
 
     #[test]
     fn descriptor_round_trip_and_tamper_detection() {
         let owner = Identity::new().unwrap();
         let guest = Identity::new().unwrap();
-        let descriptor = GroupDescriptor::sign(
-            &owner,
-            "group-test",
-            "Friends",
-            vec![member(&guest)],
-        )
-        .unwrap();
+        let descriptor =
+            GroupDescriptor::sign(&owner, "group-test", "Friends", vec![member(&guest)]).unwrap();
         descriptor.verify().unwrap();
         let mut tampered = descriptor;
         tampered.name = "Hijacked".into();

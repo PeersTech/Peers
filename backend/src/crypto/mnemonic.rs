@@ -11,7 +11,11 @@ const RAW: &str = include_str!("wordlist.txt");
 pub fn words() -> &'static [&'static str; 2048] {
     static WORDS: OnceLock<[&'static str; 2048]> = OnceLock::new();
     WORDS.get_or_init(|| {
-        let v: Vec<&str> = RAW.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let v: Vec<&str> = RAW
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
         let boxed: Box<[&str; 2048]> = v
             .into_boxed_slice()
             .try_into()
@@ -50,7 +54,9 @@ pub fn encode(entropy: &[u8]) -> Result<String> {
     let phrase = bits
         .chunks(11)
         .map(|chunk| {
-            let idx = chunk.iter().fold(0usize, |acc, &b| acc << 1 | usize::from(b));
+            let idx = chunk
+                .iter()
+                .fold(0usize, |acc, &b| acc << 1 | usize::from(b));
             list[idx]
         })
         .collect::<Vec<_>>()

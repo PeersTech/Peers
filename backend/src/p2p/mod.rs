@@ -8,17 +8,17 @@ use crate::error::{PeersError, Result};
 use behaviour::Behaviour;
 use blobs::{BlobHash, BlobStore};
 use futures::StreamExt;
+use libp2p::dial_opts::DialOpts;
 use libp2p::gossipsub::Sha256Topic;
 use libp2p::multiaddr::Protocol;
-use libp2p::dial_opts::DialOpts;
 use libp2p::request_response::{
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
 };
 use libp2p::swarm::SwarmEvent;
-use sha2::{Digest, Sha256};
 use libp2p::{
     autonat, gossipsub, identify, kad, ping, relay, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
@@ -53,7 +53,12 @@ fn is_public_observed_address(addr: &Multiaddr) -> bool {
         match protocol {
             Protocol::Ip4(ip) => {
                 has_ip = true;
-                if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() {
+                if ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_multicast()
+                {
                     return false;
                 }
             }
@@ -457,7 +462,8 @@ pub fn battery_relay_ok() -> bool {
                 if let Some(Ok(bat)) = bats.next() {
                     let on_ac = bat.state() == battery::State::Charging
                         || bat.state() == battery::State::Full;
-                    let enough = bat.energy_remaining()
+                    let enough = bat
+                        .energy_remaining()
                         .map(|r| r.get::<battery::units::energy::watt_hour>() > 2.0)
                         .unwrap_or(true);
                     on_ac || enough
@@ -577,7 +583,10 @@ impl Node {
         let mut due: Vec<Multiaddr> = Vec::new();
         for (addr, retry) in self.relay_targets.iter_mut() {
             // Already holding a reservation with this relay — nothing to do.
-            if retry.peer.is_some_and(|p| self.relay_reservations.contains(&p)) {
+            if retry
+                .peer
+                .is_some_and(|p| self.relay_reservations.contains(&p))
+            {
                 retry.wait = 0;
                 continue;
             }
@@ -713,7 +722,9 @@ impl Node {
                 // Remembered so the tick loop can re-establish the reservation
                 // if the relay restarts. Without this the slot is lost for the
                 // lifetime of the process.
-                self.relay_targets.entry(addr.clone()).or_insert_with(Retry::new);
+                self.relay_targets
+                    .entry(addr.clone())
+                    .or_insert_with(Retry::new);
 
                 // A relay is a known-good AutoNAT server: it is reachable by
                 // definition, and it has already seen us dial in.
@@ -1008,7 +1019,9 @@ impl Node {
                     if self.relay && message.topic == control_hash {
                         if let Ok(ctrl) = serde_json::from_slice::<RelayControl>(&message.data) {
                             if ctrl.op == "subscribe" && valid_relay_topic(&ctrl.topic) {
-                                let Some(requester) = message.source else { return };
+                                let Some(requester) = message.source else {
+                                    return;
+                                };
                                 let now = Instant::now();
                                 let expired: Vec<String> = self
                                     .relay_topic_owners
@@ -1022,11 +1035,20 @@ impl Node {
                                     self.relay_topics.remove(&topic);
                                     self.relay_topic_owners.remove(&topic);
                                     self.topics.remove(&topic);
-                                    let _ = self.swarm.behaviour_mut().gossipsub.unsubscribe(&Sha256Topic::new(topic));
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .unsubscribe(&Sha256Topic::new(topic));
                                 }
                                 let allowed = {
-                                    let owners = self.relay_topic_owners.entry(ctrl.topic.clone()).or_default();
-                                    if !owners.contains_key(&requester) && owners.len() >= MAX_RELAY_TOPICS_PER_PEER {
+                                    let owners = self
+                                        .relay_topic_owners
+                                        .entry(ctrl.topic.clone())
+                                        .or_default();
+                                    if !owners.contains_key(&requester)
+                                        && owners.len() >= MAX_RELAY_TOPICS_PER_PEER
+                                    {
                                         false
                                     } else if self.relay_topics.len() >= MAX_RELAY_TOPICS
                                         && !self.relay_topics.contains(&ctrl.topic)
@@ -1066,10 +1088,9 @@ impl Node {
                     // subscription map before dispatching protocol events;
                     // `TopicHash::to_string()` is the base64 hash, not the
                     // original `peers/v1/...` name.
-                    let topic_str = self
-                        .topics
-                        .iter()
-                        .find_map(|(name, topic)| (topic.hash() == message.topic).then(|| name.clone()));
+                    let topic_str = self.topics.iter().find_map(|(name, topic)| {
+                        (topic.hash() == message.topic).then(|| name.clone())
+                    });
                     let Some(topic_str) = topic_str else {
                         return;
                     };
@@ -1110,7 +1131,7 @@ impl Node {
                         });
                     }
                 }
-            },
+            }
             behaviour::Event::RequestResponse(rrev) => match *rrev {
                 RequestResponseEvent::Message { message, .. } => match message {
                     RequestResponseMessage::Request {

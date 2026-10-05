@@ -48,8 +48,14 @@ pub fn open(session: &mut Session, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>>
         if sealed.len() < ENVELOPE_V2_HEADER + 16 {
             return Err(PeersError::BadCipher);
         }
-        let session_nonce: [u8; 16] = sealed[3..19].try_into().map_err(|_| PeersError::BadCipher)?;
-        let seq = u64::from_be_bytes(sealed[19..27].try_into().map_err(|_| PeersError::BadCipher)?);
+        let session_nonce: [u8; 16] = sealed[3..19]
+            .try_into()
+            .map_err(|_| PeersError::BadCipher)?;
+        let seq = u64::from_be_bytes(
+            sealed[19..27]
+                .try_into()
+                .map_err(|_| PeersError::BadCipher)?,
+        );
         let key = session.incoming_key_at_with_nonce(seq, session_nonce)?;
         (seq, key, &sealed[ENVELOPE_V2_HEADER..], Some(session_nonce))
     } else {
@@ -63,10 +69,7 @@ pub fn open(session: &mut Session, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>>
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let nf = nonce_for(seq);
     let nonce = Nonce::from_slice(&nf);
-    let payload = Payload {
-        msg: body,
-        aad,
-    };
+    let payload = Payload { msg: body, aad };
     let pt = cipher
         .decrypt(nonce, payload)
         .map_err(|_| PeersError::BadCipher)?;
