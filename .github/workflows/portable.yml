@@ -1,0 +1,118 @@
+name: Portable builds
+
+# Windows and Linux binaries that need no installer and no system webview
+# engine, for testing and for people who cannot install anything.
+#
+# The difference from release.yml is the target: `nsis` and the Linux `deb`/
+# `rpm` bundles assume a machine that will accept an install and already has a
+# webview engine. A Windows exe built with the webview bootstrapper off still
+# needs the WebView2 *runtime*, which is preinstalled on Windows 11 and on most
+# Windows 10 machines since 2021; this cannot be bundled statically because
+# Microsoft ships it as a runtime updater, not as a redistributable library.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  push:
+    tags: ["v*"]
+
+jobs:
+  portable:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            artifact: peers-windows-x64
+          - platform: ubuntu-22.04
+            artifact: peers-linux-x64
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      # tauri_build.rs asserts frontendDist exists, and the frontend is not in
+      # this job's build path otherwise.
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      # WebView2Loader.dll normally comes from the WebView2 SDK. Tauri's build
+      # script emits a hard error without it, so it is published next to the
+      # binary rather than installed system-wide.
+      - name: Fetch WebView2Loader (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $url = 'https://nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2903.40'
+          Invoke-WebRequest -Uri $url -OutFile webview2.nupkg
+          Expand-Archive -Path webview2.nupkg -DestinationPath webview2 -Force
+          $dll = Get-ChildItem -Path webview2 -Filter 'WebView2Loader.dll' `
+            -Recurse | Where-Object { $_.FullName -match 'win-x64' } | Select-Object -First 1
+          if (-not $dll) { throw 'WebView2Loader.dll (win-x64) not found in package' }
+          Copy-Item $dll.FullName backend/WebView2Loader.dll
+          Write-Host "using $($dll.FullName)"
+
+      # `--no-bundle` builds the bare binary and skips every bundler, so no
+      # installer and no .deb/.rpm/AppImage is produced.
+      - name: Build portable binary
+        run: npx tauri build --config ../backend/tauri.conf.json --no-bundle
+        working-directory: frontend
+        env:
+          # Skips the WebView2 runtime download; we supply the loader DLL
+          # ourselves above.
+          WEBVIEW2_INSTALL_SKIP: "1"
+
+      - name: Collect Windows artifacts
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-portable | Out-Null
+          Copy-Item backend/target/release/peers.exe dist-portable/
+          Copy-Item backend/WebView2Loader.dll dist-portable/
+          Compress-Archive -Path dist-portable/* -DestinationPath peers-windows-x64.zip
+          Get-Item peers-windows-x64.zip
+
+      - name: Collect Linux artifacts
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          mkdir -p dist-portable
+          cp backend/target/release/peers dist-portable/
+          tar -czf peers-linux-x64.tar.gz -C dist-portable .
+          ls -la peers-linux-x64.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            peers-windows-x64.zip
+            peers-linux-x64.tar.gz
+          if-no-files-found: warn
