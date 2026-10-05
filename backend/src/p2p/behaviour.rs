@@ -56,6 +56,10 @@ pub enum Event {
     Gossipsub(gossipsub::Event),
     RequestResponse(Box<request_response::Event<Vec<u8>, Vec<u8>>>),
     RelayClient(relay::client::Event),
+    // Relay-server events are accepted so the `NetworkBehaviour` derive can
+    // poll the server, but nothing reads them: reservations made *for* us
+    // arrive as RelayClient events.
+    #[allow(dead_code)]
     RelayServer(relay::Event),
     Dcutr(dcutr::Event),
     Autonat(autonat::Event),

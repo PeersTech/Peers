@@ -343,12 +343,15 @@ impl SessionDir {
         self.open_verified(identity, aad, payload, card)
     }
 
-    /// Decrypts without the self-addressing check, for tests and for callers
-    /// that have already established the envelope is not our own echo.
+    /// Decrypts without the self-addressing check.
     ///
-    /// Note this does not make self-addressed envelopes decryptable: a session
-    /// with an identical peer key collapses the per-direction message key, so
-    /// this still fails with `BadCipher`. See [`SessionDir::open`].
+    /// Only the tests use this: the shape a per-device sync key will need, once
+    /// a delta is addressed to a *different* device key rather than our own.
+    ///
+    /// Note it does not make self-addressed envelopes decryptable: a session with
+    /// an identical peer key collapses the per-direction message key, so this
+    /// still fails with `BadCipher`. See [`SessionDir::open`].
+    #[cfg(test)]
     pub fn open_including_self(
         &mut self,
         identity: &Identity,

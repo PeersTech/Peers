@@ -1217,7 +1217,7 @@ async fn deliver_group_invite(
         let mut dir = state.dir.lock().unwrap();
         let dir = dir.as_mut().ok_or("not unlocked")?;
         let recipient = dir
-            .recipient_key(&peer_id)
+            .recipient_key(peer_id)
             .ok_or("no encryption key for this peer")?;
         let invite =
             serde_json::to_vec(&GroupInvite::new(descriptor)).map_err(|e| e.to_string())?;
@@ -2117,6 +2117,9 @@ async fn publish_channel_action(
     publish_server_message(&state, msg).await
 }
 
+// Tauri fills command arguments from the IPC payload by position, so these
+// signatures are fixed by the frontend contract, not by taste.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn publish_channel_attachment(
     state: State<'_, AppState>,
@@ -2167,6 +2170,7 @@ async fn publish_channel_attachment(
     publish_server_message(&state, msg).await
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn publish_channel_attachment_chunked(
     state: State<'_, AppState>,
@@ -3368,6 +3372,7 @@ async fn receive_attachment_chunk(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_group_attachment_chunk(
     state: &AppState,
     app: &AppHandle,
@@ -3696,7 +3701,7 @@ pub fn run() {
                     // travel as plaintext JSON on `peers/v1/srv/{id}`.
                     if let Some(server_id) = topic.strip_prefix("peers/v1/srv/") {
                         let server_id = server_id.to_string();
-                        if let Ok(list) = serde_json::from_slice::<SignedList>(&data) {
+                        if let Ok(list) = serde_json::from_slice::<SignedList>(data) {
                             let state = app_handle.state::<AppState>();
                             let (cards, profiles, view) = {
                                 let me = state.identity.lock().unwrap().clone();
@@ -3769,7 +3774,7 @@ pub fn run() {
                             if let Some(v) = view {
                                 let _ = app_handle.emit("server://list", v);
                             }
-                        } else if let Ok(notice) = serde_json::from_slice::<JoinNotice>(&data) {
+                        } else if let Ok(notice) = serde_json::from_slice::<JoinNotice>(data) {
                             if notice.kind != JoinNotice::KIND
                                 || notice.server_id != server_id
                                 || notice.peer_id != from
@@ -3811,7 +3816,7 @@ pub fn run() {
                             if is_owner {
                                 let _ = app_handle.emit("server://join-request", notice);
                             }
-                        } else if let Ok(pn) = serde_json::from_slice::<ProfileNotice>(&data) {
+                        } else if let Ok(pn) = serde_json::from_slice::<ProfileNotice>(data) {
                             let state = app_handle.state::<AppState>();
                             let valid_member = {
                                 let servers = state.servers.lock().unwrap();
@@ -3877,7 +3882,7 @@ pub fn run() {
                         .strip_prefix("peers/v1/ch/")
                         .and_then(|rest| rest.split_once('/'))
                     {
-                        if let Ok(msg) = serde_json::from_slice::<SignedMessage>(&data) {
+                        if let Ok(msg) = serde_json::from_slice::<SignedMessage>(data) {
                             if validate_text(&msg.text, MAX_TEXT_BYTES, "message").is_err()
                                 || validate_text(&msg.channel, MAX_CHANNEL_NAME_BYTES, "channel")
                                     .is_err()
@@ -3937,7 +3942,7 @@ pub fn run() {
                     }
                     // Global Plaza: self-signed chat + profile announcements.
                     if topic == PLAZA_TOPIC {
-                        if let Ok(msg) = serde_json::from_slice::<PlazaMessage>(&data) {
+                        if let Ok(msg) = serde_json::from_slice::<PlazaMessage>(data) {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs())
@@ -4039,7 +4044,7 @@ pub fn run() {
                     // authenticated gossipsub source. Otherwise a valid
                     // envelope could be replayed by another peer as if it
                     // came from that card's owner.
-                    match crate::crypto::card::card_from_envelope(&data)
+                    match crate::crypto::card::card_from_envelope(data)
                         .and_then(|card| card.verify_for_peer(&from).map(|_| card))
                     {
                         Ok(_) => {}
@@ -4061,7 +4066,7 @@ pub fn run() {
                         let mut guard = state.dir.lock().unwrap();
                         guard
                             .as_mut()
-                            .map(|dir| dir.open(&identity, topic.as_bytes(), &data))
+                            .map(|dir| dir.open(&identity, topic.as_bytes(), data))
                     };
                     let Some(result) = opened else { return };
                     match result {
@@ -4078,7 +4083,7 @@ pub fn run() {
                                             &identity,
                                             &topic,
                                             &from,
-                                            &data,
+                                            data,
                                             chunk,
                                         )
                                         .await;
@@ -4227,7 +4232,7 @@ pub fn run() {
                                             &topic,
                                             group_id,
                                             &from,
-                                            &data,
+                                            data,
                                             chunk,
                                         )
                                         .await;
@@ -4353,7 +4358,7 @@ pub fn run() {
                             // Cache the sender's identity card under their real
                             // peer id (open() internalizes it under a pseudo
                             // key) so a reply can be encrypted to them.
-                            if let Ok(card) = crate::crypto::card::card_from_envelope(&data) {
+                            if let Ok(card) = crate::crypto::card::card_from_envelope(data) {
                                 let mut dir = state.dir.lock().unwrap();
                                 if let Some(dir) = dir.as_mut() {
                                     dir.remember_contact(&from, &card);

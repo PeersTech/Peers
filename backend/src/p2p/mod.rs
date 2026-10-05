@@ -592,7 +592,7 @@ impl Node {
             }
         }
 
-        if self.ticks % REBOOTSTRAP_TICKS == 0 {
+        if self.ticks.is_multiple_of(REBOOTSTRAP_TICKS) {
             // Fails harmlessly when the routing table is empty, which is the
             // case we would most like it to succeed in — but there is nobody
             // to ask, so there is nothing to do about it.

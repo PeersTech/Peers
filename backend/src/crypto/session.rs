@@ -140,6 +140,11 @@ impl Session {
     }
 
     /// Key for the next outgoing message, then advances the counter.
+    ///
+    /// Unused by the envelope code, which goes through `cipher::seal` and
+    /// carries the per-envelope session nonce. Kept as the obvious counterpart
+    /// to `key_at` for anything that needs raw key access.
+    #[allow(dead_code)]
     pub fn next_key(&mut self) -> Result<[u8; 32]> {
         let key = self.outgoing_key_at(self.counter)?;
         self.counter += 1;
@@ -179,6 +184,10 @@ impl Session {
     }
 
     /// Key for an outgoing message at `n`.
+    ///
+    /// Reachable from `next_key`; the envelope path uses the nonce-carrying
+    /// variant instead.
+    #[allow(dead_code)]
     pub fn outgoing_key_at(&self, n: u64) -> Result<[u8; 32]> {
         let direction = if self.local_is_low {
             b"low-to-high"
@@ -215,6 +224,7 @@ impl Session {
 
     /// Backwards-compatible alias for the outgoing derivation used by older
     /// callers and tests.
+    #[allow(dead_code)]
     pub fn key_at(&self, n: u64) -> Result<[u8; 32]> {
         self.outgoing_key_at(n)
     }

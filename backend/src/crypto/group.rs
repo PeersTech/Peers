@@ -78,7 +78,7 @@ impl GroupDescriptor {
 
     pub fn revise(&self, identity: &Identity, mut members: Vec<GroupMember>) -> Result<Self> {
         if identity.peer_id.to_string() != self.owner_peer {
-            return Err(PeersError::Forbidden.into());
+            return Err(PeersError::Forbidden);
         }
         let owner_peer = self.owner_peer.clone();
         if !members.iter().any(|member| member.peer_id == owner_peer) {

@@ -105,6 +105,7 @@ impl BlobStore {
     }
 
     /// In-memory store for tests and callers that explicitly do not want disk.
+    #[allow(dead_code)]
     pub fn memory() -> Self {
         Self {
             inner: Arc::new(Mutex::new(MemCache::default())),

@@ -904,6 +904,7 @@ impl SignedMessage {
         Ok(msg)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sign_attachment(
         keypair: &Keypair,
         server_id: &str,
@@ -930,6 +931,7 @@ impl SignedMessage {
         Ok(msg)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sign_attachment_chunked(
         keypair: &Keypair,
         server_id: &str,
